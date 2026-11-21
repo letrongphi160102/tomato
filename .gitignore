@@ -1,0 +1,33 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# Next.js
+/.next/
+/out/
+/build/
+next-env.d.ts
+
+# Testing & coverage
+/coverage
+/.vitest
+
+# Environment secrets (tuyệt đối không commit secret thật)
+.env
+.env.*
+!.env.example
+
+# Debug & logs
+npm-debug.log*
+*.log
+
+# TypeScript
+*.tsbuildinfo
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea

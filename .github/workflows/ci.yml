@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-and-tests:
+    name: Lint, Typecheck, Tests & Build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tomato
+          POSTGRES_PASSWORD: tomato_ci_password
+          POSTGRES_DB: tomato_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tomato -d tomato_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      NODE_ENV: test
+      APP_URL: http://127.0.0.1:3000
+      ALLOWED_ORIGINS: http://127.0.0.1:3000
+      LOG_LEVEL: silent
+      DATABASE_URL: postgresql://tomato:tomato_ci_password@127.0.0.1:5432/tomato_test
+      DB_POOL_MAX: '5'
+      REDIS_PROVIDER: local
+      REDIS_URL: redis://127.0.0.1:6379
+      JWT_SECRET: ci-only-synthetic-jwt-secret-value-at-least-32-chars
+      OTP_SECRET: ci-only-synthetic-otp-secret-value-at-least-32-chars
+      CURRENT_PEPPER_VERSION: '1'
+      PASSWORD_PEPPER_SECRETS: '{"1":"ci-only-synthetic-pepper-secret-v1-at-least-32-chars"}'
+      EMAIL_PROVIDER: smtp
+      EMAIL_FROM: Tomato CI <no-reply@tomato.local>
+      SMTP_HOST: 127.0.0.1
+      SMTP_PORT: '1025'
+      SMTP_SECURE: 'false'
+      NEXT_PUBLIC_TURNSTILE_SITE_KEY: 1x00000000000000000000AA
+      TURNSTILE_SECRET_KEY: 1x0000000000000000000000000000000AA
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run unit & security tests
+        run: npm run test
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Build Next.js application
+        env:
+          NODE_ENV: production
+          APP_URL: https://ci.tomato.invalid
+          ALLOWED_ORIGINS: https://ci.tomato.invalid
+          SMTP_USER: ci-smtp-user
+          SMTP_PASS: ci-smtp-pass
+          NEXT_PUBLIC_TURNSTILE_SITE_KEY: ci-synthetic-site-key-non-dummy
+          TURNSTILE_SECRET_KEY: ci-synthetic-secret-key-non-dummy
+        run: npm run build
+
+  security-audit:
+    name: Dependency Audit & Secret Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout full history for secret scanning
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Audit npm dependencies (high+)
+        run: npm audit --audit-level=high
+
+      - name: Install & run Gitleaks CLI (MIT open-source)
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION="8.30.1"
+          ARCHIVE="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          CHECKSUMS="gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          BASE_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSL -o "${ARCHIVE}" "${BASE_URL}/${ARCHIVE}"
+          curl -fsSL -o "${CHECKSUMS}" "${BASE_URL}/${CHECKSUMS}"
+          grep " ${ARCHIVE}$" "${CHECKSUMS}" | sha256sum -c -
+          tar -xzf "${ARCHIVE}" gitleaks
+          ./gitleaks detect --source . --redact --verbose --exit-code 1

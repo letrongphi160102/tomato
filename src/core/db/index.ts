@@ -1,0 +1,81 @@
+import 'server-only';
+
+import { Pool } from 'pg';
+
+import { getEnv } from '@/core/config/env';
+import { logger } from '@/core/logger';
+
+const globalForDb = globalThis as typeof globalThis & {
+  __tomatoPgPool?: Pool;
+};
+
+function createDatabasePool(): Pool {
+  const env = getEnv();
+
+  const pool = new Pool({
+    connectionString: env.DATABASE_URL,
+    max: env.DB_POOL_MAX,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 3_000,
+    // Giới hạn thời gian chạy câu lệnh để tránh treo kết nối trên môi trường Serverless.
+    statement_timeout: 5_000,
+  });
+
+  pool.on('error', (error: Error & { code?: string }) => {
+    logger.error(
+      {
+        component: 'database',
+        errorCode: error.code ?? 'UNKNOWN',
+        errorName: error.name,
+      },
+      'Lỗi nền trên PostgreSQL connection pool',
+    );
+  });
+
+  return pool;
+}
+
+export function getDatabasePool(): Pool {
+  if (!globalForDb.__tomatoPgPool) {
+    globalForDb.__tomatoPgPool = createDatabasePool();
+  }
+  return globalForDb.__tomatoPgPool;
+}
+
+export async function checkDatabaseHealth(timeoutMs = 2_000): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    const pool = getDatabasePool();
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('DATABASE_HEALTHCHECK_TIMEOUT')), timeoutMs);
+    });
+
+    await Promise.race([pool.query('SELECT 1'), timeoutPromise]);
+    return true;
+  } catch (error) {
+    const err = error as Error & { code?: string };
+    // Không log connection string hoặc thông số nhạy cảm; chỉ log mã lỗi chuẩn đoán.
+    logger.error(
+      {
+        component: 'database',
+        errorCode: err.code ?? 'HEALTHCHECK_FAILED',
+        errorName: err.name ?? 'Error',
+      },
+      'Kiểm tra kết nối PostgreSQL thất bại',
+    );
+    return false;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+export async function closeDatabasePool(): Promise<void> {
+  if (globalForDb.__tomatoPgPool) {
+    const pool = globalForDb.__tomatoPgPool;
+    globalForDb.__tomatoPgPool = undefined;
+    await pool.end();
+  }
+}

@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tomato-postgres
+    restart: unless-stopped
+    # Chỉ bind về loopback để không mở DB phát triển ra mạng LAN.
+    # Mặc định map sang 5433 để tránh xung đột với PostgreSQL cài sẵn (cổng 5432) trên máy dev.
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-5433}:5432'
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tomato}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tomato_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-tomato_dev}
+    volumes:
+      - tomato_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER:-tomato} -d $${POSTGRES_DB:-tomato_dev}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: tomato-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - tomato_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:v1.33.1
+    container_name: tomato-mailpit
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:1025:1025'
+      - '127.0.0.1:8025:8025'
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  tomato_pg_data:
+  tomato_redis_data:
