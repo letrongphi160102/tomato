@@ -31,6 +31,8 @@ describe('AuditLogService & Metadata Sanitization', () => {
         pepperSecret: 'pepper-v1-secret',
         leakedBearerInSafeKey: 'Bearer synthetic-bearer-token-value',
         leakedJwtInSafeKey: syntheticJwt,
+        leakedArgon2InSafeKey: '$argon2id$v=19$m=19456,t=2,p=1$salt$digest',
+        leakedSessionValInSafeKey: '__Host-tomato_rt=synthetic-leaked-value',
       },
     });
 
@@ -41,6 +43,8 @@ describe('AuditLogService & Metadata Sanitization', () => {
         device: 'Chrome / Windows',
         leakedBearerInSafeKey: '[REDACTED]',
         leakedJwtInSafeKey: '[REDACTED]',
+        leakedArgon2InSafeKey: '[REDACTED]',
+        leakedSessionValInSafeKey: '[REDACTED]',
       },
     });
   });

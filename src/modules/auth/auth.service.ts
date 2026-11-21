@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { randomInt } from 'node:crypto';
+
 import { getCaptchaProvider, type CaptchaProvider } from '@/core/captcha';
 import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
 import { generateOtpCode, hashOtpCode, verifyOtpCode } from '@/core/crypto/otp';
@@ -11,6 +13,7 @@ import {
   type PepperSecretProvider,
 } from '@/core/crypto/password';
 import { isPostgresUniqueViolation } from '@/core/db';
+import type { UserRow, UserStatus } from '@/core/db/schema';
 import {
   EmailDeliveryError,
   buildVerificationOtpEmail,
@@ -33,6 +36,7 @@ import {
 import {
   SessionService,
   toPublicUserProfile,
+  type CreatedSessionResult,
   type IssuedSessionTokens,
   type PublicUserProfile,
 } from '@/modules/auth/session.service';
@@ -43,6 +47,10 @@ export const EMAIL_VERIFY_OTP_MAX_ATTEMPTS = 5;
 export const RESEND_COOLDOWN_SECONDS = AUTH_RATE_LIMITS.resendVerificationCooldown.windowSeconds;
 // Sau 24 giờ không xác minh, tài khoản pending_verification được phép đăng ký đè theo Mục 4.1.
 export const PENDING_VERIFICATION_EXPIRY_MS = 24 * 60 * 60 * 1000;
+// Sàn thời gian tối thiểu + jitter cho `/resend-verification` nhằm triệt tiêu timing oracle
+// giữa email không tồn tại (~5ms) và email đang `pending_verification` (gửi SMTP).
+export const DEFAULT_MIN_RESEND_RESPONSE_MS = 250;
+const RESEND_TIMING_JITTER_MS = 75;
 
 export interface RegisterResult {
   readonly message: string;
@@ -75,6 +83,8 @@ export interface AuthServiceDependencies {
   readonly pepperProvider?: PepperSecretProvider;
   readonly appUrl?: string;
   readonly now?: () => Date;
+  /** Sàn thời gian tối thiểu (ms) cho `/resend-verification` (mặc định 250ms ở prod/dev, 0ms ở test). */
+  readonly minResendResponseMs?: number;
 }
 
 type VerifyOtpTransactionOutcome =
@@ -83,6 +93,10 @@ type VerifyOtpTransactionOutcome =
   | { readonly kind: 'expired' }
   | { readonly kind: 'max_attempts' }
   | { readonly kind: 'wrong_code'; readonly remainingAttempts: number };
+
+type LoginTransactionOutcome =
+  | { readonly kind: 'created'; readonly created: CreatedSessionResult; readonly user: UserRow }
+  | { readonly kind: 'status_changed'; readonly status: UserStatus };
 
 /**
  * Tầng nghiệp vụ Auth cốt lõi (tách biệt hoàn toàn khỏi Next.js HTTP/cookies).
@@ -96,6 +110,7 @@ export class AuthService {
   private readonly auditLogService: AuditLogService;
   private readonly pepperProvider: PepperSecretProvider;
   private readonly now: () => Date;
+  private readonly minResendResponseMs: number;
 
   constructor(deps: AuthServiceDependencies = {}) {
     this.repository = deps.repository ?? new AuthRepository();
@@ -105,6 +120,9 @@ export class AuthService {
     this.auditLogService = deps.auditLogService ?? getAuditLogService();
     this.pepperProvider = deps.pepperProvider ?? new EnvPepperSecretProvider();
     this.now = deps.now ?? (() => new Date());
+    this.minResendResponseMs =
+      deps.minResendResponseMs ??
+      (process.env.NODE_ENV === 'test' ? 0 : DEFAULT_MIN_RESEND_RESPONSE_MS);
     this.sessionService =
       deps.sessionService ??
       new SessionService({
@@ -288,9 +306,16 @@ export class AuthService {
 
     // Quan trọng: trả về kết quả phân nhánh thay vì throw bên trong transaction,
     // để việc tăng `attempt_count` hoặc đặt `consumed_at` khi nhập sai KHÔNG bị PostgreSQL ROLLBACK.
+    // Luôn khóa `users FOR UPDATE` TRƯỚC khi khóa `verification_tokens` để đảm bảo thứ tự khóa
+    // nhất quán (chống deadlock và chống race condition khi có resend OTP chạy song song).
     const outcome = await this.repository
       .getDb()
       .transaction<VerifyOtpTransactionOutcome>(async (tx) => {
+        const lockedUser = await this.repository.lockUserById(existing.user.id, tx, 'update');
+        if (!lockedUser || lockedUser.status !== 'pending_verification') {
+          return { kind: 'invalid' };
+        }
+
         const token = await this.repository.lockLatestUnconsumedEmailVerifyToken(
           existing.user.id,
           tx,
@@ -301,12 +326,22 @@ export class AuthService {
         }
 
         if (token.expiresAt.getTime() <= currentTime.getTime()) {
-          await this.repository.consumeVerificationToken(token.id, currentTime, tx);
+          await this.repository.consumeVerificationToken(
+            token.id,
+            existing.user.id,
+            currentTime,
+            tx,
+          );
           return { kind: 'expired' };
         }
 
         if (token.attemptCount >= EMAIL_VERIFY_OTP_MAX_ATTEMPTS) {
-          await this.repository.consumeVerificationToken(token.id, currentTime, tx);
+          await this.repository.consumeVerificationToken(
+            token.id,
+            existing.user.id,
+            currentTime,
+            tx,
+          );
           return { kind: 'max_attempts' };
         }
 
@@ -320,6 +355,7 @@ export class AuthService {
           const exhausted = nextAttempts >= EMAIL_VERIFY_OTP_MAX_ATTEMPTS;
           await this.repository.updateVerificationTokenAttempt(
             token.id,
+            existing.user.id,
             nextAttempts,
             exhausted ? currentTime : null,
             tx,
@@ -468,6 +504,7 @@ export class AuthService {
       });
     }
 
+    const startedAtMs = Date.now();
     const existing = await this.repository.findEmailIdentityWithUser(email);
     if (existing && existing.user.status === 'pending_verification') {
       const currentTime = this.now();
@@ -478,7 +515,14 @@ export class AuthService {
       });
       const otpExpiresAt = new Date(currentTime.getTime() + EMAIL_VERIFY_OTP_TTL_MS);
 
-      await this.repository.getDb().transaction(async (tx) => {
+      // Khóa `users FOR UPDATE` trong transaction để đảm bảo tại mọi thời điểm chỉ có duy nhất
+      // 1 OTP chưa tiêu thụ (chống race condition khi gửi lại đồng thời) và không cấp OTP cho user đã active.
+      const reissued = await this.repository.getDb().transaction(async (tx) => {
+        const lockedUser = await this.repository.lockUserById(existing.user.id, tx, 'update');
+        if (!lockedUser || lockedUser.status !== 'pending_verification') {
+          return false;
+        }
+
         await this.repository.reissueEmailVerifyToken(
           {
             userId: existing.user.id,
@@ -488,10 +532,25 @@ export class AuthService {
           },
           tx,
         );
+        return true;
       });
 
-      await this.sendVerificationOtpEmail(email, existing.user.displayName, otpCode);
+      if (reissued) {
+        try {
+          await this.sendVerificationOtpEmail(email, existing.user.displayName, otpCode);
+        } catch (error) {
+          // Lỗi SMTP đã được SmtpEmailAdapter ghi log an toàn (không chứa OTP).
+          // Không ném 503 ra ngoài ở `/resend-verification` để tránh kẻ tấn công lợi dụng sự cố SMTP
+          // làm kênh phân biệt email đang `pending_verification` với email không tồn tại.
+          if (!(error instanceof AuthDomainError && error.status === 503)) {
+            throw error;
+          }
+        }
+      }
     }
+
+    // Cân bằng sàn thời gian phản hồi + jitter CSPRNG chống timing oracle trên `/resend-verification`.
+    await this.equalizeResponseDuration(startedAtMs, this.minResendResponseMs);
 
     return {
       message: AUTH_MESSAGES.resendAccepted,
@@ -586,77 +645,9 @@ export class AuthService {
     }
 
     // 5. Chỉ tiết lộ trạng thái tài khoản sau khi người gọi đã chứng minh biết đúng mật khẩu.
-    switch (existing.user.status) {
-      case 'deleted':
-        await this.auditLogService.record({
-          userId: existing.user.id,
-          action: 'LOGIN_FAILED',
-          ipAddress: context.ipAddress,
-          userAgent: context.userAgent,
-          metadata: {
-            provider: 'email_password',
-            reason: 'account_deleted',
-          },
-        });
-        throw new AuthDomainError({
-          status: 401,
-          code: 'INVALID_CREDENTIALS',
-          message: AUTH_MESSAGES.invalidCredentials,
-        });
-
-      case 'pending_verification':
-        await this.auditLogService.record({
-          userId: existing.user.id,
-          action: 'LOGIN_FAILED',
-          ipAddress: context.ipAddress,
-          userAgent: context.userAgent,
-          metadata: {
-            provider: 'email_password',
-            reason: 'pending_verification',
-          },
-        });
-        throw new AuthDomainError({
-          status: 403,
-          code: 'EMAIL_NOT_VERIFIED',
-          message: AUTH_MESSAGES.emailNotVerified,
-        });
-
-      case 'locked':
-        await this.auditLogService.record({
-          userId: existing.user.id,
-          action: 'LOGIN_FAILED',
-          ipAddress: context.ipAddress,
-          userAgent: context.userAgent,
-          metadata: {
-            provider: 'email_password',
-            reason: 'account_locked',
-          },
-        });
-        throw new AuthDomainError({
-          status: 403,
-          code: 'ACCOUNT_LOCKED',
-          message: AUTH_MESSAGES.accountLocked,
-        });
-
-      case 'suspended':
-        await this.auditLogService.record({
-          userId: existing.user.id,
-          action: 'LOGIN_FAILED',
-          ipAddress: context.ipAddress,
-          userAgent: context.userAgent,
-          metadata: {
-            provider: 'email_password',
-            reason: 'account_suspended',
-          },
-        });
-        throw new AuthDomainError({
-          status: 403,
-          code: 'ACCOUNT_SUSPENDED',
-          message: AUTH_MESSAGES.accountSuspended,
-        });
-
-      case 'active':
-        break;
+    if (existing.user.status !== 'active') {
+      await this.recordFailedLoginForStatus(existing.user.id, existing.user.status, context);
+      this.throwForNonActiveLoginStatus(existing.user.status);
     }
 
     // 6. Nếu Pepper version hoặc tham số Argon2id đã cũ -> tính toán bản băm mới ngoài DB transaction.
@@ -666,48 +657,76 @@ export class AuthService {
 
     const currentTime = this.now();
 
-    const createdSession = await this.repository.getDb().transaction(async (tx) => {
-      if (rehashed) {
-        await this.repository.updateIdentityPasswordHash(
+    const loginOutcome = await this.repository
+      .getDb()
+      .transaction<LoginTransactionOutcome>(async (tx) => {
+        // Khóa `users FOR SHARE` và xác minh lại trạng thái `active` bên trong transaction
+        // nhằm chặn TOCTOU nếu tài khoản vừa bị khóa/đình chỉ/xóa trong lúc chạy Argon2id (~100-250ms).
+        const freshUser = await this.repository.lockUserById(existing.user.id, tx, 'share');
+        if (!freshUser) {
+          await this.recordFailedLoginForStatus(existing.user.id, 'deleted', context, tx);
+          return { kind: 'status_changed', status: 'deleted' };
+        }
+        if (freshUser.status !== 'active') {
+          await this.recordFailedLoginForStatus(existing.user.id, freshUser.status, context, tx);
+          return { kind: 'status_changed', status: freshUser.status };
+        }
+
+        let rehashApplied = false;
+        if (rehashed) {
+          // Compare-And-Swap theo `password_hash` hiện tại + `user_id` để không bao giờ ghi đè ngược
+          // mật khẩu mới nếu người dùng vừa đổi mật khẩu song song trong lúc Argon2id đang tính toán.
+          rehashApplied = await this.repository.updateIdentityPasswordHash(
+            {
+              identityId: existing.identity.id,
+              userId: existing.user.id,
+              passwordHash: rehashed.hash,
+              pepperVersion: rehashed.pepperVersion,
+              expectedCurrentPasswordHash: existing.identity.passwordHash ?? undefined,
+              now: currentTime,
+            },
+            tx,
+          );
+        }
+
+        if (existing.identity.failedLoginAttempts > 0) {
+          await this.repository.resetFailedLoginAttempts(
+            existing.identity.id,
+            existing.user.id,
+            currentTime,
+            tx,
+          );
+        }
+
+        const issued = await this.sessionService.createSessionForUser(freshUser, context, tx);
+
+        await this.auditLogService.record(
           {
-            identityId: existing.identity.id,
-            passwordHash: rehashed.hash,
-            pepperVersion: rehashed.pepperVersion,
-            now: currentTime,
+            userId: freshUser.id,
+            action: 'LOGIN_SUCCESS',
+            ipAddress: context.ipAddress,
+            userAgent: context.userAgent,
+            metadata: {
+              provider: 'email_password',
+              sessionPublicId: issued.session.publicId,
+              deviceInfo: issued.session.deviceInfo,
+              authUpgradePerformed: rehashApplied,
+            },
           },
           tx,
         );
-      }
 
-      if (existing.identity.failedLoginAttempts > 0) {
-        await this.repository.resetFailedLoginAttempts(existing.identity.id, currentTime, tx);
-      }
+        return { kind: 'created', created: issued, user: freshUser };
+      });
 
-      const issued = await this.sessionService.createSessionForUser(existing.user, context, tx);
-
-      await this.auditLogService.record(
-        {
-          userId: existing.user.id,
-          action: 'LOGIN_SUCCESS',
-          ipAddress: context.ipAddress,
-          userAgent: context.userAgent,
-          metadata: {
-            provider: 'email_password',
-            sessionPublicId: issued.session.publicId,
-            deviceInfo: issued.session.deviceInfo,
-            passwordRehashed: Boolean(rehashed),
-          },
-        },
-        tx,
-      );
-
-      return issued;
-    });
+    if (loginOutcome.kind === 'status_changed') {
+      this.throwForNonActiveLoginStatus(loginOutcome.status);
+    }
 
     return {
-      user: toPublicUserProfile(existing.user),
+      user: toPublicUserProfile(loginOutcome.user),
       message: AUTH_MESSAGES.loginSuccess,
-      tokens: createdSession.tokens,
+      tokens: loginOutcome.created.tokens,
     };
   }
 
@@ -737,9 +756,10 @@ export class AuthService {
           purpose: 'email_verify',
         });
         const otpExpiresAt = new Date(currentTime.getTime() + EMAIL_VERIFY_OTP_TTL_MS);
+        const expiryCutoff = new Date(currentTime.getTime() - PENDING_VERIFICATION_EXPIRY_MS);
 
-        await this.repository.getDb().transaction(async (tx) => {
-          await this.repository.overwriteExpiredPendingUserWithOtp(
+        const overwriteOutcome = await this.repository.getDb().transaction(async (tx) => {
+          const outcome = await this.repository.overwriteExpiredPendingUserWithOtp(
             {
               userId: existing.user.id,
               identityId: existing.identity.id,
@@ -749,31 +769,58 @@ export class AuthService {
               pepperVersion,
               otpTokenHash,
               otpExpiresAt,
+              expiryCutoff,
               now: currentTime,
             },
             tx,
           );
 
-          await this.auditLogService.record(
-            {
-              userId: existing.user.id,
-              action: 'REGISTER',
-              ipAddress: context.ipAddress,
-              userAgent: context.userAgent,
-              metadata: {
-                provider: 'email_password',
-                outcome: 'pending_expired_overwritten',
+          if (outcome === 'overwritten') {
+            await this.auditLogService.record(
+              {
+                userId: existing.user.id,
+                action: 'REGISTER',
+                ipAddress: context.ipAddress,
+                userAgent: context.userAgent,
+                metadata: {
+                  provider: 'email_password',
+                  outcome: 'pending_expired_overwritten',
+                },
               },
-            },
-            tx,
-          );
+              tx,
+            );
+          }
+
+          return outcome;
         });
 
-        await this.rateLimiter.consume(
-          `resend:cooldown:${input.email}`,
-          AUTH_RATE_LIMITS.resendVerificationCooldown,
-        );
-        await this.sendVerificationOtpEmail(input.email, input.displayName, otpCode);
+        if (overwriteOutcome === 'not_pending') {
+          await this.auditLogService.record({
+            userId: existing.user.id,
+            action: 'REGISTER',
+            ipAddress: context.ipAddress,
+            userAgent: context.userAgent,
+            metadata: {
+              provider: 'email_password',
+              outcome: 'duplicate_existing_account',
+            },
+          });
+
+          throw new AuthDomainError({
+            status: 409,
+            code: 'CONFLICT',
+            message: AUTH_MESSAGES.emailAlreadyExists,
+            details: [{ field: 'email', message: AUTH_MESSAGES.emailAlreadyExists }],
+          });
+        }
+
+        if (overwriteOutcome === 'overwritten') {
+          await this.rateLimiter.consume(
+            `resend:cooldown:${input.email}`,
+            AUTH_RATE_LIMITS.resendVerificationCooldown,
+          );
+          await this.sendVerificationOtpEmail(input.email, input.displayName, otpCode);
+        }
         return;
       }
 
@@ -785,6 +832,9 @@ export class AuthService {
       );
 
       if (!cooldown.allowed) {
+        // Chạy 1 lượt Argon2id giả để cân bằng thời gian phản hồi 202 với luồng tạo tài khoản mới
+        // (Rate Limit IP + Turnstile đã xác thực ở bước trên).
+        await verifyDummyPassword();
         await this.auditLogService.record({
           userId: existing.user.id,
           action: 'REGISTER',
@@ -805,7 +855,12 @@ export class AuthService {
       });
       const otpExpiresAt = new Date(currentTime.getTime() + EMAIL_VERIFY_OTP_TTL_MS);
 
-      await this.repository.getDb().transaction(async (tx) => {
+      const reissueOutcome = await this.repository.getDb().transaction(async (tx) => {
+        const lockedUser = await this.repository.lockUserById(existing.user.id, tx, 'update');
+        if (!lockedUser || lockedUser.status !== 'pending_verification') {
+          return 'not_pending' as const;
+        }
+
         await this.repository.reissueEmailVerifyToken(
           {
             userId: existing.user.id,
@@ -829,8 +884,31 @@ export class AuthService {
           },
           tx,
         );
+
+        return 'reissued' as const;
       });
 
+      if (reissueOutcome === 'not_pending') {
+        await this.auditLogService.record({
+          userId: existing.user.id,
+          action: 'REGISTER',
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: {
+            provider: 'email_password',
+            outcome: 'duplicate_existing_account',
+          },
+        });
+
+        throw new AuthDomainError({
+          status: 409,
+          code: 'CONFLICT',
+          message: AUTH_MESSAGES.emailAlreadyExists,
+          details: [{ field: 'email', message: AUTH_MESSAGES.emailAlreadyExists }],
+        });
+      }
+
+      await verifyDummyPassword();
       await this.sendVerificationOtpEmail(input.email, existing.user.displayName, otpCode);
       return;
     }
@@ -879,6 +957,81 @@ export class AuthService {
         code: 'CONFLICT',
         message: AUTH_MESSAGES.emailAlreadyExists,
         details: [{ field: 'email', message: AUTH_MESSAGES.emailAlreadyExists }],
+      });
+    }
+  }
+
+  private async recordFailedLoginForStatus(
+    userId: string,
+    status: Exclude<UserStatus, 'active'>,
+    context: RequestClientContext,
+    tx?: Parameters<AuditLogService['record']>[1],
+  ): Promise<void> {
+    const reasonByStatus: Record<Exclude<UserStatus, 'active'>, string> = {
+      deleted: 'account_deleted',
+      pending_verification: 'pending_verification',
+      locked: 'account_locked',
+      suspended: 'account_suspended',
+    };
+
+    await this.auditLogService.record(
+      {
+        userId,
+        action: 'LOGIN_FAILED',
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        metadata: {
+          provider: 'email_password',
+          reason: reasonByStatus[status],
+        },
+      },
+      tx,
+    );
+  }
+
+  private throwForNonActiveLoginStatus(status: UserStatus): never {
+    switch (status) {
+      case 'pending_verification':
+        throw new AuthDomainError({
+          status: 403,
+          code: 'EMAIL_NOT_VERIFIED',
+          message: AUTH_MESSAGES.emailNotVerified,
+        });
+      case 'locked':
+        throw new AuthDomainError({
+          status: 403,
+          code: 'ACCOUNT_LOCKED',
+          message: AUTH_MESSAGES.accountLocked,
+        });
+      case 'suspended':
+        throw new AuthDomainError({
+          status: 403,
+          code: 'ACCOUNT_SUSPENDED',
+          message: AUTH_MESSAGES.accountSuspended,
+        });
+      case 'deleted':
+      case 'active':
+      default:
+        throw new AuthDomainError({
+          status: 401,
+          code: 'INVALID_CREDENTIALS',
+          message: AUTH_MESSAGES.invalidCredentials,
+        });
+    }
+  }
+
+  private async equalizeResponseDuration(
+    startedAtMs: number,
+    minDurationMs: number,
+  ): Promise<void> {
+    if (minDurationMs <= 0) {
+      return;
+    }
+    const targetDurationMs = minDurationMs + randomInt(0, RESEND_TIMING_JITTER_MS + 1);
+    const remainingMs = targetDurationMs - (Date.now() - startedAtMs);
+    if (remainingMs > 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, remainingMs);
       });
     }
   }

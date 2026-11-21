@@ -1,10 +1,19 @@
+import { decodeJwt } from 'jose';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { POST as loginPost } from '@/app/api/v1/auth/login/route';
-import { POST as logoutPost } from '@/app/api/v1/auth/logout/route';
-import { POST as refreshPost } from '@/app/api/v1/auth/refresh/route';
-import { DELETE as deleteSession } from '@/app/api/v1/auth/sessions/[sessionPublicId]/route';
-import { POST as revokeAllPost } from '@/app/api/v1/auth/sessions/revoke-all/route';
+import { POST as loginPost, runtime as loginRuntime } from '@/app/api/v1/auth/login/route';
+import { POST as logoutPost, runtime as logoutRuntime } from '@/app/api/v1/auth/logout/route';
+import { GET as meGet, runtime as meRuntime } from '@/app/api/v1/auth/me/route';
+import { POST as refreshPost, runtime as refreshRuntime } from '@/app/api/v1/auth/refresh/route';
+import {
+  DELETE as deleteSession,
+  runtime as deleteSessionRuntime,
+} from '@/app/api/v1/auth/sessions/[sessionPublicId]/route';
+import {
+  POST as revokeAllPost,
+  runtime as revokeAllRuntime,
+} from '@/app/api/v1/auth/sessions/revoke-all/route';
+import { GET as sessionsGet, runtime as sessionsRuntime } from '@/app/api/v1/auth/sessions/route';
 import { getEnv, resetEnvCacheForTesting } from '@/core/config/env';
 import { signAccessToken } from '@/core/crypto/jwt';
 import { hashPassword } from '@/core/crypto/password';
@@ -427,6 +436,7 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
 
     expect(mockRevokeFamily).toHaveBeenCalledWith(
       'family-compromised-1',
+      rotatedRow.userId,
       expect.any(Date),
       'token_reuse',
       fakeTx,
@@ -482,5 +492,221 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
     expect(res.headers.get('Retry-After')).toBe('90');
     expect(res.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
     expect(mockFindIdentity).not.toHaveBeenCalled();
+  });
+
+  it('Audit Q1 & Q4: Toàn bộ Auth routes khai báo runtime="nodejs" và KHÔNG bao giờ lộ users.id / sessions.id (UUIDv7) ra JSON, Cookie hay JWT', async () => {
+    expect(loginRuntime).toBe('nodejs');
+    expect(logoutRuntime).toBe('nodejs');
+    expect(meRuntime).toBe('nodejs');
+    expect(refreshRuntime).toBe('nodejs');
+    expect(sessionsRuntime).toBe('nodejs');
+    expect(deleteSessionRuntime).toBe('nodejs');
+    expect(revokeAllRuntime).toBe('nodejs');
+
+    const internalUserId = '01950000-0000-7000-8000-000000000777';
+    const internalSessionId = '01950000-0000-7000-8000-000000000888';
+    const publicUserId = 'f29e0411-4090-4a1c-a40a-3a951a9cf777';
+    const publicSessionId = 'e71a2b3c-4d5e-4f60-9a1b-2c3d4e5f6888';
+    const validPassword = 'Cụm mật khẩu kiểm thử không lộ UUIDv7 2026!';
+    const hashed = await hashPassword(validPassword);
+
+    const userRow: UserRow = {
+      id: internalUserId,
+      publicId: publicUserId,
+      displayName: 'Audit User',
+      dateOfBirth: '1999-01-01',
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+    };
+
+    const sessionRow: SessionRow = {
+      id: internalSessionId,
+      publicId: publicSessionId,
+      userId: internalUserId,
+      familyId: 'c1234567-89ab-4cde-9012-3456789abcde',
+      refreshTokenHash: 'f'.repeat(64),
+      deviceInfo: 'Chrome 130 / Windows 10/11',
+      ipAddress: '198.51.100.99',
+      lastUsedAt: new Date(),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      revokedAt: null,
+      revokeReason: null,
+      createdAt: new Date(),
+    };
+
+    const fakeTx = {};
+    const repository = {
+      getDb: () => ({
+        transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn(fakeTx),
+      }),
+      findEmailIdentityWithUser: vi.fn().mockResolvedValue({
+        user: userRow,
+        identity: {
+          id: '01950000-0000-7000-8000-000000000778',
+          userId: internalUserId,
+          provider: 'email_password' as const,
+          identifierNormalized: 'audit-uuid@tomato.test',
+          passwordHash: hashed.hash,
+          pepperVersion: hashed.pepperVersion,
+          verifiedAt: new Date(),
+          failedLoginAttempts: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }),
+      lockUserById: vi.fn().mockResolvedValue(userRow),
+      createSession: vi.fn().mockResolvedValue(sessionRow),
+      findSessionWithUserByPublicId: vi
+        .fn()
+        .mockResolvedValue({ session: sessionRow, user: userRow }),
+      listActiveSessionsByUserId: vi.fn().mockResolvedValue([sessionRow]),
+    } as unknown as AuthRepository;
+
+    const sessionService = new SessionService({
+      repository,
+      rateLimiter: makeAllowRateLimiter(),
+      auditLogService: {
+        record: vi.fn().mockResolvedValue({ id: 'a1' }),
+      } as unknown as AuditLogService,
+    });
+    const authService = new AuthService({
+      repository,
+      sessionService,
+      rateLimiter: makeAllowRateLimiter(),
+      auditLogService: {
+        record: vi.fn().mockResolvedValue({ id: 'a2' }),
+      } as unknown as AuditLogService,
+    });
+
+    setSessionServiceForTesting(sessionService);
+    setAuthServiceForTesting(authService);
+
+    const loginRes = await loginPost(
+      new Request(`${allowedOrigin}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: allowedOrigin,
+          'Sec-Fetch-Site': 'same-origin',
+        },
+        body: JSON.stringify({
+          email: 'audit-uuid@tomato.test',
+          password: validPassword,
+        }),
+      }),
+    );
+
+    expect(loginRes.status).toBe(200);
+    const loginText = await loginRes.text();
+    expect(loginText).not.toContain(internalUserId);
+    expect(loginText).not.toContain(internalSessionId);
+
+    const atCookie = loginRes.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith('tomato_at='));
+    expect(atCookie).toBeDefined();
+    const rawJwt = atCookie!.split(';')[0]!.split('=')[1]!;
+    const claims = decodeJwt(rawJwt);
+    expect(claims.sub).toBe(publicUserId);
+    expect(claims.sid).toBe(publicSessionId);
+    expect(JSON.stringify(claims)).not.toContain(internalUserId);
+    expect(JSON.stringify(claims)).not.toContain(internalSessionId);
+
+    const meRes = await meGet(
+      new Request(`${allowedOrigin}/api/v1/auth/me`, {
+        method: 'GET',
+        headers: { cookie: `tomato_at=${rawJwt}` },
+      }),
+    );
+    expect(meRes.status).toBe(200);
+    const meText = await meRes.text();
+    expect(meText).not.toContain(internalUserId);
+    expect(meText).not.toContain(internalSessionId);
+
+    const sessionsRes = await sessionsGet(
+      new Request(`${allowedOrigin}/api/v1/auth/sessions`, {
+        method: 'GET',
+        headers: { cookie: `tomato_at=${rawJwt}` },
+      }),
+    );
+    expect(sessionsRes.status).toBe(200);
+    const sessionsText = await sessionsRes.text();
+    expect(sessionsText).not.toContain(internalUserId);
+    expect(sessionsText).not.toContain(internalSessionId);
+  });
+
+  it('Audit Q3 (TOCTOU Login): Nếu tài khoản bị chuyển sang suspended trong lúc Argon2id đang chạy -> không tạo phiên và trả 403 ACCOUNT_SUSPENDED', async () => {
+    const validPassword = 'Cụm mật khẩu kiểm thử TOCTOU login 2026!';
+    const hashed = await hashPassword(validPassword);
+
+    const activeUserSnapshot: UserRow = {
+      id: '01950000-0000-7000-8000-000000000801',
+      publicId: 'e1a5a057-0f04-47b2-95f4-0d6464279801',
+      displayName: 'User Suspended Mid-Flight',
+      dateOfBirth: '1998-01-01',
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+    };
+
+    const createSessionSpy = vi.fn();
+    const fakeTx = {};
+    const repository = {
+      getDb: () => ({
+        transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn(fakeTx),
+      }),
+      findEmailIdentityWithUser: vi.fn().mockResolvedValue({
+        user: activeUserSnapshot,
+        identity: {
+          id: '01950000-0000-7000-8000-000000000802',
+          userId: activeUserSnapshot.id,
+          provider: 'email_password' as const,
+          identifierNormalized: 'midflight@tomato.test',
+          passwordHash: hashed.hash,
+          pepperVersion: hashed.pepperVersion,
+          verifiedAt: new Date(),
+          failedLoginAttempts: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }),
+      // Trong transaction, đọc lại dòng user thấy đã chuyển sang `suspended`.
+      lockUserById: vi.fn().mockResolvedValue({ ...activeUserSnapshot, status: 'suspended' }),
+      createSession: createSessionSpy,
+    } as unknown as AuthRepository;
+
+    setAuthServiceForTesting(
+      new AuthService({
+        repository,
+        rateLimiter: makeAllowRateLimiter(),
+        auditLogService: {
+          record: vi.fn().mockResolvedValue({ id: 'a3' }),
+        } as unknown as AuditLogService,
+      }),
+    );
+
+    const res = await loginPost(
+      new Request(`${allowedOrigin}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: allowedOrigin,
+          'Sec-Fetch-Site': 'same-origin',
+        },
+        body: JSON.stringify({
+          email: 'midflight@tomato.test',
+          password: validPassword,
+        }),
+      }),
+    );
+
+    expect(res.status).toBe(403);
+    const json = (await res.json()) as { error: { code: string } };
+    expect(json.error.code).toBe('ACCOUNT_SUSPENDED');
+    expect(createSessionSpy).not.toHaveBeenCalled();
+    expect(res.headers.getSetCookie()).toHaveLength(0);
   });
 });

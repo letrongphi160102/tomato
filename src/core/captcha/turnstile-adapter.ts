@@ -131,14 +131,20 @@ export class TurnstileAdapter implements CaptchaProvider {
 
       return { success: true, errorCodes: [] };
     } catch (error) {
-      const err = error as Error & { code?: string };
+      const errObj =
+        typeof error === 'object' && error !== null
+          ? (error as { readonly code?: unknown; readonly name?: unknown })
+          : null;
       // Không bao giờ log captchaToken hay TURNSTILE_SECRET_KEY.
       logger.error(
         {
           component: 'captcha',
           provider: this.provider,
-          errorCode: err.code ?? 'NETWORK_ERROR',
-          errorName: err.name ?? 'Error',
+          errorCode:
+            typeof errObj?.code === 'string' || typeof errObj?.code === 'number'
+              ? errObj.code
+              : 'NETWORK_ERROR',
+          errorName: typeof errObj?.name === 'string' ? errObj.name : 'Error',
         },
         'Lỗi kết nối khi xác thực Cloudflare Turnstile (fail-closed)',
       );

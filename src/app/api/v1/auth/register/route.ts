@@ -22,7 +22,8 @@ export async function POST(request: Request) {
     const clientContext = extractRequestClientContext(request);
     const result = await getAuthService().register(body, clientContext);
 
-    // Luôn trả 202 Accepted cho cả email mới lẫn email đã tồn tại để triệt tiêu Account Enumeration.
+    // Trả 202 Accepted khi tạo mới hoặc cấp lại OTP cho tài khoản `pending_verification`;
+    // email đã thuộc tài khoản tồn tại (`active`/`locked`/`suspended`/`deleted`) ném 409 CONFLICT theo Mục 4.1.
     return createAuthJsonResponse(result, { status: 202 });
   } catch (error) {
     return handleAuthRouteError(error, 'POST /api/v1/auth/register');

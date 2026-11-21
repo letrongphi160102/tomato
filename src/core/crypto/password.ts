@@ -153,11 +153,14 @@ export async function verifyPassword(
   provider: PepperSecretProvider = defaultPepperProvider,
 ): Promise<PasswordVerificationResult> {
   if (rawPassword.length === 0 || storedHash.length === 0) {
+    await verifyDummyPassword();
     return { valid: false, needsRehash: false };
   }
 
   const pepperSecret = provider.getPepper(storedPepperVersion);
   if (!pepperSecret) {
+    // Luôn chạy 1 lượt Argon2id giả để giữ thời gian phản hồi đồng nhất ngay cả khi thiếu pepper version.
+    await verifyDummyPassword();
     return { valid: false, needsRehash: false };
   }
 
@@ -167,6 +170,8 @@ export async function verifyPassword(
   try {
     valid = await argon2Verify(storedHash, peppered);
   } catch {
+    // Nếu PHC trong DB bị hỏng, vẫn chạy dummy verify để không tạo kênh rò rỉ thời gian.
+    await verifyDummyPassword();
     return { valid: false, needsRehash: false };
   }
 

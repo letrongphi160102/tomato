@@ -310,6 +310,7 @@ export class SessionService {
           if (session.revokeReason === 'token_rotated' || session.revokeReason === 'token_reuse') {
             const revokedIds = await this.repository.revokeSessionFamily(
               session.familyId,
+              session.userId,
               currentTime,
               'token_reuse',
               tx,
@@ -337,18 +338,36 @@ export class SessionService {
         }
 
         if (session.expiresAt.getTime() <= currentTime.getTime()) {
-          await this.repository.revokeSessionById(session.id, currentTime, 'expired', tx);
+          await this.repository.revokeSessionById(
+            session.id,
+            session.userId,
+            currentTime,
+            'expired',
+            tx,
+          );
           return { kind: 'expired' };
         }
 
         if (currentTime.getTime() - session.lastUsedAt.getTime() > SESSION_IDLE_TTL_MS) {
-          await this.repository.revokeSessionById(session.id, currentTime, 'idle_timeout', tx);
+          await this.repository.revokeSessionById(
+            session.id,
+            session.userId,
+            currentTime,
+            'idle_timeout',
+            tx,
+          );
           return { kind: 'idle_expired' };
         }
 
         const user = await this.repository.findUserById(session.userId, tx);
         if (!user || user.status !== 'active') {
-          await this.repository.revokeSessionById(session.id, currentTime, 'account_inactive', tx);
+          await this.repository.revokeSessionById(
+            session.id,
+            session.userId,
+            currentTime,
+            'account_inactive',
+            tx,
+          );
           return { kind: 'inactive_user' };
         }
 
@@ -462,8 +481,10 @@ export class SessionService {
     if (targetSession) {
       const sessionToRevoke = targetSession;
       await this.repository.getDb().transaction(async (tx) => {
+        await this.repository.acquireSessionFamilyLock(sessionToRevoke.familyId, tx);
         const revoked = await this.repository.revokeSessionById(
           sessionToRevoke.id,
+          sessionToRevoke.userId,
           currentTime,
           'user_logout',
           tx,
@@ -555,8 +576,10 @@ export class SessionService {
     const revokedCurrent = targetSession.id === principal.session.id;
 
     const didRevoke = await this.repository.getDb().transaction(async (tx) => {
+      await this.repository.acquireSessionFamilyLock(targetSession.familyId, tx);
       const revoked = await this.repository.revokeSessionById(
         targetSession.id,
+        principal.user.id,
         currentTime,
         'session_revoked',
         tx,

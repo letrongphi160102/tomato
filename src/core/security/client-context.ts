@@ -11,15 +11,18 @@ export interface RequestClientContext {
 }
 
 /**
- * Trích xuất ngữ cảnh client từ HTTP headers chuẩn hóa trên cả Vercel/Cloudflare và môi trường local.
- * Ưu tiên `x-real-ip` / `cf-connecting-ip` / phần tử đầu tiên của `x-forwarded-for`,
- * luôn kiểm tra bằng `normalizeIpAddress` để tránh giả mạo ký tự lạ vào cột INET hoặc khóa Redis.
+ * Trích xuất ngữ cảnh client từ HTTP headers chuẩn hóa trên cả Vercel và môi trường local.
+ * Ưu tiên các header do hạ tầng reverse proxy đích ghi đè (`x-vercel-forwarded-for`, `x-real-ip`,
+ * `x-forwarded-for`) TRƯỚC `cf-connecting-ip` để chặn lỗ hổng giả mạo header `CF-Connecting-IP`
+ * nhằm vượt Rate Limit khi deploy trực tiếp lên Vercel (không đi qua Cloudflare Reverse Proxy).
+ * Luôn kiểm tra bằng `normalizeIpAddress` để tránh ký tự lạ vào cột INET hoặc khóa Redis.
  */
 export function extractRequestClientContext(request: Request): RequestClientContext {
   const candidates = [
-    request.headers.get('cf-connecting-ip'),
+    request.headers.get('x-vercel-forwarded-for'),
     request.headers.get('x-real-ip'),
     request.headers.get('x-forwarded-for'),
+    request.headers.get('cf-connecting-ip'),
   ];
 
   let ipAddress: string | null = null;

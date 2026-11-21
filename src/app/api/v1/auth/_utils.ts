@@ -28,6 +28,48 @@ async function readBoundedTextBody(request: Request): Promise<string> {
     }
   }
 
+  // Đọc theo luồng có giới hạn byte để chặn tấn công làm cạn RAM bằng Transfer-Encoding: chunked
+  // không khai báo Content-Length.
+  if (request.body) {
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (value) {
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_AUTH_JSON_BODY_BYTES) {
+            await reader.cancel().catch(() => undefined);
+            throw new AuthDomainError({
+              status: 413,
+              code: 'VALIDATION_ERROR',
+              message: AUTH_MESSAGES.payloadTooLarge,
+            });
+          }
+          chunks.push(value);
+        }
+      }
+    } catch (error) {
+      if (error instanceof AuthDomainError) {
+        throw error;
+      }
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.invalidJsonBody,
+      });
+    } finally {
+      reader.releaseLock();
+    }
+
+    return Buffer.concat(chunks, totalBytes).toString('utf8');
+  }
+
   let rawText: string;
   try {
     rawText = await request.text();
@@ -127,13 +169,19 @@ export function handleAuthRouteError(
     });
   }
 
-  const err = error as Error & { code?: string };
+  const errObj =
+    typeof error === 'object' && error !== null
+      ? (error as { readonly code?: unknown; readonly name?: unknown })
+      : null;
   logger.error(
     {
       component: 'auth-api',
       endpoint,
-      errorCode: err.code ?? 'UNHANDLED_ERROR',
-      errorName: err.name ?? 'Error',
+      errorCode:
+        typeof errObj?.code === 'string' || typeof errObj?.code === 'number'
+          ? errObj.code
+          : 'UNHANDLED_ERROR',
+      errorName: typeof errObj?.name === 'string' ? errObj.name : 'Error',
     },
     'Lỗi không mong đợi tại Auth API endpoint',
   );

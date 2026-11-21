@@ -77,15 +77,25 @@ export class SmtpEmailAdapter implements EmailProvider {
         text: message.text,
       });
     } catch (error) {
-      const err = error as Error & { code?: string; responseCode?: number };
+      const errObj =
+        typeof error === 'object' && error !== null
+          ? (error as {
+              readonly code?: unknown;
+              readonly responseCode?: unknown;
+              readonly name?: unknown;
+            })
+          : null;
       // Tuyệt đối không log `message.html`, `message.text`, `message.subject` hay thông tin SMTP auth.
       logger.error(
         {
           component: 'email',
           provider: this.provider,
-          errorCode: err.code ?? 'SMTP_SEND_FAILED',
-          responseCode: err.responseCode ?? null,
-          errorName: err.name ?? 'Error',
+          errorCode:
+            typeof errObj?.code === 'string' || typeof errObj?.code === 'number'
+              ? errObj.code
+              : 'SMTP_SEND_FAILED',
+          responseCode: typeof errObj?.responseCode === 'number' ? errObj.responseCode : null,
+          errorName: typeof errObj?.name === 'string' ? errObj.name : 'Error',
         },
         'Gửi email qua SMTP thất bại',
       );

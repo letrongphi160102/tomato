@@ -74,12 +74,18 @@ export async function checkRedisHealth(timeoutMs = 2_000): Promise<boolean> {
     const pong = await Promise.race([client.ping(), timeoutPromise]);
     return pong === 'PONG';
   } catch (error) {
-    const err = error as Error & { code?: string };
+    const errObj =
+      typeof error === 'object' && error !== null
+        ? (error as { readonly code?: unknown; readonly name?: unknown })
+        : null;
     logger.error(
       {
         component: 'redis',
-        errorCode: err.code ?? 'HEALTHCHECK_FAILED',
-        errorName: err.name ?? 'Error',
+        errorCode:
+          typeof errObj?.code === 'string' || typeof errObj?.code === 'number'
+            ? errObj.code
+            : 'HEALTHCHECK_FAILED',
+        errorName: typeof errObj?.name === 'string' ? errObj.name : 'Error',
       },
       'Kiểm tra kết nối Redis thất bại',
     );

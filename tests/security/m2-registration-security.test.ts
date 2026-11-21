@@ -1,14 +1,18 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { POST as registerPost } from '@/app/api/v1/auth/register/route';
-import { POST as resendPost } from '@/app/api/v1/auth/resend-verification/route';
-import { POST as verifyPost } from '@/app/api/v1/auth/verify-email/route';
+import { POST as registerPost, runtime as registerRuntime } from '@/app/api/v1/auth/register/route';
+import {
+  POST as resendPost,
+  runtime as resendRuntime,
+} from '@/app/api/v1/auth/resend-verification/route';
+import { POST as verifyPost, runtime as verifyRuntime } from '@/app/api/v1/auth/verify-email/route';
 import type { CaptchaProvider } from '@/core/captcha';
 import { getEnv, resetEnvCacheForTesting } from '@/core/config/env';
 import { isPostgresUniqueViolation } from '@/core/db/errors';
-import type { EmailMessage, EmailProvider } from '@/core/email';
+import { EmailDeliveryError, type EmailMessage, type EmailProvider } from '@/core/email';
 import { RateLimiter } from '@/core/redis/rate-limiter';
 import type { AuditLogService } from '@/core/security/audit-log.service';
+import { extractRequestClientContext } from '@/core/security/client-context';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
 import {
   AUTH_MESSAGES,
@@ -132,6 +136,30 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
     );
     expect(largeRes.status).toBe(413);
     expect(largeRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+
+    // Chặn cả streaming body > 16 KiB không có header Content-Length (ngăn cạn RAM).
+    const chunkedStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (let i = 0; i < 20; i += 1) {
+          controller.enqueue(encoder.encode('a'.repeat(1024)));
+        }
+        controller.close();
+      },
+    });
+    const streamedLargeRes = await registerPost(
+      new Request(`${allowedOrigin}/api/v1/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: allowedOrigin,
+          'Sec-Fetch-Site': 'same-origin',
+        },
+        body: chunkedStream,
+        duplex: 'half',
+      } as RequestInit),
+    );
+    expect(streamedLargeRes.status).toBe(413);
 
     const invalidJsonRes = await registerPost(
       new Request(`${allowedOrigin}/api/v1/auth/register`, {
@@ -341,5 +369,189 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
         metadata: expect.objectContaining({ outcome: 'duplicate_existing_account' }),
       }),
     );
+  });
+
+  it('khai báo runtime="nodejs" trên mọi route đăng ký/xác minh và chống giả mạo CF-Connecting-IP vượt Rate Limit', () => {
+    expect(registerRuntime).toBe('nodejs');
+    expect(verifyRuntime).toBe('nodejs');
+    expect(resendRuntime).toBe('nodejs');
+
+    // Trên Vercel, header `x-vercel-forwarded-for` / `x-real-ip` / `x-forwarded-for` do proxy ghi đè
+    // phải thắng header `cf-connecting-ip` có thể bị client giả mạo.
+    const spoofedReq = new Request(`${allowedOrigin}/api/v1/auth/register`, {
+      method: 'POST',
+      headers: {
+        'cf-connecting-ip': '198.51.100.250',
+        'x-vercel-forwarded-for': '203.0.113.42',
+        'x-real-ip': '203.0.113.42',
+        'x-forwarded-for': '203.0.113.42',
+      },
+    });
+    expect(extractRequestClientContext(spoofedReq).rateLimitIpKey).toBe('203.0.113.42');
+
+    const realIpReq = new Request(`${allowedOrigin}/api/v1/auth/register`, {
+      method: 'POST',
+      headers: {
+        'cf-connecting-ip': '198.51.100.250',
+        'x-real-ip': '203.0.113.55',
+      },
+    });
+    expect(extractRequestClientContext(realIpReq).rateLimitIpKey).toBe('203.0.113.55');
+  });
+
+  it('chống TOCTOU Account Takeover: khi tài khoản pending quá hạn vừa được xác minh thành active trong lúc Argon2id chạy -> trả 409 và không gửi OTP', async () => {
+    const sendSpy = vi.fn();
+    const auditRecord = vi.fn().mockResolvedValue({ id: 'audit-toctou' });
+    const fakeTx = {};
+
+    const service = new AuthService({
+      rateLimiter: {
+        consume: vi.fn().mockResolvedValue({
+          allowed: true,
+          limit: 5,
+          remaining: 4,
+          resetAt: Date.now() + 60_000,
+          retryAfterSeconds: 0,
+        }),
+      } as unknown as RateLimiter,
+      captchaProvider: {
+        provider: 'stub',
+        verify: vi.fn().mockResolvedValue({ success: true, errorCodes: [] }),
+      },
+      repository: {
+        getDb: () => ({
+          transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn(fakeTx),
+        }),
+        findEmailIdentityWithUser: vi.fn().mockResolvedValue({
+          user: {
+            id: '01950000-0000-7000-8000-000000000901',
+            publicId: 'a5c8043b-4661-4c8b-848f-f520c1adb0f7',
+            displayName: 'Pending Expired',
+            dateOfBirth: '1998-05-05',
+            status: 'pending_verification',
+            createdAt: new Date('2025-01-01T00:00:00Z'),
+            updatedAt: new Date('2025-01-01T00:00:00Z'),
+            deletedAt: null,
+          },
+          identity: {
+            id: '01950000-0000-7000-8000-000000000902',
+            userId: '01950000-0000-7000-8000-000000000901',
+            provider: 'email_password',
+            identifierNormalized: 'racing-user@example.com',
+            passwordHash: '$argon2id$v=19$m=19456,t=2,p=1$salt$hash',
+            pepperVersion: 1,
+            verifiedAt: null,
+            failedLoginAttempts: 0,
+            createdAt: new Date('2025-01-01T00:00:00Z'),
+            updatedAt: new Date('2025-01-01T00:00:00Z'),
+          },
+        }),
+        // Giả lập user gốc đã xác minh thành `active` trong lúc Argon2id đang tính toán.
+        overwriteExpiredPendingUserWithOtp: vi.fn().mockResolvedValue('not_pending'),
+      } as unknown as AuthRepository,
+      emailProvider: { provider: 'memory', send: sendSpy },
+      auditLogService: { record: auditRecord } as unknown as AuditLogService,
+      appUrl: allowedOrigin,
+    });
+
+    await expect(
+      service.register(
+        {
+          email: 'racing-user@example.com',
+          password: 'Cụm mật khẩu kẻ tấn công TOCTOU 2026!',
+          displayName: 'Attacker',
+          dateOfBirth: '1999-03-03',
+          acceptedTerms: true,
+          captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
+        },
+        { ipAddress: '198.51.100.31', rateLimitIpKey: '198.51.100.31', userAgent: 'Vitest' },
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof AuthDomainError && err.status === 409 && err.code === 'CONFLICT',
+    );
+
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('/resend-verification cân bằng sàn thời gian phản hồi và không lộ tồn tại email qua lỗi SMTP 503', async () => {
+    const allowLimiter = {
+      consume: vi.fn().mockResolvedValue({
+        allowed: true,
+        limit: 5,
+        remaining: 4,
+        resetAt: Date.now() + 60_000,
+        retryAfterSeconds: 0,
+      }),
+    } as unknown as RateLimiter;
+
+    const fakeTx = {};
+    const pendingUser = {
+      id: '01950000-0000-7000-8000-000000000911',
+      publicId: 'b5c8043b-4661-4c8b-848f-f520c1adb0f7',
+      displayName: 'Pending User',
+      dateOfBirth: '1998-05-05',
+      status: 'pending_verification' as const,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+    };
+
+    const service = new AuthService({
+      rateLimiter: allowLimiter,
+      minResendResponseMs: 60,
+      repository: {
+        getDb: () => ({
+          transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn(fakeTx),
+        }),
+        findEmailIdentityWithUser: vi.fn(async (email: string) =>
+          email === 'pending-smtp-fail@example.com'
+            ? {
+                user: pendingUser,
+                identity: {
+                  id: '01950000-0000-7000-8000-000000000912',
+                  userId: pendingUser.id,
+                  provider: 'email_password' as const,
+                  identifierNormalized: email,
+                  passwordHash: null,
+                  pepperVersion: 1,
+                  verifiedAt: null,
+                  failedLoginAttempts: 0,
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                },
+              }
+            : null,
+        ),
+        lockUserById: vi.fn().mockResolvedValue(pendingUser),
+        reissueEmailVerifyToken: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AuthRepository,
+      emailProvider: {
+        provider: 'smtp',
+        send: vi.fn().mockRejectedValue(new EmailDeliveryError('smtp', 'SMTP down')),
+      },
+      auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+      appUrl: allowedOrigin,
+    });
+
+    const ctx = {
+      ipAddress: '198.51.100.32',
+      rateLimitIpKey: '198.51.100.32',
+      userAgent: 'Vitest',
+    };
+
+    // 1. Email không tồn tại vẫn tuân thủ sàn thời gian phản hồi tối thiểu (>= 60ms).
+    const startMissing = Date.now();
+    const missingRes = await service.resendVerification({ email: 'missing@example.com' }, ctx);
+    const missingElapsed = Date.now() - startMissing;
+    expect(missingRes.message).toBe(AUTH_MESSAGES.resendAccepted);
+    expect(missingElapsed).toBeGreaterThanOrEqual(50);
+
+    // 2. Email pending_verification gặp lỗi SMTP vẫn trả phản hồi trung tính giống hệt email không tồn tại.
+    const smtpFailRes = await service.resendVerification(
+      { email: 'pending-smtp-fail@example.com' },
+      ctx,
+    );
+    expect(smtpFailRes).toEqual(missingRes);
   });
 });

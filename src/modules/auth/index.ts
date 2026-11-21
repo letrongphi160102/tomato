@@ -14,6 +14,7 @@ export {
   type CreateSessionParams,
   type IdentityWithUser,
   type OverwriteExpiredPendingUserParams,
+  type OverwritePendingUserOutcome,
   type ReissueEmailVerifyTokenParams,
   type RevokeAllUserSessionsParams,
   type RotateSessionInFamilyParams,
@@ -48,6 +49,7 @@ export {
 } from '@/modules/auth/auth.schemas';
 export {
   AuthService,
+  DEFAULT_MIN_RESEND_RESPONSE_MS,
   EMAIL_VERIFY_OTP_MAX_ATTEMPTS,
   EMAIL_VERIFY_OTP_TTL_MINUTES,
   EMAIL_VERIFY_OTP_TTL_MS,

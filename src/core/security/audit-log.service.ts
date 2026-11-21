@@ -32,9 +32,10 @@ export interface AuditLogInput {
 const SENSITIVE_KEY_PATTERN =
   /(password|passwd|pwd|token|otp|secret|pepper|cookie|authorization|csrf|hash|private[_-]?key|api[_-]?key|credential)/i;
 
-// Phòng thủ chiều sâu: ngăn chuỗi giống JWT hoặc header Bearer vô tình lọt vào giá trị metadata.
-const BEARER_OR_JWT_VALUE_PATTERN =
-  /(^Bearer\s+\S+)|(^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$)/i;
+// Phòng thủ chiều sâu: ngăn chuỗi giống JWT, header Bearer, hash Argon2 hoặc cookie phiên
+// vô tình lọt vào giá trị metadata ngay cả khi gán dưới tên khóa thông thường.
+const SENSITIVE_VALUE_PATTERN =
+  /(^Bearer\s+\S+)|(^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$)|(\$argon2(?:id|i|d)\$)|((?:__Host-)?tomato_(?:at|rt|csrf)=)/i;
 
 const MAX_METADATA_DEPTH = 5;
 const MAX_METADATA_KEYS = 50;
@@ -56,7 +57,7 @@ function sanitizeValue(value: unknown, depth: number): unknown {
   }
 
   if (typeof value === 'string') {
-    if (BEARER_OR_JWT_VALUE_PATTERN.test(value.trim())) {
+    if (SENSITIVE_VALUE_PATTERN.test(value.trim())) {
       return '[REDACTED]';
     }
     return value.length > MAX_METADATA_STRING_LENGTH
