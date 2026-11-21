@@ -27,7 +27,9 @@ describe('Integration M1: Drizzle Schema (5 bảng), AuditLogService & Redis Rat
       await db.insert(users).values({
         id: userId,
         publicId,
-        displayName: 'M1 Test User',
+        username: `m1_${Date.now().toString(36)}`,
+        fullName: 'M1 Test User',
+        gender: 'other',
         dateOfBirth: '2000-01-15',
       });
 

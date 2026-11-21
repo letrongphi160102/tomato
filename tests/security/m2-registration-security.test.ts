@@ -272,8 +272,10 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
       service.register(
         {
           email: 'bot@example.com',
-          password: 'cụm mật khẩu an toàn hợp lệ 2026',
-          displayName: 'Test User',
+          password: 'secure passphrase valid 2026',
+          fullName: 'Test User',
+          username: 'test_bot_user',
+          gender: 'male',
           dateOfBirth: '1999-01-01',
           acceptedTerms: true,
           captchaToken: 'invalid-captcha',
@@ -311,7 +313,9 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
           user: {
             id: '01950000-0000-7000-8000-000000000001',
             publicId: 'f5c8043b-4661-4c8b-848f-f520c1adb0f7',
-            displayName: 'Chủ Tài Khoản',
+            username: 'existing_owner',
+            fullName: 'Chủ Tài Khoản',
+            gender: 'male',
             dateOfBirth: '1998-05-05',
             status: 'active',
             createdAt: new Date('2025-01-01T00:00:00Z'),
@@ -346,8 +350,10 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
       service.register(
         {
           email: 'EXISTING-ACTIVE@example.com',
-          password: 'cụm mật khẩu an toàn khác hẳn 2026',
-          displayName: 'Người Thử Trùng',
+          password: 'another safe passphrase 2026',
+          fullName: 'Người Thử Trùng',
+          username: 'another_handle_2026',
+          gender: 'female',
           dateOfBirth: '1999-03-03',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -426,7 +432,9 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
           user: {
             id: '01950000-0000-7000-8000-000000000901',
             publicId: 'a5c8043b-4661-4c8b-848f-f520c1adb0f7',
-            displayName: 'Pending Expired',
+            username: 'pending_expired_user',
+            fullName: 'Pending Expired',
+            gender: 'other',
             dateOfBirth: '1998-05-05',
             status: 'pending_verification',
             createdAt: new Date('2025-01-01T00:00:00Z'),
@@ -446,6 +454,7 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
             updatedAt: new Date('2025-01-01T00:00:00Z'),
           },
         }),
+        findUserByUsername: vi.fn().mockResolvedValue(null),
         // Giả lập user gốc đã xác minh thành `active` trong lúc Argon2id đang tính toán.
         overwriteExpiredPendingUserWithOtp: vi.fn().mockResolvedValue('not_pending'),
       } as unknown as AuthRepository,
@@ -458,8 +467,10 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
       service.register(
         {
           email: 'racing-user@example.com',
-          password: 'Cụm mật khẩu kẻ tấn công TOCTOU 2026!',
-          displayName: 'Attacker',
+          password: 'attacker toctou password 2026!',
+          fullName: 'Attacker',
+          username: 'attacker_handle',
+          gender: 'male',
           dateOfBirth: '1999-03-03',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -489,7 +500,9 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
     const pendingUser = {
       id: '01950000-0000-7000-8000-000000000911',
       publicId: 'b5c8043b-4661-4c8b-848f-f520c1adb0f7',
-      displayName: 'Pending User',
+      username: 'pending_smtp_user',
+      fullName: 'Pending User',
+      gender: 'other' as const,
       dateOfBirth: '1998-05-05',
       status: 'pending_verification' as const,
       createdAt: new Date(),
@@ -553,5 +566,64 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
       ctx,
     );
     expect(smtpFailRes).toEqual(missingRes);
+  });
+
+  it('đăng ký trùng ID tài khoản (username) trả 409 CONFLICT với lỗi gắn trường username', async () => {
+    const service = new AuthService({
+      rateLimiter: {
+        consume: vi.fn().mockResolvedValue({
+          allowed: true,
+          limit: 5,
+          remaining: 4,
+          resetAt: Date.now() + 60_000,
+          retryAfterSeconds: 0,
+        }),
+      } as unknown as RateLimiter,
+      captchaProvider: {
+        provider: 'stub',
+        verify: vi.fn().mockResolvedValue({ success: true, errorCodes: [] }),
+      },
+      repository: {
+        findEmailIdentityWithUser: vi.fn().mockResolvedValue(null),
+        findUserByUsername: vi.fn().mockResolvedValue({
+          id: '01950000-0000-7000-8000-000000000921',
+          publicId: 'c5c8043b-4661-4c8b-848f-f520c1adb0f7',
+          username: 'taken_handle',
+          fullName: 'Owner',
+          gender: 'male',
+          dateOfBirth: '1998-05-05',
+          status: 'active',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          deletedAt: null,
+        }),
+      } as unknown as AuthRepository,
+      emailProvider: { provider: 'memory', send: vi.fn() },
+      auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+      appUrl: allowedOrigin,
+    });
+
+    await expect(
+      service.register(
+        {
+          email: 'new-email@example.com',
+          password: 'another safe passphrase 2026!',
+          fullName: 'New User',
+          username: '@TAKEN_HANDLE',
+          gender: 'female',
+          dateOfBirth: '1999-03-03',
+          acceptedTerms: true,
+          captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
+        },
+        { ipAddress: '198.51.100.33', rateLimitIpKey: '198.51.100.33', userAgent: 'Vitest' },
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof AuthDomainError &&
+        err.status === 409 &&
+        err.code === 'CONFLICT' &&
+        err.message === AUTH_MESSAGES.usernameAlreadyExists &&
+        err.details.some((d) => d.field === 'username'),
+    );
   });
 });

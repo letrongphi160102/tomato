@@ -100,7 +100,9 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
     const existingUser: UserRow = {
       id: '01950000-0000-7000-8000-000000000101',
       publicId: 'e1a5a057-0f04-47b2-95f4-0d6464279b9e',
-      displayName: 'Existing User',
+      username: 'existing_user',
+      fullName: 'Existing User',
+      gender: 'male',
       dateOfBirth: '1998-01-01',
       status: 'active',
       createdAt: new Date(),
@@ -295,7 +297,9 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
     const userA: UserRow = {
       id: '01950000-0000-7000-8000-000000000201',
       publicId: 'user-a-public-id',
-      displayName: 'User A',
+      username: 'user_a_idor',
+      fullName: 'User A',
+      gender: 'female',
       dateOfBirth: '1998-01-01',
       status: 'active',
       createdAt: new Date(),
@@ -513,7 +517,9 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
     const userRow: UserRow = {
       id: internalUserId,
       publicId: publicUserId,
-      displayName: 'Audit User',
+      username: 'audit_user_777',
+      fullName: 'Audit User',
+      gender: 'other',
       dateOfBirth: '1999-01-01',
       status: 'active',
       createdAt: new Date(),
@@ -644,7 +650,9 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
     const activeUserSnapshot: UserRow = {
       id: '01950000-0000-7000-8000-000000000801',
       publicId: 'e1a5a057-0f04-47b2-95f4-0d6464279801',
-      displayName: 'User Suspended Mid-Flight',
+      username: 'midflight_user',
+      fullName: 'User Suspended Mid-Flight',
+      gender: 'male',
       dateOfBirth: '1998-01-01',
       status: 'active',
       createdAt: new Date(),

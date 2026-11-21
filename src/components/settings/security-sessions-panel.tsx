@@ -23,7 +23,9 @@ import { authFetch } from '@/lib/auth-client';
 
 interface UserProfilePayload {
   readonly public_id: string;
-  readonly displayName: string;
+  readonly username: string;
+  readonly fullName: string;
+  readonly gender: string;
   readonly status: string;
 }
 
@@ -436,10 +438,8 @@ export function SecuritySessionsPanel() {
           </CardHeader>
           <CardContent className="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="font-semibold text-foreground">{profile.displayName}</p>
-              <p className="font-mono text-xs text-muted-foreground">
-                Mã công khai: {profile.public_id}
-              </p>
+              <p className="font-semibold text-foreground">{profile.fullName}</p>
+              <p className="font-mono text-xs text-muted-foreground">@{profile.username}</p>
             </div>
             <span className="inline-flex w-fit items-center gap-1.5 rounded-full border border-emerald-600/30 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
               <ShieldCheck className="size-3.5" aria-hidden="true" />

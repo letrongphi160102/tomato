@@ -12,7 +12,14 @@ import { getEnv } from '@/core/config/env';
 import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
 import { hashPassword, verifyPassword, type PepperSecretProvider } from '@/core/crypto/password';
 import { closeDatabasePool, getDb } from '@/core/db';
-import { auditLogs, authIdentities, sessions, users, type UserStatus } from '@/core/db/schema';
+import {
+  auditLogs,
+  authIdentities,
+  sessions,
+  users,
+  type UserGender,
+  type UserStatus,
+} from '@/core/db/schema';
 import { AUTH_RATE_LIMITS, RateLimiter, closeRedisClient, getRedisClient } from '@/core/redis';
 import { AuditLogService } from '@/core/security/audit-log.service';
 import { CSRF_HEADER_NAME } from '@/core/security/csrf';
@@ -210,13 +217,18 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
   async function seedUser(params: {
     readonly email: string;
     readonly password: string;
-    readonly displayName?: string;
+    readonly username?: string;
+    readonly fullName?: string;
+    readonly gender?: UserGender;
     readonly status?: UserStatus;
     readonly pepperProvider?: PepperSecretProvider;
   }) {
     const db = getDb();
     const userId = generateUuidV7();
     const publicId = generatePublicId();
+    const username = params.username ?? `u_${publicId.replace(/-/g, '').slice(0, 14)}`;
+    const fullName = params.fullName ?? 'TOMATO Tester';
+    const gender: UserGender = params.gender ?? 'other';
     const identityId = generateUuidV7();
     const hashed = await hashPassword(params.password, params.pepperProvider);
     const now = new Date(testClockMs);
@@ -224,7 +236,9 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
     await db.insert(users).values({
       id: userId,
       publicId,
-      displayName: params.displayName ?? 'TOMATO Tester',
+      username,
+      fullName,
+      gender,
       dateOfBirth: '1998-05-15',
       status: params.status ?? 'active',
       createdAt: now,
@@ -246,7 +260,7 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
     });
 
     createdUserIds.add(userId);
-    return { userId, publicId, identityId, email: params.email };
+    return { userId, publicId, username, fullName, gender, identityId, email: params.email };
   }
 
   beforeEach(() => {
@@ -280,8 +294,13 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
 
   it('Luồng chuẩn đầy đủ: Login -> /me -> /refresh nhận cặp token mới -> /sessions -> thu hồi 1 thiết bị -> đăng xuất tất cả thiết bị khác -> /logout', async () => {
     const email = makeUniqueEmail('happy-flow');
-    const password = 'Cụm mật khẩu đăng nhập an toàn 2026!';
-    const seeded = await seedUser({ email, password, displayName: 'Nguyễn An Nhiên' });
+    const password = 'safe login passphrase 2026!';
+    const seeded = await seedUser({
+      email,
+      password,
+      fullName: 'Nguyễn An Nhiên',
+      gender: 'female',
+    });
 
     const ip1 = nextTestIp();
     const ip2 = nextTestIp();
@@ -308,7 +327,9 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
     };
     expect(loginJson1.user).toEqual({
       public_id: seeded.publicId,
-      displayName: 'Nguyễn An Nhiên',
+      username: seeded.username,
+      fullName: 'Nguyễn An Nhiên',
+      gender: 'female',
       status: 'active',
     });
     // Tuyệt đối không lộ id nội bộ (UUIDv7) hay token trong JSON body.
@@ -339,7 +360,9 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
     const meJson = (await meRes.json()) as Record<string, unknown>;
     expect(meJson).toEqual({
       public_id: seeded.publicId,
-      displayName: 'Nguyễn An Nhiên',
+      username: seeded.username,
+      fullName: 'Nguyễn An Nhiên',
+      gender: 'female',
       status: 'active',
     });
     expect(meJson).not.toHaveProperty('id');
@@ -561,12 +584,12 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
     const userA = await seedUser({
       email: makeUniqueEmail('idor-a'),
       password,
-      displayName: 'User A',
+      fullName: 'User A',
     });
     const userB = await seedUser({
       email: makeUniqueEmail('idor-b'),
       password,
-      displayName: 'User B',
+      fullName: 'User B',
     });
 
     const ipA = nextTestIp();

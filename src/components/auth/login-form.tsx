@@ -26,7 +26,9 @@ interface ApiErrorPayload {
 interface LoginSuccessPayload {
   readonly user: {
     readonly public_id: string;
-    readonly displayName: string;
+    readonly username: string;
+    readonly fullName: string;
+    readonly gender: string;
     readonly status: string;
   };
   readonly message: string;
@@ -219,8 +221,8 @@ export function LoginForm({ nextPath }: LoginFormProps) {
 
   return (
     <Card className="w-full shadow-md">
-      <CardHeader className="space-y-1">
-        <CardTitle>Đăng nhập TOMATO</CardTitle>
+      <CardHeader className="space-y-1 text-center">
+        <CardTitle>Đăng nhập vào Tomato</CardTitle>
       </CardHeader>
 
       <CardContent>
@@ -302,7 +304,7 @@ export function LoginForm({ nextPath }: LoginFormProps) {
               id="login-password"
               name="password"
               autoComplete="current-password"
-              placeholder="Nhập mật khẩu của bạn"
+              placeholder="Mật khẩu"
               value={password}
               onChange={(event) => {
                 setPassword(event.target.value);

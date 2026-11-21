@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   calculateAgeYears,
   createRegisterInputSchema,
+  hasVietnameseDiacritics,
   parseStrictIsoDate,
   resendVerificationInputSchema,
   verifyEmailInputSchema,
@@ -13,9 +14,11 @@ const registerSchema = createRegisterInputSchema(FIXED_NOW);
 
 function buildValidRegisterPayload(overrides: Record<string, unknown> = {}) {
   return {
+    fullName: '  Nguyễn Minh Anh  ',
+    username: 'Minh_Anh.2026',
+    gender: 'female',
     email: '  Minh.Anh@Example.COM  ',
-    password: 'cụm mật khẩu an toàn đủ dài 2026',
-    displayName: '  Minh Anh  ',
+    password: 'my secure passphrase 2026',
     dateOfBirth: '2000-05-10',
     acceptedTerms: true,
     captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -24,19 +27,51 @@ function buildValidRegisterPayload(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
-  it('chuẩn hóa email NFKC + lowercase + trim, giữ nguyên khoảng trắng đầu cuối mật khẩu và chấp nhận Unicode', () => {
-    const rawPassword = '  Mật khẩu tiếng Việt có dấu 🍅 2026  ';
+  it('chuẩn hóa email, fullName, username (@handle) và giữ nguyên khoảng trắng đầu cuối mật khẩu không dấu', () => {
+    const rawPassword = '  safe pass phrase 2026!  ';
     const parsed = registerSchema.parse(
       buildValidRegisterPayload({
         email: '  Ｕｓｅｒ＠Example.COM ',
+        username: '@Minh_Anh.99',
+        fullName: '  Nguyễn Minh Anh  ',
+        gender: 'male',
         password: rawPassword,
       }),
     );
 
     expect(parsed.email).toBe('user@example.com');
-    expect(parsed.displayName).toBe('Minh Anh');
+    expect(parsed.username).toBe('minh_anh.99');
+    expect(parsed.fullName).toBe('Nguyễn Minh Anh');
+    expect(parsed.gender).toBe('male');
     // Tuyệt đối không trim mật khẩu: khoảng trắng đầu/cuối phải được bảo toàn.
     expect(parsed.password).toBe(rawPassword.normalize('NFKC'));
+  });
+
+  it('chặn mật khẩu có dấu tiếng Việt (cả NFC lẫn NFD và chữ đ/Đ) nhưng không ép hoa/số/ký tự đặc biệt', () => {
+    expect(hasVietnameseDiacritics('mat khau khong dau 2026')).toBe(false);
+    expect(hasVietnameseDiacritics('mật khẩu có dấu')).toBe(true);
+    expect(hasVietnameseDiacritics('dong ho dien tu')).toBe(false);
+    expect(hasVietnameseDiacritics('đồng hồ điện tử')).toBe(true);
+    expect(hasVietnameseDiacritics('Đơn giản thôi')).toBe(true);
+    expect(hasVietnameseDiacritics('mat khau a\u0301 2026')).toBe(true);
+
+    // Không ép chữ hoa/số/ký tự đặc biệt: chỉ cần >= 12 ký tự không dấu tiếng Việt.
+    const simpleLowercase = registerSchema.safeParse(
+      buildValidRegisterPayload({ password: 'quiet river morning walk' }),
+    );
+    expect(simpleLowercase.success).toBe(true);
+
+    // Chặn các mật khẩu có dấu tiếng Việt hoặc chữ đ/Đ.
+    for (const vnPass of [
+      'mật khẩu an toàn 2026',
+      'Mat khau tieng Viet co dau 2026 á',
+      'di choi dau do 2026 đ',
+      'Duong pho Ha Noi Đ 2026',
+      'safe pass a\u0301 2026',
+    ]) {
+      const res = registerSchema.safeParse(buildValidRegisterPayload({ password: vnPass }));
+      expect(res.success, `Mật khẩu có dấu "${vnPass}" phải bị chặn`).toBe(false);
+    }
   });
 
   it('chặn mật khẩu < 12 ký tự và > 128 ký tự (không tự cắt ngắn)', () => {
@@ -64,7 +99,7 @@ describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
     }
   });
 
-  it('chặn mật khẩu trùng email, chứa email, trùng displayName hoặc thuộc danh sách phổ biến', () => {
+  it('chặn mật khẩu trùng email, chứa email, trùng fullName, trùng username hoặc thuộc danh sách phổ biến', () => {
     const sameAsEmail = registerSchema.safeParse(
       buildValidRegisterPayload({
         email: 'alice.secure@example.com',
@@ -81,13 +116,21 @@ describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
     );
     expect(containsEmail.success).toBe(false);
 
-    const sameAsDisplayName = registerSchema.safeParse(
+    const sameAsFullName = registerSchema.safeParse(
       buildValidRegisterPayload({
-        displayName: 'Nguyễn Minh Anh',
-        password: 'nguyễn minh anh',
+        fullName: 'Nguyen Minh Anh',
+        password: 'nguyen minh anh',
       }),
     );
-    expect(sameAsDisplayName.success).toBe(false);
+    expect(sameAsFullName.success).toBe(false);
+
+    const sameAsUsername = registerSchema.safeParse(
+      buildValidRegisterPayload({
+        username: 'minh_anh_2026',
+        password: 'minh_anh_2026',
+      }),
+    );
+    expect(sameAsUsername.success).toBe(false);
 
     for (const weak of [
       'password1234',
@@ -100,6 +143,38 @@ describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
       const res = registerSchema.safeParse(buildValidRegisterPayload({ password: weak }));
       expect(res.success, `Mật khẩu yếu "${weak}" phải bị chặn`).toBe(false);
     }
+  });
+
+  it('kiểm tra nghiêm ngặt ID Tài khoản (username không khoảng trắng, không dấu, giống @username TikTok/Instagram) và giới tính', () => {
+    for (const invalidUsername of [
+      '',
+      'ab',
+      'a'.repeat(31),
+      'minh anh',
+      ' minhanh',
+      'minhanh ',
+      'minh_ánh',
+      'minh-anh',
+      'minh@anh',
+      '.minhanh',
+      'minhanh.',
+      'minh..anh',
+      'admin',
+      'tomato',
+    ]) {
+      const res = registerSchema.safeParse(
+        buildValidRegisterPayload({ username: invalidUsername }),
+      );
+      expect(res.success, `Username không hợp lệ "${invalidUsername}" phải bị chặn`).toBe(false);
+    }
+
+    expect(registerSchema.safeParse(buildValidRegisterPayload({ gender: '' })).success).toBe(false);
+    expect(registerSchema.safeParse(buildValidRegisterPayload({ gender: 'unknown' })).success).toBe(
+      false,
+    );
+    expect(registerSchema.safeParse(buildValidRegisterPayload({ gender: 'other' })).success).toBe(
+      true,
+    );
   });
 
   it('kiểm tra nghiêm ngặt ngày sinh hợp lệ và ranh giới đúng 13 tuổi (kể cả năm nhuận)', () => {
@@ -134,15 +209,15 @@ describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
     ).toBe(false);
   });
 
-  it('chặn displayName ngoài 2-50 ký tự, ký tự điều khiển, chưa tick điều khoản hoặc thiếu captchaToken', () => {
-    expect(registerSchema.safeParse(buildValidRegisterPayload({ displayName: 'A' })).success).toBe(
+  it('chặn fullName ngoài 2-50 ký tự, ký tự điều khiển, chưa tick điều khoản hoặc thiếu captchaToken', () => {
+    expect(registerSchema.safeParse(buildValidRegisterPayload({ fullName: 'A' })).success).toBe(
       false,
     );
     expect(
-      registerSchema.safeParse(buildValidRegisterPayload({ displayName: 'A'.repeat(51) })).success,
+      registerSchema.safeParse(buildValidRegisterPayload({ fullName: 'A'.repeat(51) })).success,
     ).toBe(false);
     expect(
-      registerSchema.safeParse(buildValidRegisterPayload({ displayName: 'Minh\r\nBcc:evil@x.com' }))
+      registerSchema.safeParse(buildValidRegisterPayload({ fullName: 'Minh\r\nBcc:evil@x.com' }))
         .success,
     ).toBe(false);
     expect(

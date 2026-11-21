@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
-import { normalizeEmail, normalizePassword } from '@/core/crypto/normalize';
+import { normalizeEmail, normalizePassword, normalizeUsername } from '@/core/crypto/normalize';
 
 const UUID_V7_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -22,6 +22,12 @@ describe('normalizeEmail & normalizePassword', () => {
     // Ký tự tương thích NFKC (ví dụ chữ số full-width hoặc ligature ﬁ) phải được chuẩn hóa đồng nhất.
     expect(normalizePassword(' Ｐａｓｓ１２３ﬁ ')).toBe(' Pass123fi ');
     expect(normalizePassword('  secret  ')).not.toBe(normalizePassword('secret'));
+  });
+
+  it('chuẩn hóa username theo NFKC, bỏ 1 dấu @ ở đầu, chuyển chữ thường nhưng giữ nguyên khoảng trắng để schema chặn', () => {
+    expect(normalizeUsername('@Minh_Anh.2026')).toBe('minh_anh.2026');
+    expect(normalizeUsername('Ｕｓｅｒ_０１')).toBe('user_01');
+    expect(normalizeUsername('user name')).toBe('user name');
   });
 });
 

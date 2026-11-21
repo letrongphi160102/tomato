@@ -11,7 +11,7 @@ export {
   type SignAccessTokenOptions,
   type VerifyAccessTokenOptions,
 } from '@/core/crypto/jwt';
-export { normalizeEmail, normalizePassword } from '@/core/crypto/normalize';
+export { normalizeEmail, normalizePassword, normalizeUsername } from '@/core/crypto/normalize';
 export {
   OTP_LENGTH,
   generateOtpCode,

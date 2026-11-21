@@ -44,6 +44,14 @@ function makeUniqueEmail(label: string): string {
   return `m2-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@tomato.test`;
 }
 
+function makeUniqueUsername(label: string): string {
+  const safeLabel = label
+    .replace(/[^a-z0-9_]/gi, '_')
+    .slice(0, 10)
+    .toLowerCase();
+  return `${safeLabel}_${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
 function makeAuthRequest(pathname: string, body: unknown, ip: string): Request {
   const origin = getTestOrigin();
   return new Request(`${origin}${pathname}`, {
@@ -174,10 +182,11 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
     installIsolatedAuthService({ useRealSmtp: true });
 
     const email = makeUniqueEmail('happy-mailpit');
+    const username = makeUniqueUsername('happy');
     createdEmails.add(email);
     const ip = nextTestIp();
     usedRateLimitIps.add(ip);
-    const rawPassword = 'Mật khẩu an toàn cho kiểm thử Mailpit 2026!';
+    const rawPassword = 'Safe mailpit integration password 2026!';
 
     const regRes = await registerPost(
       makeAuthRequest(
@@ -185,7 +194,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         {
           email: `  ${email.toUpperCase()}  `,
           password: rawPassword,
-          displayName: 'Nguyễn Minh Anh',
+          fullName: 'Nguyễn Minh Anh',
+          username: `@${username.toUpperCase()}`,
+          gender: 'female',
           dateOfBirth: '1999-08-20',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -300,8 +311,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         '/api/v1/auth/register',
         {
           email: underageEmail,
-          password: 'cụm mật khẩu an toàn đủ dài 2026',
-          displayName: 'Bạn Nhỏ',
+          password: 'safe passphrase valid length 2026',
+          fullName: 'Bạn Nhỏ',
+          username: makeUniqueUsername('underage'),
+          gender: 'male',
           dateOfBirth: underageIso,
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -325,7 +338,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         {
           email: shortPassEmail,
           password: '11charsOnly',
-          displayName: 'Người Dùng',
+          fullName: 'Người Dùng',
+          username: makeUniqueUsername('shortp'),
+          gender: 'other',
           dateOfBirth: '1998-01-01',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -344,7 +359,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         {
           email: longPassEmail,
           password: `Ab3!`.repeat(32) + 'X', // 129 ký tự
-          displayName: 'Người Dùng',
+          fullName: 'Người Dùng',
+          username: makeUniqueUsername('longp'),
+          gender: 'female',
           dateOfBirth: '1998-01-01',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -375,8 +392,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         '/api/v1/auth/register',
         {
           email,
-          password: 'cụm mật khẩu rất an toàn 2026!',
-          displayName: 'Tester OTP',
+          password: 'safe passphrase for otp 2026!',
+          fullName: 'Tester OTP',
+          username: makeUniqueUsername('otp5'),
+          gender: 'male',
           dateOfBirth: '1997-04-12',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -435,8 +454,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         '/api/v1/auth/register',
         {
           email,
-          password: 'cụm mật khẩu rất an toàn 2026!',
-          displayName: 'Expired OTP',
+          password: 'safe passphrase expired otp 2026!',
+          fullName: 'Expired OTP',
+          username: makeUniqueUsername('expotp'),
+          gender: 'female',
           dateOfBirth: '1997-04-12',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -463,7 +484,7 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
     createdEmails.add(email);
     const ip = nextTestIp();
     usedRateLimitIps.add(ip);
-    const originalPassword = 'Mật khẩu ban đầu của chủ tài khoản 2026';
+    const originalPassword = 'original owner password 2026';
 
     // Bước 1: Đăng ký và xác minh để tài khoản chuyển sang `active`.
     const firstReg = await registerPost(
@@ -472,7 +493,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         {
           email,
           password: originalPassword,
-          displayName: 'Chủ Sở Hữu',
+          fullName: 'Chủ Sở Hữu',
+          username: makeUniqueUsername('owner'),
+          gender: 'male',
           dateOfBirth: '1995-07-07',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -494,8 +517,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         '/api/v1/auth/register',
         {
           email,
-          password: 'Mật khẩu của kẻ cố đăng ký trùng 2026',
-          displayName: 'Kẻ Thử Trùng',
+          password: 'duplicate attempt password 2026',
+          fullName: 'Kẻ Thử Trùng',
+          username: makeUniqueUsername('duptry'),
+          gender: 'female',
           dateOfBirth: '2001-01-01',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -540,8 +565,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
 
     const payload = {
       email,
-      password: 'Cụm mật khẩu mạnh chống race condition 2026',
-      displayName: 'Race User',
+      password: 'strong password anti race 2026',
+      fullName: 'Race User',
+      username: makeUniqueUsername('race'),
+      gender: 'other',
       dateOfBirth: '1996-06-15',
       acceptedTerms: true,
       captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -579,8 +606,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         '/api/v1/auth/register',
         {
           email,
-          password: 'Cụm mật khẩu an toàn test resend 2026',
-          displayName: 'Resend User',
+          password: 'safe password for resend test 2026',
+          fullName: 'Resend User',
+          username: makeUniqueUsername('resend'),
+          gender: 'male',
           dateOfBirth: '1998-02-14',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -684,8 +713,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
           '/api/v1/auth/register',
           {
             email,
-            password: 'Cụm mật khẩu an toàn kiểm tra rate limit 2026',
-            displayName: `RL User ${i}`,
+            password: 'safe password rate limit test 2026',
+            fullName: `RL User ${i}`,
+            username: makeUniqueUsername(`rl${i}`),
+            gender: 'other',
             dateOfBirth: '1999-09-09',
             acceptedTerms: true,
             captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -703,8 +734,10 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         '/api/v1/auth/register',
         {
           email: sixthEmail,
-          password: 'Cụm mật khẩu an toàn kiểm tra rate limit 2026',
-          displayName: 'RL User 6',
+          password: 'safe password rate limit test 2026',
+          fullName: 'RL User 6',
+          username: makeUniqueUsername('rl6'),
+          gender: 'other',
           dateOfBirth: '1999-09-09',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -725,8 +758,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
     createdEmails.add(email);
     const ip = nextTestIp();
     usedRateLimitIps.add(ip);
-    const victimPassword = 'Mật khẩu gốc của nạn nhân 2026!';
-    const attackerPassword = 'Mật khẩu kẻ tấn công muốn tráo 2026!';
+    const victimPassword = 'original victim password 2026!';
+    const attackerPassword = 'attacker replacement password 2026!';
+    const victimUsername = makeUniqueUsername('victim');
 
     // 1. Nạn nhân đăng ký (pending_verification).
     const first = await registerPost(
@@ -735,7 +769,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         {
           email,
           password: victimPassword,
-          displayName: 'Nạn Nhân',
+          fullName: 'Nạn Nhân',
+          username: victimUsername,
+          gender: 'female',
           dateOfBirth: '1999-01-01',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -757,7 +793,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         {
           email,
           password: attackerPassword,
-          displayName: 'Kẻ Tấn Công',
+          fullName: 'Kẻ Tấn Công',
+          username: makeUniqueUsername('attacker'),
+          gender: 'male',
           dateOfBirth: '2000-02-02',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -789,7 +827,7 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
 
     // 3. Sau 25 giờ (>= 24h quá hạn chưa xác minh), người dùng mới được phép đăng ký đè sạch sẽ.
     testClockMs += PENDING_VERIFICATION_EXPIRY_MS + 60 * 60 * 1000;
-    const newOwnerPassword = 'Mật khẩu mới hợp lệ sau khi hết hạn 24h!';
+    const newOwnerPassword = 'new valid owner password after 24h!';
     const thirdIp = nextTestIp();
     usedRateLimitIps.add(thirdIp);
 
@@ -799,7 +837,9 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         {
           email,
           password: newOwnerPassword,
-          displayName: 'Người Dùng Mới',
+          fullName: 'Người Dùng Mới',
+          username: makeUniqueUsername('newowner'),
+          gender: 'other',
           dateOfBirth: '1998-08-08',
           acceptedTerms: true,
           captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
@@ -822,5 +862,64 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         )
       ).valid,
     ).toBe(true);
+  });
+
+  it('Lưu đúng fullName, username (@handle duy nhất), gender và chặn trùng username khác email với 409 CONFLICT trên PostgreSQL thật', async () => {
+    const email1 = makeUniqueEmail('uname-1');
+    const email2 = makeUniqueEmail('uname-2');
+    const sharedUsername = makeUniqueUsername('shared');
+    createdEmails.add(email1);
+    createdEmails.add(email2);
+    const ip = nextTestIp();
+    usedRateLimitIps.add(ip);
+
+    const first = await registerPost(
+      makeAuthRequest(
+        '/api/v1/auth/register',
+        {
+          email: email1,
+          password: 'safe password user one 2026!',
+          fullName: 'Trần Gia Huy',
+          username: `@${sharedUsername.toUpperCase()}`,
+          gender: 'male',
+          dateOfBirth: '1999-05-05',
+          acceptedTerms: true,
+          captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
+        },
+        ip,
+      ),
+    );
+    expect(first.status).toBe(202);
+
+    const db = getDb();
+    const [createdUser] = await db.select().from(users).where(eq(users.username, sharedUsername));
+    expect(createdUser).toBeDefined();
+    expect(createdUser?.username).toBe(sharedUsername);
+    expect(createdUser?.fullName).toBe('Trần Gia Huy');
+    expect(createdUser?.gender).toBe('male');
+
+    const second = await registerPost(
+      makeAuthRequest(
+        '/api/v1/auth/register',
+        {
+          email: email2,
+          password: 'safe password user two 2026!',
+          fullName: 'Người Khác',
+          username: sharedUsername,
+          gender: 'female',
+          dateOfBirth: '2000-01-01',
+          acceptedTerms: true,
+          captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
+        },
+        ip,
+      ),
+    );
+    expect(second.status).toBe(409);
+    const secondJson = (await second.json()) as {
+      error: { code: string; message: string; details: { field?: string }[] };
+    };
+    expect(secondJson.error.code).toBe('CONFLICT');
+    expect(secondJson.error.message).toBe(AUTH_MESSAGES.usernameAlreadyExists);
+    expect(secondJson.error.details.some((d) => d.field === 'username')).toBe(true);
   });
 });

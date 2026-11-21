@@ -11,6 +11,7 @@ import {
   verificationTokens,
   type AuthIdentityRow,
   type SessionRow,
+  type UserGender,
   type UserRow,
   type VerificationTokenRow,
 } from '@/core/db/schema';
@@ -30,7 +31,9 @@ export interface CreatePendingUserParams {
   readonly publicId: string;
   readonly identityId: string;
   readonly emailNormalized: string;
-  readonly displayName: string;
+  readonly username: string;
+  readonly fullName: string;
+  readonly gender: UserGender;
   readonly dateOfBirth: string;
   readonly passwordHash: string;
   readonly pepperVersion: number;
@@ -45,7 +48,9 @@ export type OverwritePendingUserOutcome =
 export interface OverwriteExpiredPendingUserParams {
   readonly userId: string;
   readonly identityId: string;
-  readonly displayName: string;
+  readonly username: string;
+  readonly fullName: string;
+  readonly gender: UserGender;
   readonly dateOfBirth: string;
   readonly passwordHash: string;
   readonly pepperVersion: number;
@@ -120,6 +125,18 @@ export class AuthRepository {
     return rows[0] ?? null;
   }
 
+  async findUserByUsername(
+    usernameNormalized: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<UserRow | null> {
+    const rows = await executor
+      .select()
+      .from(users)
+      .where(eq(users.username, usernameNormalized))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   /**
    * Khóa dòng `users` trong DB Transaction theo thứ tự khóa chuẩn (`users` -> `advisory(familyId)`
    * -> `auth_identities`/`verification_tokens`/`sessions`) để triệt tiêu TOCTOU race condition và deadlock:
@@ -184,7 +201,9 @@ export class AuthRepository {
     await tx.insert(users).values({
       id: params.userId,
       publicId: params.publicId,
-      displayName: params.displayName,
+      username: params.username,
+      fullName: params.fullName,
+      gender: params.gender,
       dateOfBirth: params.dateOfBirth,
       status: 'pending_verification',
       createdAt: params.now,
@@ -237,7 +256,9 @@ export class AuthRepository {
     const updatedUsers = await tx
       .update(users)
       .set({
-        displayName: params.displayName,
+        username: params.username,
+        fullName: params.fullName,
+        gender: params.gender,
         dateOfBirth: params.dateOfBirth,
         updatedAt: params.now,
       })

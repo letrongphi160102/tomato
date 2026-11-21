@@ -23,7 +23,9 @@ function makeUser(overrides: Partial<UserRow> = {}): UserRow {
   return {
     id: '01950000-0000-7000-8000-000000000001',
     publicId: 'user-public-1',
-    displayName: 'User A',
+    username: 'user_a',
+    fullName: 'User A',
+    gender: 'other',
     dateOfBirth: '1999-01-01',
     status: 'active',
     createdAt: new Date('2026-01-01T00:00:00Z'),

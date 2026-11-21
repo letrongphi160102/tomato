@@ -8,7 +8,7 @@ import {
 } from '@/core/crypto/jwt';
 import { generateSecureToken, hashTokenSha256 } from '@/core/crypto/token';
 import type { DatabaseTransaction } from '@/core/db';
-import type { SessionRow, UserRow, UserStatus } from '@/core/db/schema';
+import type { SessionRow, UserGender, UserRow, UserStatus } from '@/core/db/schema';
 import { AUTH_RATE_LIMITS, getRateLimiter, type RateLimiter } from '@/core/redis';
 import { getAuditLogService, type AuditLogService } from '@/core/security/audit-log.service';
 import type { RequestClientContext } from '@/core/security/client-context';
@@ -40,7 +40,9 @@ const MIN_OPAQUE_REFRESH_TOKEN_LENGTH = 32;
 
 export interface PublicUserProfile {
   readonly public_id: string;
-  readonly displayName: string;
+  readonly username: string;
+  readonly fullName: string;
+  readonly gender: UserGender;
   readonly status: UserStatus;
 }
 
@@ -120,7 +122,9 @@ type RefreshTransactionOutcome =
 export function toPublicUserProfile(user: UserRow): PublicUserProfile {
   return {
     public_id: user.publicId,
-    displayName: user.displayName,
+    username: user.username,
+    fullName: user.fullName,
+    gender: user.gender,
     status: user.status,
   };
 }

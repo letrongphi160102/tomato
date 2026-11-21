@@ -1,12 +1,15 @@
 import { z } from 'zod';
 
-import { normalizeEmail, normalizePassword } from '@/core/crypto/normalize';
+import { normalizeEmail, normalizePassword, normalizeUsername } from '@/core/crypto/normalize';
+import { USER_GENDERS } from '@/core/db/schema/enums';
 import { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
 import { isCommonOrWeakPassword } from '@/modules/auth/common-passwords';
 
 export const EMAIL_MAX_LENGTH = 254;
-export const DISPLAY_NAME_MIN_LENGTH = 2;
-export const DISPLAY_NAME_MAX_LENGTH = 50;
+export const FULL_NAME_MIN_LENGTH = 2;
+export const FULL_NAME_MAX_LENGTH = 50;
+export const USERNAME_MIN_LENGTH = 3;
+export const USERNAME_MAX_LENGTH = 30;
 export const PASSWORD_MIN_LENGTH = 12;
 export const PASSWORD_MAX_LENGTH = 128;
 export const MIN_REGISTRATION_AGE_YEARS = 13;
@@ -16,6 +19,41 @@ export const OTP_CODE_REGEX = /^\d{6}$/;
 const ISO_DATE_ONLY_REGEX = /^(\d{4})-(\d{2})-(\d{2})$/;
 // Cấm ký tự điều khiển ASCII (CR, LF, NUL...) để tránh Email Header Injection và lỗi hiển thị.
 const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/;
+const WHITESPACE_REGEX = /\s/;
+const USERNAME_ALLOWED_REGEX = /^[a-z0-9._]+$/;
+// Chặn ký tự có dấu tiếng Việt (dấu thanh/mũ/móc tổ hợp NFD U+0300–U+036F và chữ đ/Đ U+0110–U+0111).
+const VIETNAMESE_DIACRITIC_NFD_REGEX = /[\u0300-\u036f\u0110\u0111\u1EA0-\u1EF9]/;
+
+const RESERVED_USERNAMES: ReadonlySet<string> = new Set([
+  'admin',
+  'administrator',
+  'api',
+  'auth',
+  'login',
+  'logout',
+  'register',
+  'signup',
+  'signin',
+  'settings',
+  'security',
+  'verify-email',
+  'verify_email',
+  'forgot-password',
+  'reset-password',
+  'support',
+  'help',
+  'system',
+  'root',
+  'tomato',
+  'official',
+]);
+
+/**
+ * Kiểm tra chuỗi có chứa dấu tiếng Việt hoặc chữ `đ`/`Đ` (hỗ trợ cả NFC dựng sẵn lẫn NFD tổ hợp).
+ */
+export function hasVietnameseDiacritics(value: string): boolean {
+  return VIETNAMESE_DIACRITIC_NFD_REGEX.test(value.normalize('NFD'));
+}
 
 export interface ParsedCalendarDate {
   readonly year: number;
@@ -78,25 +116,54 @@ const normalizedEmailSchema = z
   .refine((val) => val.length <= EMAIL_MAX_LENGTH, { message: AUTH_MESSAGES.emailTooLong })
   .pipe(z.email({ message: AUTH_MESSAGES.emailInvalid }));
 
-const displayNameSchema = z
-  .string({ error: AUTH_MESSAGES.displayNameRequired })
+const fullNameSchema = z
+  .string({ error: AUTH_MESSAGES.fullNameRequired })
   .transform((val) => val.trim().normalize('NFKC'))
-  .refine((val) => val.length > 0, { message: AUTH_MESSAGES.displayNameRequired })
+  .refine((val) => val.length > 0, { message: AUTH_MESSAGES.fullNameRequired })
   .refine((val) => !CONTROL_CHARS_REGEX.test(val), {
-    message: AUTH_MESSAGES.displayNameInvalidChars,
+    message: AUTH_MESSAGES.fullNameInvalidChars,
   })
-  .refine((val) => val.length >= DISPLAY_NAME_MIN_LENGTH, {
-    message: AUTH_MESSAGES.displayNameTooShort,
+  .refine((val) => val.length >= FULL_NAME_MIN_LENGTH, {
+    message: AUTH_MESSAGES.fullNameTooShort,
   })
-  .refine((val) => val.length <= DISPLAY_NAME_MAX_LENGTH, {
-    message: AUTH_MESSAGES.displayNameTooLong,
+  .refine((val) => val.length <= FULL_NAME_MAX_LENGTH, {
+    message: AUTH_MESSAGES.fullNameTooLong,
   });
 
-// Áp dụng chuẩn hóa NFKC nhưng TUYỆT ĐỐI không `.trim()` và không cắt ngắn mật khẩu > 128 ký tự.
+const usernameSchema = z
+  .string({ error: AUTH_MESSAGES.usernameRequired })
+  .transform((val) => normalizeUsername(val))
+  .refine((val) => val.length > 0, { message: AUTH_MESSAGES.usernameRequired })
+  .refine((val) => !WHITESPACE_REGEX.test(val), { message: AUTH_MESSAGES.usernameNoSpaces })
+  .refine((val) => val.length >= USERNAME_MIN_LENGTH, {
+    message: AUTH_MESSAGES.usernameTooShort,
+  })
+  .refine((val) => val.length <= USERNAME_MAX_LENGTH, {
+    message: AUTH_MESSAGES.usernameTooLong,
+  })
+  .refine((val) => USERNAME_ALLOWED_REGEX.test(val), {
+    message: AUTH_MESSAGES.usernameInvalidChars,
+  })
+  .refine((val) => !val.startsWith('.') && !val.endsWith('.') && !val.includes('..'), {
+    message: AUTH_MESSAGES.usernameInvalidDots,
+  })
+  .refine((val) => !RESERVED_USERNAMES.has(val), {
+    message: AUTH_MESSAGES.usernameReserved,
+  });
+
+const genderSchema = z.enum(USER_GENDERS, {
+  error: AUTH_MESSAGES.genderRequired,
+});
+
+// Áp dụng chuẩn hóa NFKC nhưng TUYỆT ĐỐI không `.trim()` và không cắt ngắn mật khẩu > 128 ký tự;
+// không ép kiểu ký tự (hoa/số/đặc biệt) nhưng chặn dấu tiếng Việt.
 const registrationPasswordSchema = z
   .string({ error: AUTH_MESSAGES.passwordRequired })
   .transform((val) => normalizePassword(val))
   .refine((val) => val.length > 0, { message: AUTH_MESSAGES.passwordRequired })
+  .refine((val) => !hasVietnameseDiacritics(val), {
+    message: AUTH_MESSAGES.passwordNoVietnameseDiacritics,
+  })
   .refine((val) => val.length >= PASSWORD_MIN_LENGTH, {
     message: AUTH_MESSAGES.passwordTooShort,
   })
@@ -107,9 +174,11 @@ const registrationPasswordSchema = z
 export function createRegisterInputSchema(now: () => Date = () => new Date()) {
   return z
     .object({
+      fullName: fullNameSchema,
+      username: usernameSchema,
+      gender: genderSchema,
       email: normalizedEmailSchema,
       password: registrationPasswordSchema,
-      displayName: displayNameSchema,
       dateOfBirth: z
         .string({ error: AUTH_MESSAGES.dateOfBirthRequired })
         .trim()
@@ -150,9 +219,9 @@ export function createRegisterInputSchema(now: () => Date = () => new Date()) {
         }
       }
 
-      // 2. Cấm mật khẩu trùng email, trùng tên hiển thị hoặc nằm trong danh sách mật khẩu phổ biến.
+      // 2. Cấm mật khẩu trùng email, trùng họ tên, trùng ID tài khoản hoặc nằm trong danh sách mật khẩu phổ biến.
       const passwordComparable = data.password.trim().toLowerCase();
-      const displayNameComparable = data.displayName.trim().toLowerCase();
+      const fullNameComparable = data.fullName.trim().toLowerCase();
 
       if (passwordComparable === data.email || passwordComparable.includes(data.email)) {
         ctx.addIssue({
@@ -160,11 +229,17 @@ export function createRegisterInputSchema(now: () => Date = () => new Date()) {
           path: ['password'],
           message: AUTH_MESSAGES.passwordMatchesEmail,
         });
-      } else if (passwordComparable === displayNameComparable) {
+      } else if (passwordComparable === fullNameComparable) {
         ctx.addIssue({
           code: 'custom',
           path: ['password'],
-          message: AUTH_MESSAGES.passwordMatchesDisplayName,
+          message: AUTH_MESSAGES.passwordMatchesFullName,
+        });
+      } else if (passwordComparable === data.username) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['password'],
+          message: AUTH_MESSAGES.passwordMatchesUsername,
         });
       } else if (isCommonOrWeakPassword(data.password)) {
         ctx.addIssue({

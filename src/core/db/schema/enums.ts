@@ -12,6 +12,12 @@ export type UserStatus = (typeof USER_STATUSES)[number];
 
 export const userStatusEnum = pgEnum('user_status', USER_STATUSES);
 
+export const USER_GENDERS = ['male', 'female', 'other'] as const;
+
+export type UserGender = (typeof USER_GENDERS)[number];
+
+export const userGenderEnum = pgEnum('user_gender', USER_GENDERS);
+
 export const AUTH_PROVIDERS = ['email_password'] as const;
 
 export type AuthProvider = (typeof AUTH_PROVIDERS)[number];

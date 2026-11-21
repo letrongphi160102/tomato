@@ -14,11 +14,9 @@ import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/componen
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  PASSWORD_MAX_LENGTH,
-  PASSWORD_MIN_LENGTH,
-  registerInputSchema,
-} from '@/modules/auth/auth.schemas';
+import type { UserGender } from '@/core/db/schema/enums';
+import { cn } from '@/lib/utils';
+import { registerInputSchema } from '@/modules/auth/auth.schemas';
 
 interface ApiErrorPayload {
   readonly error?: {
@@ -36,10 +34,23 @@ interface RegisterSuccessPayload {
 type FormStatus = 'idle' | 'loading' | 'success' | 'error' | 'rate_limited';
 type FieldErrors = Partial<
   Record<
-    'displayName' | 'email' | 'dateOfBirth' | 'password' | 'acceptedTerms' | 'captchaToken',
+    | 'fullName'
+    | 'username'
+    | 'gender'
+    | 'email'
+    | 'dateOfBirth'
+    | 'password'
+    | 'acceptedTerms'
+    | 'captchaToken',
     string
   >
 >;
+
+const GENDER_OPTIONS: ReadonlyArray<{ readonly value: UserGender; readonly label: string }> = [
+  { value: 'male', label: 'Nam' },
+  { value: 'female', label: 'Nữ' },
+  { value: 'other', label: 'Khác' },
+];
 
 export interface RegisterFormProps {
   readonly turnstileSiteKey: string;
@@ -49,7 +60,9 @@ export interface RegisterFormProps {
 export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) {
   const router = useRouter();
 
-  const [displayName, setDisplayName] = React.useState('');
+  const [fullName, setFullName] = React.useState('');
+  const [username, setUsername] = React.useState('');
+  const [gender, setGender] = React.useState<UserGender | ''>('');
   const [email, setEmail] = React.useState('');
   const [dateOfBirth, setDateOfBirth] = React.useState('');
   const [password, setPassword] = React.useState('');
@@ -79,8 +92,6 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
     return () => window.clearInterval(timer);
   }, [retryAfterSeconds]);
 
-  const normalizedPasswordLen = React.useMemo(() => password.normalize('NFKC').length, [password]);
-
   const clearFieldError = React.useCallback((field: keyof FieldErrors) => {
     setFieldErrors((prev) => {
       if (!prev[field]) {
@@ -105,7 +116,9 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
     // Kiểm tra nhanh phía client bằng cùng Zod schema để phản hồi tức thì;
     // máy chủ luôn xác thực độc lập hoàn toàn.
     const clientParsed = registerInputSchema.safeParse({
-      displayName,
+      fullName,
+      username,
+      gender: gender || undefined,
       email,
       dateOfBirth,
       password,
@@ -136,7 +149,9 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          displayName,
+          fullName,
+          username,
+          gender,
           email,
           dateOfBirth,
           password,
@@ -202,11 +217,13 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
 
   const isSubmitting = status === 'loading';
   const isBlocked = isSubmitting || retryAfterSeconds > 0 || status === 'success';
+  const isEmailConflict = errorCode === 'CONFLICT' && Boolean(fieldErrors.email);
+  const isUsernameConflict = errorCode === 'CONFLICT' && Boolean(fieldErrors.username);
 
   return (
     <Card className="w-full shadow-md">
-      <CardHeader className="space-y-1">
-        <CardTitle>Tạo tài khoản TOMATO</CardTitle>
+      <CardHeader className="space-y-1 text-center">
+        <CardTitle>Tạo tài khoản Tomato</CardTitle>
       </CardHeader>
 
       <CardContent>
@@ -239,14 +256,18 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
           ) : null}
 
           {status === 'error' && bannerMessage ? (
-            <Alert variant={errorCode === 'CONFLICT' ? 'warning' : 'destructive'}>
+            <Alert variant={isEmailConflict ? 'warning' : 'destructive'}>
               <AlertCircle aria-hidden="true" />
               <div className="space-y-2">
                 <AlertTitle>
-                  {errorCode === 'CONFLICT' ? 'Email đã được đăng ký' : 'Không thể đăng ký'}
+                  {isEmailConflict
+                    ? 'Email đã được đăng ký'
+                    : isUsernameConflict
+                      ? 'ID tài khoản đã được sử dụng'
+                      : 'Không thể đăng ký'}
                 </AlertTitle>
                 <AlertDescription>{bannerMessage}</AlertDescription>
-                {errorCode === 'CONFLICT' ? (
+                {isEmailConflict ? (
                   <Button asChild size="sm" variant="outline" className="bg-background">
                     <Link href="/login">Đi tới trang Đăng nhập</Link>
                   </Button>
@@ -258,26 +279,63 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
 
         <form onSubmit={handleSubmit} noValidate className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="displayName">Tên hiển thị</Label>
+            <Label htmlFor="fullName">Họ tên</Label>
             <Input
-              id="displayName"
-              name="displayName"
+              id="fullName"
+              name="fullName"
               type="text"
               autoComplete="name"
-              placeholder="Tên hiển thị"
-              value={displayName}
+              placeholder="Họ tên"
+              value={fullName}
               onChange={(event) => {
-                setDisplayName(event.target.value);
-                clearFieldError('displayName');
+                setFullName(event.target.value);
+                clearFieldError('fullName');
               }}
               disabled={isSubmitting}
-              aria-invalid={Boolean(fieldErrors.displayName)}
-              aria-describedby={fieldErrors.displayName ? 'displayName-error' : undefined}
+              aria-invalid={Boolean(fieldErrors.fullName)}
+              aria-describedby={fieldErrors.fullName ? 'fullName-error' : undefined}
               required
             />
-            {fieldErrors.displayName ? (
-              <p id="displayName-error" role="alert" className="text-xs text-destructive">
-                {fieldErrors.displayName}
+            {fieldErrors.fullName ? (
+              <p id="fullName-error" role="alert" className="text-xs text-destructive">
+                {fieldErrors.fullName}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="username">ID Tài khoản</Label>
+            <div className="relative">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm font-medium text-muted-foreground"
+              >
+                @
+              </span>
+              <Input
+                id="username"
+                name="username"
+                type="text"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="id_tai_khoan"
+                value={username}
+                onChange={(event) => {
+                  setUsername(event.target.value);
+                  clearFieldError('username');
+                }}
+                disabled={isSubmitting}
+                aria-invalid={Boolean(fieldErrors.username)}
+                aria-describedby={fieldErrors.username ? 'username-error' : undefined}
+                className="pl-7"
+                required
+              />
+            </div>
+            {fieldErrors.username ? (
+              <p id="username-error" role="alert" className="text-xs text-destructive">
+                {fieldErrors.username}
               </p>
             ) : null}
           </div>
@@ -336,26 +394,57 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
             )}
           </div>
 
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="password">Mật khẩu</Label>
-              <span
-                className={
-                  normalizedPasswordLen > PASSWORD_MAX_LENGTH
-                    ? 'text-xs font-medium text-destructive'
-                    : normalizedPasswordLen >= PASSWORD_MIN_LENGTH
-                      ? 'text-xs font-medium text-emerald-700'
-                      : 'text-xs text-muted-foreground'
-                }
-              >
-                {normalizedPasswordLen}/{PASSWORD_MIN_LENGTH}–{PASSWORD_MAX_LENGTH} ký tự
-              </span>
+          <fieldset
+            className="space-y-1.5"
+            aria-describedby={fieldErrors.gender ? 'gender-error' : undefined}
+          >
+            <legend className="text-sm font-medium leading-none">Giới tính</legend>
+            <div className="grid grid-cols-3 gap-2">
+              {GENDER_OPTIONS.map((option) => {
+                const selected = gender === option.value;
+                return (
+                  <label
+                    key={option.value}
+                    className={cn(
+                      'flex h-10 cursor-pointer items-center justify-between rounded-md border px-3 text-sm transition-colors',
+                      selected
+                        ? 'border-primary bg-primary/5 font-medium text-foreground'
+                        : 'border-input bg-background text-foreground hover:bg-accent/50',
+                      fieldErrors.gender ? 'border-destructive' : null,
+                      isSubmitting ? 'pointer-events-none opacity-50' : null,
+                    )}
+                  >
+                    <span>{option.label}</span>
+                    <input
+                      type="radio"
+                      name="gender"
+                      value={option.value}
+                      checked={selected}
+                      onChange={() => {
+                        setGender(option.value);
+                        clearFieldError('gender');
+                      }}
+                      disabled={isSubmitting}
+                      className="size-4 accent-primary"
+                    />
+                  </label>
+                );
+              })}
             </div>
+            {fieldErrors.gender ? (
+              <p id="gender-error" role="alert" className="text-xs text-destructive">
+                {fieldErrors.gender}
+              </p>
+            ) : null}
+          </fieldset>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="password">Mật khẩu</Label>
             <PasswordInput
               id="password"
               name="password"
               autoComplete="new-password"
-              placeholder="Mật khẩu mới"
+              placeholder="Mật khẩu"
               value={password}
               onChange={(event) => {
                 setPassword(event.target.value);

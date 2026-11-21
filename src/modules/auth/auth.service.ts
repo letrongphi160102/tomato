@@ -13,7 +13,7 @@ import {
   type PepperSecretProvider,
 } from '@/core/crypto/password';
 import { isPostgresUniqueViolation } from '@/core/db';
-import type { UserRow, UserStatus } from '@/core/db/schema';
+import type { UserGender, UserRow, UserStatus } from '@/core/db/schema';
 import {
   EmailDeliveryError,
   buildVerificationOtpEmail,
@@ -191,6 +191,16 @@ export class AuthService {
       };
     }
 
+    const existingUsername = await this.repository.findUserByUsername(input.username);
+    if (existingUsername) {
+      throw new AuthDomainError({
+        status: 409,
+        code: 'CONFLICT',
+        message: AUTH_MESSAGES.usernameAlreadyExists,
+        details: [{ field: 'username', message: AUTH_MESSAGES.usernameAlreadyExists }],
+      });
+    }
+
     // 4. Băm mật khẩu bằng Argon2id + Pepper ngoài transaction DB để không giữ kết nối PG trong lúc tính toán CPU.
     const { hash: passwordHash, pepperVersion } = await hashPassword(
       input.password,
@@ -211,7 +221,9 @@ export class AuthService {
             publicId,
             identityId,
             emailNormalized: input.email,
-            displayName: input.displayName,
+            username: input.username,
+            fullName: input.fullName,
+            gender: input.gender,
             dateOfBirth: input.dateOfBirth,
             passwordHash,
             pepperVersion,
@@ -237,8 +249,20 @@ export class AuthService {
         );
       });
     } catch (error) {
-      // Bắt race condition khi 2 request đăng ký trùng email chạy cùng 1 mili-giây (PostgreSQL 23505).
+      // Bắt race condition khi 2 request đăng ký đồng thời (PostgreSQL 23505):
+      // phân biệt trùng username với email khác (409 username) vs double-submit cùng email.
       if (isPostgresUniqueViolation(error)) {
+        if (isPostgresUniqueViolation(error, 'users_username_unique')) {
+          const winnerByEmail = await this.repository.findEmailIdentityWithUser(input.email);
+          if (!winnerByEmail || winnerByEmail.user.username !== input.username) {
+            throw new AuthDomainError({
+              status: 409,
+              code: 'CONFLICT',
+              message: AUTH_MESSAGES.usernameAlreadyExists,
+              details: [{ field: 'username', message: AUTH_MESSAGES.usernameAlreadyExists }],
+            });
+          }
+        }
         await this.handleConcurrentDuplicateRegistration(input.email, context);
         return {
           message: AUTH_MESSAGES.registerAccepted,
@@ -254,7 +278,7 @@ export class AuthService {
       AUTH_RATE_LIMITS.resendVerificationCooldown,
     );
 
-    await this.sendVerificationOtpEmail(input.email, input.displayName, otpCode);
+    await this.sendVerificationOtpEmail(input.email, input.fullName, otpCode);
 
     return {
       message: AUTH_MESSAGES.registerAccepted,
@@ -537,7 +561,7 @@ export class AuthService {
 
       if (reissued) {
         try {
-          await this.sendVerificationOtpEmail(email, existing.user.displayName, otpCode);
+          await this.sendVerificationOtpEmail(email, existing.user.fullName, otpCode);
         } catch (error) {
           // Lỗi SMTP đã được SmtpEmailAdapter ghi log an toàn (không chứa OTP).
           // Không ném 503 ra ngoài ở `/resend-verification` để tránh kẻ tấn công lợi dụng sự cố SMTP
@@ -735,7 +759,9 @@ export class AuthService {
     input: {
       readonly email: string;
       readonly password: string;
-      readonly displayName: string;
+      readonly username: string;
+      readonly fullName: string;
+      readonly gender: UserGender;
       readonly dateOfBirth: string;
     },
     context: RequestClientContext,
@@ -745,6 +771,18 @@ export class AuthService {
       const ageMs = currentTime.getTime() - existing.user.updatedAt.getTime();
 
       if (ageMs >= PENDING_VERIFICATION_EXPIRY_MS) {
+        if (input.username !== existing.user.username) {
+          const usernameOwner = await this.repository.findUserByUsername(input.username);
+          if (usernameOwner && usernameOwner.id !== existing.user.id) {
+            throw new AuthDomainError({
+              status: 409,
+              code: 'CONFLICT',
+              message: AUTH_MESSAGES.usernameAlreadyExists,
+              details: [{ field: 'username', message: AUTH_MESSAGES.usernameAlreadyExists }],
+            });
+          }
+        }
+
         // Tài khoản chưa xác minh đã quá hạn (>= 24 giờ): cho phép đăng ký đè sạch sẽ (Mục 4.1).
         const { hash: passwordHash, pepperVersion } = await hashPassword(
           input.password,
@@ -758,41 +796,56 @@ export class AuthService {
         const otpExpiresAt = new Date(currentTime.getTime() + EMAIL_VERIFY_OTP_TTL_MS);
         const expiryCutoff = new Date(currentTime.getTime() - PENDING_VERIFICATION_EXPIRY_MS);
 
-        const overwriteOutcome = await this.repository.getDb().transaction(async (tx) => {
-          const outcome = await this.repository.overwriteExpiredPendingUserWithOtp(
-            {
-              userId: existing.user.id,
-              identityId: existing.identity.id,
-              displayName: input.displayName,
-              dateOfBirth: input.dateOfBirth,
-              passwordHash,
-              pepperVersion,
-              otpTokenHash,
-              otpExpiresAt,
-              expiryCutoff,
-              now: currentTime,
-            },
-            tx,
-          );
-
-          if (outcome === 'overwritten') {
-            await this.auditLogService.record(
+        let overwriteOutcome;
+        try {
+          overwriteOutcome = await this.repository.getDb().transaction(async (tx) => {
+            const outcome = await this.repository.overwriteExpiredPendingUserWithOtp(
               {
                 userId: existing.user.id,
-                action: 'REGISTER',
-                ipAddress: context.ipAddress,
-                userAgent: context.userAgent,
-                metadata: {
-                  provider: 'email_password',
-                  outcome: 'pending_expired_overwritten',
-                },
+                identityId: existing.identity.id,
+                username: input.username,
+                fullName: input.fullName,
+                gender: input.gender,
+                dateOfBirth: input.dateOfBirth,
+                passwordHash,
+                pepperVersion,
+                otpTokenHash,
+                otpExpiresAt,
+                expiryCutoff,
+                now: currentTime,
               },
               tx,
             );
-          }
 
-          return outcome;
-        });
+            if (outcome === 'overwritten') {
+              await this.auditLogService.record(
+                {
+                  userId: existing.user.id,
+                  action: 'REGISTER',
+                  ipAddress: context.ipAddress,
+                  userAgent: context.userAgent,
+                  metadata: {
+                    provider: 'email_password',
+                    outcome: 'pending_expired_overwritten',
+                  },
+                },
+                tx,
+              );
+            }
+
+            return outcome;
+          });
+        } catch (error) {
+          if (isPostgresUniqueViolation(error, 'users_username_unique')) {
+            throw new AuthDomainError({
+              status: 409,
+              code: 'CONFLICT',
+              message: AUTH_MESSAGES.usernameAlreadyExists,
+              details: [{ field: 'username', message: AUTH_MESSAGES.usernameAlreadyExists }],
+            });
+          }
+          throw error;
+        }
 
         if (overwriteOutcome === 'not_pending') {
           await this.auditLogService.record({
@@ -819,7 +872,7 @@ export class AuthService {
             `resend:cooldown:${input.email}`,
             AUTH_RATE_LIMITS.resendVerificationCooldown,
           );
-          await this.sendVerificationOtpEmail(input.email, input.displayName, otpCode);
+          await this.sendVerificationOtpEmail(input.email, input.fullName, otpCode);
         }
         return;
       }
@@ -909,7 +962,7 @@ export class AuthService {
       }
 
       await verifyDummyPassword();
-      await this.sendVerificationOtpEmail(input.email, existing.user.displayName, otpCode);
+      await this.sendVerificationOtpEmail(input.email, existing.user.fullName, otpCode);
       return;
     }
 
