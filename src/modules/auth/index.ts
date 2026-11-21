@@ -1,11 +1,24 @@
 export { AuthDomainError, type AuthDomainErrorOptions } from '@/modules/auth/auth.errors';
 export { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
 export {
+  assertCanAccessUserSessions,
+  assertCanRevokeSession,
+  assertCanRevokeUserSessions,
+  canAccessUserSessions,
+  canRevokeSession,
+  type AuthenticatedPrincipal,
+} from '@/modules/auth/auth.policy';
+export {
   AuthRepository,
   type CreatePendingUserParams,
+  type CreateSessionParams,
   type IdentityWithUser,
   type OverwriteExpiredPendingUserParams,
   type ReissueEmailVerifyTokenParams,
+  type RevokeAllUserSessionsParams,
+  type RotateSessionInFamilyParams,
+  type SessionWithUser,
+  type UpdateIdentityPasswordHashParams,
 } from '@/modules/auth/auth.repository';
 export {
   DISPLAY_NAME_MAX_LENGTH,
@@ -16,15 +29,21 @@ export {
   OTP_CODE_REGEX,
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
+  SESSION_PUBLIC_ID_REGEX,
   calculateAgeYears,
   createRegisterInputSchema,
+  loginInputSchema,
   parseStrictIsoDate,
   registerInputSchema,
   resendVerificationInputSchema,
+  revokeAllSessionsInputSchema,
+  sessionPublicIdParamSchema,
   verifyEmailInputSchema,
+  type LoginInput,
   type ParsedCalendarDate,
   type RegisterInput,
   type ResendVerificationInput,
+  type RevokeAllSessionsInput,
   type VerifyEmailInput,
 } from '@/modules/auth/auth.schemas';
 export {
@@ -39,8 +58,33 @@ export {
   resetAuthServiceForTesting,
   setAuthServiceForTesting,
   type AuthServiceDependencies,
+  type LoginResult,
   type RegisterResult,
   type ResendVerificationResult,
   type VerifyEmailResult,
 } from '@/modules/auth/auth.service';
 export { COMMON_PASSWORDS, isCommonOrWeakPassword } from '@/modules/auth/common-passwords';
+export { UNKNOWN_DEVICE_LABEL, parseDeviceInfo } from '@/modules/auth/device-info';
+export {
+  FALLBACK_SESSION_IP_ADDRESS,
+  SESSION_ABSOLUTE_TTL_DAYS,
+  SESSION_ABSOLUTE_TTL_MS,
+  SESSION_IDLE_TTL_DAYS,
+  SESSION_IDLE_TTL_MS,
+  SessionService,
+  createSessionService,
+  getSessionService,
+  resetSessionServiceForTesting,
+  setSessionServiceForTesting,
+  toPublicUserProfile,
+  type CreatedSessionResult,
+  type IssuedSessionTokens,
+  type ListSessionsResult,
+  type LogoutSessionResult,
+  type PublicSessionItem,
+  type PublicUserProfile,
+  type RefreshSessionResult,
+  type RevokeAllSessionsResult,
+  type RevokeSessionResult,
+  type SessionServiceDependencies,
+} from '@/modules/auth/session.service';

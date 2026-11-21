@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import { getCookieNames } from '@/core/security/cookies';
 import { buildSecurityHeaders, generateCspNonce } from '@/core/security/headers';
+import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
 
 function isHttpsRequest(request: NextRequest): boolean {
   const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim();
@@ -13,12 +15,18 @@ function isHttpsRequest(request: NextRequest): boolean {
   return process.env.APP_URL?.startsWith('https://') ?? false;
 }
 
+function isProtectedSettingsRoute(pathname: string): boolean {
+  return pathname === '/settings' || pathname.startsWith('/settings/');
+}
+
 /**
  * Next.js 16 Proxy (thay thế `middleware.ts` đã deprecated):
  * - Sinh CSP nonce duy nhất cho mỗi request và chuyển tiếp qua header `x-nonce` cho SSR.
  * - Gắn toàn bộ Security Headers (CSP, X-Content-Type-Options, X-Frame-Options,
  *   Referrer-Policy, Permissions-Policy, và HSTS khi chạy Production HTTPS).
- * - Gắn phòng thủ `Cache-Control: no-store, max-age=0` cho mọi endpoint `/api/v1/auth/*`.
+ * - Gắn phòng thủ `Cache-Control: no-store, max-age=0` cho mọi endpoint `/api/v1/auth/*` và `/settings/*`.
+ * - Bảo vệ route `/settings/*`: chuyển hướng về `/login` nếu người dùng hoàn toàn chưa có
+ *   cả cookie Access Token lẫn Refresh Token (giữ lại quyền auto-refresh khi AT vừa hết hạn 15 phút).
  */
 export function proxy(request: NextRequest): NextResponse {
   const pathname = request.nextUrl.pathname;
@@ -26,6 +34,7 @@ export function proxy(request: NextRequest): NextResponse {
   const isHttps = isHttpsRequest(request);
   const isApiRoute = pathname.startsWith('/api/');
   const isAuthApiRoute = pathname === '/api/v1/auth' || pathname.startsWith('/api/v1/auth/');
+  const isProtectedRoute = isProtectedSettingsRoute(pathname);
 
   const nonce = generateCspNonce();
   const securityHeaders = buildSecurityHeaders({
@@ -35,6 +44,26 @@ export function proxy(request: NextRequest): NextResponse {
     isApiRoute,
     isAuthApiRoute,
   });
+
+  if (isProtectedRoute) {
+    const cookieNames = getCookieNames(isProduction);
+    const hasAccessCookie = Boolean(request.cookies.get(cookieNames.accessToken)?.value);
+    const hasRefreshCookie = Boolean(request.cookies.get(cookieNames.refreshToken)?.value);
+
+    if (!hasAccessCookie && !hasRefreshCookie) {
+      const loginUrl = new URL('/login', request.url);
+      const nextPath = `${pathname}${request.nextUrl.search}`;
+      loginUrl.searchParams.set('next', nextPath);
+
+      const redirectResponse = NextResponse.redirect(loginUrl, 307);
+      for (const [headerName, headerValue] of Object.entries(securityHeaders)) {
+        redirectResponse.headers.set(headerName, headerValue);
+      }
+      redirectResponse.headers.set('Cache-Control', AUTH_CACHE_CONTROL_HEADER);
+      redirectResponse.headers.set('Pragma', 'no-cache');
+      return redirectResponse;
+    }
+  }
 
   const requestHeaders = new Headers(request.headers);
   if (!isApiRoute) {
@@ -51,6 +80,11 @@ export function proxy(request: NextRequest): NextResponse {
 
   for (const [headerName, headerValue] of Object.entries(securityHeaders)) {
     response.headers.set(headerName, headerValue);
+  }
+
+  if (isProtectedRoute) {
+    response.headers.set('Cache-Control', AUTH_CACHE_CONTROL_HEADER);
+    response.headers.set('Pragma', 'no-cache');
   }
 
   return response;

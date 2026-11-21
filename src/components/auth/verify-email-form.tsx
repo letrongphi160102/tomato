@@ -271,17 +271,16 @@ export function VerifyEmailForm() {
             <div>
               <AlertTitle>Tài khoản đã ở trạng thái hoạt động (Active)</AlertTitle>
               <AlertDescription>
-                Địa chỉ email của bạn đã được xác nhận. Luồng Đăng nhập &amp; Quản lý Phiên sẽ mở
-                tiếp tại Cột mốc M3.
+                Địa chỉ email của bạn đã được xác nhận. Bạn có thể đăng nhập ngay bây giờ.
               </AlertDescription>
             </div>
           </Alert>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button asChild className="w-full">
-              <Link href="/">Về trang chủ TOMATO</Link>
+              <Link href="/login">Đăng nhập ngay</Link>
             </Button>
             <Button asChild variant="outline" className="w-full">
-              <Link href="/register">Đăng ký tài khoản khác</Link>
+              <Link href="/">Về trang chủ TOMATO</Link>
             </Button>
           </div>
         </CardContent>

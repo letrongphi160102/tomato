@@ -65,6 +65,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
   const [turnstileResetSignal, setTurnstileResetSignal] = React.useState(0);
 
   const [status, setStatus] = React.useState<FormStatus>('idle');
+  const [errorCode, setErrorCode] = React.useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = React.useState('');
   const [fieldErrors, setFieldErrors] = React.useState<FieldErrors>({});
   const [retryAfterSeconds, setRetryAfterSeconds] = React.useState(0);
@@ -106,6 +107,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
 
     setFieldErrors({});
     setBannerMessage('');
+    setErrorCode(null);
 
     // Kiểm tra nhanh phía client bằng cùng Zod schema để phản hồi tức thì;
     // máy chủ luôn xác thực độc lập hoàn toàn.
@@ -191,6 +193,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
       }
 
       setFieldErrors(nextErrors);
+      setErrorCode(serverCode ?? null);
       setStatus('error');
       setBannerMessage(serverMessage);
       // Token Turnstile chỉ sử dụng 1 lần: reset để người dùng lấy token mới.
@@ -244,11 +247,18 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
           ) : null}
 
           {status === 'error' && bannerMessage ? (
-            <Alert variant="destructive">
+            <Alert variant={errorCode === 'CONFLICT' ? 'warning' : 'destructive'}>
               <AlertCircle aria-hidden="true" />
-              <div>
-                <AlertTitle>Không thể đăng ký</AlertTitle>
+              <div className="space-y-2">
+                <AlertTitle>
+                  {errorCode === 'CONFLICT' ? 'Email đã được đăng ký' : 'Không thể đăng ký'}
+                </AlertTitle>
                 <AlertDescription>{bannerMessage}</AlertDescription>
+                {errorCode === 'CONFLICT' ? (
+                  <Button asChild size="sm" variant="outline" className="bg-background">
+                    <Link href="/login">Đi tới trang Đăng nhập</Link>
+                  </Button>
+                ) : null}
               </div>
             </Alert>
           ) : null}
@@ -447,6 +457,12 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
 
       <CardFooter className="flex flex-col gap-2 border-t pt-4 text-center text-sm text-muted-foreground">
         <p>
+          Đã có tài khoản TOMATO?{' '}
+          <Link href="/login" className="font-medium text-primary hover:underline">
+            Đăng nhập ngay
+          </Link>
+        </p>
+        <p className="text-xs">
           Đã nhận được mã xác minh?{' '}
           <Link href="/verify-email" className="font-medium text-primary hover:underline">
             Nhập mã OTP xác minh email

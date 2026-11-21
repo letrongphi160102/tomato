@@ -1,25 +1,23 @@
 import 'server-only';
 
 import { getCaptchaProvider, type CaptchaProvider } from '@/core/captcha';
-import { getEnv } from '@/core/config/env';
 import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
 import { generateOtpCode, hashOtpCode, verifyOtpCode } from '@/core/crypto/otp';
-import { hashPassword, verifyDummyPassword } from '@/core/crypto/password';
+import {
+  EnvPepperSecretProvider,
+  hashPassword,
+  verifyDummyPassword,
+  verifyPassword,
+  type PepperSecretProvider,
+} from '@/core/crypto/password';
 import { isPostgresUniqueViolation } from '@/core/db';
 import {
   EmailDeliveryError,
-  buildDuplicateRegistrationEmail,
   buildVerificationOtpEmail,
   getEmailProvider,
   type EmailProvider,
 } from '@/core/email';
-import { logger } from '@/core/logger';
-import {
-  AUTH_RATE_LIMITS,
-  getRateLimiter,
-  type RateLimitRule,
-  type RateLimiter,
-} from '@/core/redis';
+import { AUTH_RATE_LIMITS, getRateLimiter, type RateLimiter } from '@/core/redis';
 import { getAuditLogService, type AuditLogService } from '@/core/security/audit-log.service';
 import type { RequestClientContext } from '@/core/security/client-context';
 import { formatZodErrorDetails } from '@/core/security/http-response';
@@ -28,9 +26,16 @@ import { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
 import { AuthRepository, type IdentityWithUser } from '@/modules/auth/auth.repository';
 import {
   createRegisterInputSchema,
+  loginInputSchema,
   resendVerificationInputSchema,
   verifyEmailInputSchema,
 } from '@/modules/auth/auth.schemas';
+import {
+  SessionService,
+  toPublicUserProfile,
+  type IssuedSessionTokens,
+  type PublicUserProfile,
+} from '@/modules/auth/session.service';
 
 export const EMAIL_VERIFY_OTP_TTL_MINUTES = 15;
 export const EMAIL_VERIFY_OTP_TTL_MS = EMAIL_VERIFY_OTP_TTL_MINUTES * 60 * 1000;
@@ -38,13 +43,6 @@ export const EMAIL_VERIFY_OTP_MAX_ATTEMPTS = 5;
 export const RESEND_COOLDOWN_SECONDS = AUTH_RATE_LIMITS.resendVerificationCooldown.windowSeconds;
 // Sau 24 giờ không xác minh, tài khoản pending_verification được phép đăng ký đè theo Mục 4.1.
 export const PENDING_VERIFICATION_EXPIRY_MS = 24 * 60 * 60 * 1000;
-
-// Chặn spam email nhắc nhở vào hộp thư của chủ tài khoản đã active khi bị tấn công từ nhiều IP.
-const DUPLICATE_NOTICE_EMAIL_COOLDOWN: RateLimitRule = Object.freeze({
-  limit: 1,
-  windowSeconds: 15 * 60,
-  strategy: 'fixed_window',
-});
 
 export interface RegisterResult {
   readonly message: string;
@@ -61,12 +59,20 @@ export interface ResendVerificationResult {
   readonly cooldownSeconds: number;
 }
 
+export interface LoginResult {
+  readonly user: PublicUserProfile;
+  readonly message: string;
+  readonly tokens: IssuedSessionTokens;
+}
+
 export interface AuthServiceDependencies {
   readonly repository?: AuthRepository;
+  readonly sessionService?: SessionService;
   readonly rateLimiter?: RateLimiter;
   readonly emailProvider?: EmailProvider;
   readonly captchaProvider?: CaptchaProvider;
   readonly auditLogService?: AuditLogService;
+  readonly pepperProvider?: PepperSecretProvider;
   readonly appUrl?: string;
   readonly now?: () => Date;
 }
@@ -83,11 +89,12 @@ type VerifyOtpTransactionOutcome =
  */
 export class AuthService {
   private readonly repository: AuthRepository;
+  private readonly sessionService: SessionService;
   private readonly rateLimiter: RateLimiter;
   private readonly emailProvider: EmailProvider;
   private readonly captchaProvider: CaptchaProvider;
   private readonly auditLogService: AuditLogService;
-  private readonly resolveAppUrl: () => string;
+  private readonly pepperProvider: PepperSecretProvider;
   private readonly now: () => Date;
 
   constructor(deps: AuthServiceDependencies = {}) {
@@ -96,14 +103,23 @@ export class AuthService {
     this.emailProvider = deps.emailProvider ?? getEmailProvider();
     this.captchaProvider = deps.captchaProvider ?? getCaptchaProvider();
     this.auditLogService = deps.auditLogService ?? getAuditLogService();
-    this.resolveAppUrl = deps.appUrl ? () => deps.appUrl as string : () => getEnv().APP_URL;
+    this.pepperProvider = deps.pepperProvider ?? new EnvPepperSecretProvider();
     this.now = deps.now ?? (() => new Date());
+    this.sessionService =
+      deps.sessionService ??
+      new SessionService({
+        repository: this.repository,
+        rateLimiter: this.rateLimiter,
+        auditLogService: this.auditLogService,
+        now: this.now,
+      });
   }
 
   /**
    * Đăng ký tài khoản mới + phát hành OTP xác minh email (Mục 4.1).
    * - Luôn kiểm tra Rate Limit theo IP TRƯỚC khi validate nặng, gọi Turnstile, băm Argon2id hay truy vấn DB.
-   * - Luôn trả cùng 1 phản hồi trung tính (không lộ `id`/`public_id` hay việc email đã tồn tại).
+   * - Nếu email đã tồn tại (active/locked/suspended/deleted): trả lỗi rõ `409 CONFLICT` để điều hướng sang Đăng nhập.
+   * - Nếu email đang `pending_verification`: bảo vệ chống tráo mật khẩu trong hạn 24h và cấp lại OTP mới.
    * - Chống race condition đăng ký đồng thời bằng cách bắt mã lỗi PostgreSQL `23505`.
    */
   async register(rawInput: unknown, context: RequestClientContext): Promise<RegisterResult> {
@@ -158,7 +174,10 @@ export class AuthService {
     }
 
     // 4. Băm mật khẩu bằng Argon2id + Pepper ngoài transaction DB để không giữ kết nối PG trong lúc tính toán CPU.
-    const { hash: passwordHash, pepperVersion } = await hashPassword(input.password);
+    const { hash: passwordHash, pepperVersion } = await hashPassword(
+      input.password,
+      this.pepperProvider,
+    );
     const userId = generateUuidV7();
     const publicId = generatePublicId();
     const identityId = generateUuidV7();
@@ -380,7 +399,6 @@ export class AuthService {
    * - Chạy đủ các tầng Rate Limit TRƯỚC truy vấn DB: 3 lần/15p theo IP, cooldown 60s theo email,
    *   3 lần/15p theo email và 5 lần/giờ theo email.
    * - Vô hiệu hóa toàn bộ OTP cũ trước khi phát hành OTP mới.
-   * - Phản hồi trung tính để không làm lộ email đã tồn tại hay đã active.
    */
   async resendVerification(
     rawInput: unknown,
@@ -481,6 +499,218 @@ export class AuthService {
     };
   }
 
+  /**
+   * Đăng nhập bằng Email + Mật khẩu và khởi tạo phiên thiết bị mới (Mục 4.2 & Mục 6.1–6.2):
+   * 1. Chạy Rate Limit IP (`10 lần / 15 phút`) TRƯỚC khi validate nặng, truy DB hoặc băm Argon2id.
+   * 2. Nếu không tìm thấy identity -> vẫn chạy `verifyDummyPassword()` chống Timing Attack.
+   * 3. Sai email và sai mật khẩu trả mã lỗi `401 INVALID_CREDENTIALS` & thông báo giống hệt nhau.
+   * 4. Chỉ kiểm tra trạng thái tài khoản SAU khi xác minh đúng mật khẩu (chống dò trạng thái tài khoản).
+   * 5. Nếu tài khoản `active` và cần rehash (Pepper/Argon2 cũ) -> tự động băm lại và lưu vào DB.
+   */
+  async login(rawInput: unknown, context: RequestClientContext): Promise<LoginResult> {
+    // 1. Rate Limit theo IP chạy đầu tiên trước khi tiêu tốn CPU Argon2id hay truy DB.
+    const ipLimit = await this.rateLimiter.consume(
+      `login:ip:${context.rateLimitIpKey}`,
+      AUTH_RATE_LIMITS.loginByIp,
+    );
+    if (!ipLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(ipLimit.retryAfterSeconds),
+        retryAfterSeconds: ipLimit.retryAfterSeconds,
+      });
+    }
+
+    // 2. Xác thực cấu trúc đầu vào bằng Zod.
+    const parsed = loginInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+    const input = parsed.data;
+
+    // 3. Tra cứu danh tính theo email đã chuẩn hóa.
+    const existing = await this.repository.findEmailIdentityWithUser(input.email);
+    if (!existing || !existing.identity.passwordHash) {
+      // Chạy Argon2id giả cùng chi phí để thời gian phản hồi đồng nhất dù email không tồn tại.
+      await verifyDummyPassword();
+
+      await this.auditLogService.record({
+        userId: existing?.user.id ?? null,
+        action: 'LOGIN_FAILED',
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        metadata: {
+          provider: 'email_password',
+          reason: 'identity_not_found',
+        },
+      });
+
+      throw new AuthDomainError({
+        status: 401,
+        code: 'INVALID_CREDENTIALS',
+        message: AUTH_MESSAGES.invalidCredentials,
+      });
+    }
+
+    // 4. Đối chiếu mật khẩu qua Argon2id + Pepper đúng phiên bản.
+    const verification = await verifyPassword(
+      input.password,
+      existing.identity.passwordHash,
+      existing.identity.pepperVersion,
+      this.pepperProvider,
+    );
+
+    if (!verification.valid) {
+      await this.auditLogService.record({
+        userId: existing.user.id,
+        action: 'LOGIN_FAILED',
+        ipAddress: context.ipAddress,
+        userAgent: context.userAgent,
+        metadata: {
+          provider: 'email_password',
+          reason: 'invalid_password',
+        },
+      });
+
+      throw new AuthDomainError({
+        status: 401,
+        code: 'INVALID_CREDENTIALS',
+        message: AUTH_MESSAGES.invalidCredentials,
+      });
+    }
+
+    // 5. Chỉ tiết lộ trạng thái tài khoản sau khi người gọi đã chứng minh biết đúng mật khẩu.
+    switch (existing.user.status) {
+      case 'deleted':
+        await this.auditLogService.record({
+          userId: existing.user.id,
+          action: 'LOGIN_FAILED',
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: {
+            provider: 'email_password',
+            reason: 'account_deleted',
+          },
+        });
+        throw new AuthDomainError({
+          status: 401,
+          code: 'INVALID_CREDENTIALS',
+          message: AUTH_MESSAGES.invalidCredentials,
+        });
+
+      case 'pending_verification':
+        await this.auditLogService.record({
+          userId: existing.user.id,
+          action: 'LOGIN_FAILED',
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: {
+            provider: 'email_password',
+            reason: 'pending_verification',
+          },
+        });
+        throw new AuthDomainError({
+          status: 403,
+          code: 'EMAIL_NOT_VERIFIED',
+          message: AUTH_MESSAGES.emailNotVerified,
+        });
+
+      case 'locked':
+        await this.auditLogService.record({
+          userId: existing.user.id,
+          action: 'LOGIN_FAILED',
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: {
+            provider: 'email_password',
+            reason: 'account_locked',
+          },
+        });
+        throw new AuthDomainError({
+          status: 403,
+          code: 'ACCOUNT_LOCKED',
+          message: AUTH_MESSAGES.accountLocked,
+        });
+
+      case 'suspended':
+        await this.auditLogService.record({
+          userId: existing.user.id,
+          action: 'LOGIN_FAILED',
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: {
+            provider: 'email_password',
+            reason: 'account_suspended',
+          },
+        });
+        throw new AuthDomainError({
+          status: 403,
+          code: 'ACCOUNT_SUSPENDED',
+          message: AUTH_MESSAGES.accountSuspended,
+        });
+
+      case 'active':
+        break;
+    }
+
+    // 6. Nếu Pepper version hoặc tham số Argon2id đã cũ -> tính toán bản băm mới ngoài DB transaction.
+    const rehashed = verification.needsRehash
+      ? await hashPassword(input.password, this.pepperProvider)
+      : null;
+
+    const currentTime = this.now();
+
+    const createdSession = await this.repository.getDb().transaction(async (tx) => {
+      if (rehashed) {
+        await this.repository.updateIdentityPasswordHash(
+          {
+            identityId: existing.identity.id,
+            passwordHash: rehashed.hash,
+            pepperVersion: rehashed.pepperVersion,
+            now: currentTime,
+          },
+          tx,
+        );
+      }
+
+      if (existing.identity.failedLoginAttempts > 0) {
+        await this.repository.resetFailedLoginAttempts(existing.identity.id, currentTime, tx);
+      }
+
+      const issued = await this.sessionService.createSessionForUser(existing.user, context, tx);
+
+      await this.auditLogService.record(
+        {
+          userId: existing.user.id,
+          action: 'LOGIN_SUCCESS',
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: {
+            provider: 'email_password',
+            sessionPublicId: issued.session.publicId,
+            deviceInfo: issued.session.deviceInfo,
+            passwordRehashed: Boolean(rehashed),
+          },
+        },
+        tx,
+      );
+
+      return issued;
+    });
+
+    return {
+      user: toPublicUserProfile(existing.user),
+      message: AUTH_MESSAGES.loginSuccess,
+      tokens: createdSession.tokens,
+    };
+  }
+
   private async handleExistingAccountRegistration(
     existing: IdentityWithUser,
     input: {
@@ -497,7 +727,10 @@ export class AuthService {
 
       if (ageMs >= PENDING_VERIFICATION_EXPIRY_MS) {
         // Tài khoản chưa xác minh đã quá hạn (>= 24 giờ): cho phép đăng ký đè sạch sẽ (Mục 4.1).
-        const { hash: passwordHash, pepperVersion } = await hashPassword(input.password);
+        const { hash: passwordHash, pepperVersion } = await hashPassword(
+          input.password,
+          this.pepperProvider,
+        );
         const otpCode = generateOtpCode();
         const otpTokenHash = hashOtpCode(otpCode, {
           userId: existing.user.id,
@@ -546,8 +779,6 @@ export class AuthService {
 
       // Tài khoản `pending_verification` còn trong hạn (< 24 giờ): TUYỆT ĐỐI không ghi đè mật khẩu
       // (chống pre-account takeover), chỉ cấp lại OTP mới (nếu hết cooldown) và vô hiệu hóa OTP cũ.
-      await verifyDummyPassword();
-
       const cooldown = await this.rateLimiter.consume(
         `resend:cooldown:${input.email}`,
         AUTH_RATE_LIMITS.resendVerificationCooldown,
@@ -604,10 +835,7 @@ export class AuthService {
       return;
     }
 
-    // Email thuộc tài khoản đã tồn tại (`active` / `locked` / `suspended` / `deleted`):
-    // chạy `verifyDummyPassword()` để đồng bộ thời gian Argon2id, ngăn timing enumeration.
-    await verifyDummyPassword();
-
+    // Email đã được đăng ký (active / locked / suspended / deleted): trả lỗi 409 rõ ràng để điều hướng sang Đăng nhập (Mục 4.1).
     await this.auditLogService.record({
       userId: existing.user.id,
       action: 'REGISTER',
@@ -620,9 +848,12 @@ export class AuthService {
       },
     });
 
-    if (existing.user.status === 'active' || existing.user.status === 'locked') {
-      await this.sendDuplicateNoticeWithCooldown(input.email, existing.user.displayName);
-    }
+    throw new AuthDomainError({
+      status: 409,
+      code: 'CONFLICT',
+      message: AUTH_MESSAGES.emailAlreadyExists,
+      details: [{ field: 'email', message: AUTH_MESSAGES.emailAlreadyExists }],
+    });
   }
 
   private async handleConcurrentDuplicateRegistration(
@@ -642,8 +873,13 @@ export class AuthService {
       },
     });
 
-    if (winner && (winner.user.status === 'active' || winner.user.status === 'locked')) {
-      await this.sendDuplicateNoticeWithCooldown(emailNormalized, winner.user.displayName);
+    if (winner && winner.user.status !== 'pending_verification') {
+      throw new AuthDomainError({
+        status: 409,
+        code: 'CONFLICT',
+        message: AUTH_MESSAGES.emailAlreadyExists,
+        details: [{ field: 'email', message: AUTH_MESSAGES.emailAlreadyExists }],
+      });
     }
   }
 
@@ -675,44 +911,6 @@ export class AuthService {
         });
       }
       throw error;
-    }
-  }
-
-  private async sendDuplicateNoticeWithCooldown(
-    toEmail: string,
-    displayName: string,
-  ): Promise<void> {
-    const noticeCooldown = await this.rateLimiter.consume(
-      `register:dup-notice:${toEmail}`,
-      DUPLICATE_NOTICE_EMAIL_COOLDOWN,
-    );
-    if (!noticeCooldown.allowed) {
-      return;
-    }
-
-    const template = buildDuplicateRegistrationEmail({
-      displayName,
-      appUrl: this.resolveAppUrl(),
-    });
-
-    try {
-      await this.emailProvider.send({
-        to: toEmail,
-        subject: template.subject,
-        html: template.html,
-        text: template.text,
-      });
-    } catch (error) {
-      // Lỗi gửi email nhắc nhở không được phép làm lộ sự tồn tại tài khoản hay gây HTTP 500.
-      const err = error as Error;
-      logger.warn(
-        {
-          component: 'auth',
-          action: 'duplicate_registration_notice',
-          errorName: err.name ?? 'Error',
-        },
-        'Không gửi được email nhắc nhở đăng ký trùng',
-      );
     }
   }
 }

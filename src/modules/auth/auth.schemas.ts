@@ -195,3 +195,35 @@ export const resendVerificationInputSchema = z.object({
 });
 
 export type ResendVerificationInput = z.infer<typeof resendVerificationInputSchema>;
+
+// Đăng nhập chấp nhận mọi mật khẩu không rỗng <= 128 ký tự (chuẩn hóa NFKC, không trim)
+// để mật khẩu sai ngắn hơn 12 ký tự vẫn đi qua nhánh xác minh đồng nhất và trả 401 INVALID_CREDENTIALS.
+const loginPasswordSchema = z
+  .string({ error: AUTH_MESSAGES.passwordRequired })
+  .transform((val) => normalizePassword(val))
+  .refine((val) => val.length > 0, { message: AUTH_MESSAGES.passwordRequired })
+  .refine((val) => val.length <= PASSWORD_MAX_LENGTH, {
+    message: AUTH_MESSAGES.passwordTooLong,
+  });
+
+export const loginInputSchema = z.object({
+  email: normalizedEmailSchema,
+  password: loginPasswordSchema,
+  // Trường tùy chọn sẵn sàng cho ngưỡng Turnstile nâng cao tại Cột mốc M5.
+  captchaToken: z.string().trim().max(4096).optional(),
+});
+
+export type LoginInput = z.infer<typeof loginInputSchema>;
+
+export const SESSION_PUBLIC_ID_REGEX = /^[A-Za-z0-9_-]{1,36}$/;
+
+export const sessionPublicIdParamSchema = z
+  .string()
+  .trim()
+  .regex(SESSION_PUBLIC_ID_REGEX, AUTH_MESSAGES.sessionNotFound);
+
+export const revokeAllSessionsInputSchema = z.object({
+  includeCurrent: z.boolean().default(false),
+});
+
+export type RevokeAllSessionsInput = z.infer<typeof revokeAllSessionsInputSchema>;

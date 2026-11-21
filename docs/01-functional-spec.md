@@ -66,8 +66,8 @@ Mỗi tài khoản tại một thời điểm chỉ thuộc 1 trong 5 trạng th
   5. Hệ thống thông báo xác minh thành công và điều hướng sang trang Đăng nhập (hoặc tự động cấp phiên đăng nhập mới).
 
 - **Các trường hợp ngoại lệ (Edge Cases):**
-  - **Email đã tồn tại (đã `active`):** Không trả lỗi trực tiếp "Email đã tồn tại" để tránh lộ thông tin tài khoản. Trả thông báo chung ở màn hình xác minh (ví dụ: *"Nếu email hợp lệ và chưa được đăng ký, mã xác nhận đã được gửi"*), đồng thời gửi một email riêng nhắc chủ tài khoản rằng có người vừa thử đăng ký bằng email này.
-  - **Email đã tồn tại nhưng đang ở trạng thái `pending_verification`:** Cho phép gửi lại mã OTP mới và vô hiệu hóa mã OTP cũ.
+  - **Email đã tồn tại (đã `active`, `locked` hoặc `suspended`):** Trả về lỗi rõ ràng (`409 Conflict`) thông báo email đã được đăng ký và điều hướng người dùng sang trang Đăng nhập (tương tự trải nghiệm UX của Facebook; vẫn áp dụng Rate Limit & Cloudflare Turnstile để chống lạm dụng quét hàng loạt).
+  - **Email đã tồn tại nhưng đang ở trạng thái `pending_verification`:** Cho phép gửi lại mã OTP mới và vô hiệu hóa mã OTP cũ (nếu còn trong hạn 24 giờ, không ghi đè mật khẩu).
   - **Nhập sai OTP:** Tối đa **5 lần thử** cho mỗi mã OTP. Quá 5 lần, mã OTP hiện tại bị hủy ngay lập tức, người dùng phải yêu cầu gửi mã mới.
   - **Gửi lại mã OTP (Resend):** Bắt buộc chờ tối thiểu **60 giây** giữa 2 lần yêu cầu và giới hạn tối đa 5 lần/giờ.
   - **Đăng ký trùng đồng thời (Race Condition):** Hai request cùng đăng ký 1 email trong cùng 1 mili-giây sẽ được tầng Database bắt lỗi `UNIQUE constraint` và xử lý êm đẹp, không trả lỗi 500.
@@ -119,9 +119,9 @@ Mỗi tài khoản tại một thời điểm chỉ thuộc 1 trong 5 trạng th
 **Mục đích:** Khôi phục quyền truy cập an toàn khi người dùng quên mật khẩu hoặc mở khóa tài khoản bị `locked`.
 
 - **Luồng yêu cầu (Forgot Password):**
-  1. Người dùng nhập email (kèm CAPTCHA nếu phát hiện gửi nhiều lần).
-  2. Hệ thống luôn trả về thông báo chung: *"Nếu email tồn tại trong hệ thống, liên kết đặt lại mật khẩu đã được gửi"*.
-  3. Nếu tài khoản tồn tại (`active` hoặc `locked`), hệ thống sinh 1 token ngẫu nhiên dùng một lần (hiệu lực **15 phút**), vô hiệu hóa mọi token đặt lại mật khẩu trước đó và gửi link qua email.
+  1. Người dùng nhập email (kèm CAPTCHA nếu phát hiện gửi nhiều lần và áp dụng Rate Limit chống quét hàng loạt).
+  2. Nếu email **không tồn tại** trong hệ thống (hoặc tài khoản đã bị xóa): trả thông báo rõ ràng rằng không tìm thấy tài khoản gắn với email này (tương tự trải nghiệm UX của Facebook).
+  3. Nếu email **tồn tại** (`active` hoặc `locked`): tiếp tục xử lý sinh 1 token ngẫu nhiên dùng một lần (hiệu lực **15 phút**), vô hiệu hóa mọi token đặt lại mật khẩu trước đó, gửi link đặt lại mật khẩu qua email và thông báo đã gửi liên kết khôi phục.
 - **Luồng đặt lại (Reset Password):**
   1. Người dùng mở link, nhập mật khẩu mới (tuân thủ quy tắc 12–128 ký tự).
   2. Hệ thống xác thực token hợp lệ, chưa dùng và chưa hết hạn, cập nhật mật khẩu mới, mở khóa tài khoản nếu đang ở trạng thái `locked`, đánh dấu token đã sử dụng.

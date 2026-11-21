@@ -190,3 +190,27 @@ export function getCookieFromRequest(request: Request, cookieName: string): stri
   const cookies = parseCookieHeader(request.headers.get('cookie'));
   return cookies.get(cookieName) ?? null;
 }
+
+export interface ParsedAuthCookies {
+  readonly accessToken: string | null;
+  readonly refreshToken: string | null;
+  readonly csrfToken: string | null;
+}
+
+/**
+ * Đọc đồng bộ cả 3 cookie phiên (`accessToken`, `refreshToken`, `csrfToken`) theo đúng tên
+ * môi trường (`__Host-` ở Production HTTPS, không prefix ở Local HTTP).
+ */
+export function getAuthCookiesFromRequest(
+  request: Request,
+  isProduction = isProductionCookieEnv(),
+): ParsedAuthCookies {
+  const names = getCookieNames(isProduction);
+  const cookies = parseCookieHeader(request.headers.get('cookie'));
+
+  return {
+    accessToken: cookies.get(names.accessToken) ?? null,
+    refreshToken: cookies.get(names.refreshToken) ?? null,
+    csrfToken: cookies.get(names.csrfToken) ?? null,
+  };
+}

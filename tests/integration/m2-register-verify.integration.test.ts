@@ -458,7 +458,7 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
     expect(body.error.code).toBe('TOKEN_EXPIRED');
   });
 
-  it('Bảo mật: đăng ký trùng email đã active không lộ lỗi tồn tại và gửi email nhắc nhở riêng', async () => {
+  it('Đăng ký trùng email đã active trả 409 CONFLICT rõ ràng để chuyển sang Đăng nhập và giữ nguyên mật khẩu chủ tài khoản', async () => {
     const email = makeUniqueEmail('dup-active');
     createdEmails.add(email);
     const ip = nextTestIp();
@@ -481,7 +481,6 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
       ),
     );
     expect(firstReg.status).toBe(202);
-    const firstBody = await firstReg.json();
 
     const otp = extractSixDigitOtp(emailSpy.getLatestFor(email)!.text);
     const verified = await verifyPost(
@@ -489,7 +488,7 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
     );
     expect(verified.status).toBe(200);
 
-    // Bước 2: Người khác cố đăng ký trùng email đã active.
+    // Bước 2: Người khác cố đăng ký trùng email đã active -> trả 409 CONFLICT rõ ràng.
     const dupReg = await registerPost(
       makeAuthRequest(
         '/api/v1/auth/register',
@@ -505,14 +504,17 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
       ),
     );
 
-    // Trạng thái HTTP & payload JSON phải GIỐNG HỆT lần đăng ký mới.
-    expect(dupReg.status).toBe(firstReg.status);
-    expect(await dupReg.json()).toEqual(firstBody);
+    expect(dupReg.status).toBe(409);
+    const dupJson = (await dupReg.json()) as {
+      error: { code: string; message: string; details: { field?: string }[] };
+    };
+    expect(dupJson.error.code).toBe('CONFLICT');
+    expect(dupJson.error.message).toBe(AUTH_MESSAGES.emailAlreadyExists);
+    expect(dupJson.error.details.some((d) => d.field === 'email')).toBe(true);
 
-    // Email nhắc nhở được gửi riêng tới chủ tài khoản.
+    // Không gửi thêm email mới.
     const allMails = emailSpy.getAllFor(email);
-    expect(allMails).toHaveLength(2);
-    expect(allMails[1]?.subject).toContain('Thông báo yêu cầu đăng ký');
+    expect(allMails).toHaveLength(1);
 
     // Mật khẩu & trạng thái của chủ tài khoản không hề bị thay đổi.
     const db = getDb();

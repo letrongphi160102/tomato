@@ -1,0 +1,691 @@
+import 'server-only';
+
+import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
+import {
+  AccessTokenVerificationError,
+  signAccessToken,
+  verifyAccessToken,
+} from '@/core/crypto/jwt';
+import { generateSecureToken, hashTokenSha256 } from '@/core/crypto/token';
+import type { DatabaseTransaction } from '@/core/db';
+import type { SessionRow, UserRow, UserStatus } from '@/core/db/schema';
+import { AUTH_RATE_LIMITS, getRateLimiter, type RateLimiter } from '@/core/redis';
+import { getAuditLogService, type AuditLogService } from '@/core/security/audit-log.service';
+import type { RequestClientContext } from '@/core/security/client-context';
+import { formatZodErrorDetails } from '@/core/security/http-response';
+import { AuthDomainError } from '@/modules/auth/auth.errors';
+import { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
+import {
+  assertCanAccessUserSessions,
+  assertCanRevokeSession,
+  assertCanRevokeUserSessions,
+  type AuthenticatedPrincipal,
+} from '@/modules/auth/auth.policy';
+import { AuthRepository } from '@/modules/auth/auth.repository';
+import {
+  revokeAllSessionsInputSchema,
+  sessionPublicIdParamSchema,
+} from '@/modules/auth/auth.schemas';
+import { UNKNOWN_DEVICE_LABEL, parseDeviceInfo } from '@/modules/auth/device-info';
+
+export const SESSION_ABSOLUTE_TTL_DAYS = 30;
+export const SESSION_ABSOLUTE_TTL_MS = SESSION_ABSOLUTE_TTL_DAYS * 24 * 60 * 60 * 1000;
+export const SESSION_IDLE_TTL_DAYS = 14;
+export const SESSION_IDLE_TTL_MS = SESSION_IDLE_TTL_DAYS * 24 * 60 * 60 * 1000;
+// Địa chỉ IPv4 chưa xác định theo RFC 1122 dùng cho cột `sessions.ip_address INET NOT NULL`
+// khi request chạy cục bộ không đi qua reverse proxy gắn header IP.
+export const FALLBACK_SESSION_IP_ADDRESS = '0.0.0.0';
+
+const MIN_OPAQUE_REFRESH_TOKEN_LENGTH = 32;
+
+export interface PublicUserProfile {
+  readonly public_id: string;
+  readonly displayName: string;
+  readonly status: UserStatus;
+}
+
+export interface IssuedSessionTokens {
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  readonly csrfToken: string;
+}
+
+export interface CreatedSessionResult {
+  readonly session: SessionRow;
+  readonly tokens: IssuedSessionTokens;
+}
+
+export interface RefreshSessionResult {
+  readonly refreshed: true;
+  readonly user: PublicUserProfile;
+  readonly tokens: {
+    readonly accessToken: string;
+    readonly refreshToken: string;
+  };
+}
+
+export interface LogoutSessionResult {
+  readonly loggedOut: true;
+  readonly message: string;
+}
+
+export interface PublicSessionItem {
+  readonly public_id: string;
+  readonly deviceInfo: string;
+  readonly ipAddress: string;
+  readonly createdAt: string;
+  readonly lastUsedAt: string;
+  readonly expiresAt: string;
+  readonly isCurrent: boolean;
+}
+
+export interface ListSessionsResult {
+  readonly sessions: readonly PublicSessionItem[];
+}
+
+export interface RevokeSessionResult {
+  readonly revoked: true;
+  readonly sessionPublicId: string;
+  readonly revokedCurrent: boolean;
+  readonly message: string;
+}
+
+export interface RevokeAllSessionsResult {
+  readonly revokedCount: number;
+  readonly includeCurrent: boolean;
+  readonly message: string;
+}
+
+export interface SessionServiceDependencies {
+  readonly repository?: AuthRepository;
+  readonly rateLimiter?: RateLimiter;
+  readonly auditLogService?: AuditLogService;
+  readonly now?: () => Date;
+}
+
+type RefreshTransactionOutcome =
+  | {
+      readonly kind: 'rotated';
+      readonly user: UserRow;
+      readonly newSessionPublicId: string;
+      readonly newRefreshToken: string;
+    }
+  | { readonly kind: 'reuse_detected' }
+  | { readonly kind: 'invalid' }
+  | { readonly kind: 'revoked' }
+  | { readonly kind: 'expired' }
+  | { readonly kind: 'idle_expired' }
+  | { readonly kind: 'inactive_user' };
+
+export function toPublicUserProfile(user: UserRow): PublicUserProfile {
+  return {
+    public_id: user.publicId,
+    displayName: user.displayName,
+    status: user.status,
+  };
+}
+
+/**
+ * Tầng nghiệp vụ Quản lý Phiên & Thiết bị (tách biệt hoàn toàn khỏi Next.js HTTP/Cookies).
+ * - Quản lý vòng đời Access Token (15p), Refresh Token (>=256-bit, SHA-256, family_id),
+ *   xoay vòng nguyên tử trong DB Transaction, phát hiện tái sử dụng (Reuse Detection),
+ *   hạn tuyệt đối 30 ngày, hạn không hoạt động 14 ngày và phân quyền chống IDOR qua `auth.policy.ts`.
+ */
+export class SessionService {
+  private readonly repository: AuthRepository;
+  private readonly rateLimiter: RateLimiter;
+  private readonly auditLogService: AuditLogService;
+  private readonly now: () => Date;
+
+  constructor(deps: SessionServiceDependencies = {}) {
+    this.repository = deps.repository ?? new AuthRepository();
+    this.rateLimiter = deps.rateLimiter ?? getRateLimiter();
+    this.auditLogService = deps.auditLogService ?? getAuditLogService();
+    this.now = deps.now ?? (() => new Date());
+  }
+
+  /**
+   * Khởi tạo phiên mới cho thiết bị đăng nhập:
+   * sinh UUIDv7 nội bộ, `public_id` công khai, `family_id`, Refresh Token >= 256-bit (chỉ lưu SHA-256),
+   * Access Token JWT 15 phút (`sub`, `sid`) và CSRF Token 256-bit mới chống CSRF fixation.
+   */
+  async createSessionForUser(
+    user: UserRow,
+    context: RequestClientContext,
+    tx?: DatabaseTransaction,
+  ): Promise<CreatedSessionResult> {
+    const currentTime = this.now();
+    const sessionId = generateUuidV7();
+    const sessionPublicId = generatePublicId();
+    const familyId = generatePublicId();
+    const refreshToken = generateSecureToken(32);
+    const refreshTokenHash = hashTokenSha256(refreshToken);
+    const csrfToken = generateSecureToken(32);
+    const deviceInfo = parseDeviceInfo(context.userAgent);
+    const ipAddress = context.ipAddress ?? FALLBACK_SESSION_IP_ADDRESS;
+    const expiresAt = new Date(currentTime.getTime() + SESSION_ABSOLUTE_TTL_MS);
+
+    const session = await this.repository.createSession(
+      {
+        id: sessionId,
+        publicId: sessionPublicId,
+        userId: user.id,
+        familyId,
+        refreshTokenHash,
+        deviceInfo,
+        ipAddress,
+        lastUsedAt: currentTime,
+        expiresAt,
+        createdAt: currentTime,
+      },
+      tx ?? this.repository.getDb(),
+    );
+
+    const accessToken = await signAccessToken(
+      {
+        userPublicId: user.publicId,
+        sessionPublicId: session.publicId,
+      },
+      {
+        nowSeconds: Math.floor(currentTime.getTime() / 1000),
+      },
+    );
+
+    return {
+      session,
+      tokens: {
+        accessToken,
+        refreshToken,
+        csrfToken,
+      },
+    };
+  }
+
+  /**
+   * Xác thực Access Token JWT và đối chiếu đồng bộ phiên/tài khoản trong PostgreSQL
+   * để đảm bảo thao tác đăng xuất / thu hồi thiết bị có hiệu lực ngay lập tức trên mọi API Auth.
+   */
+  async authenticateAccessToken(accessToken: string | null): Promise<AuthenticatedPrincipal> {
+    if (!accessToken || accessToken.trim().length === 0) {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+      });
+    }
+
+    const currentTime = this.now();
+    let claims;
+    try {
+      claims = await verifyAccessToken(accessToken, { currentDate: currentTime });
+    } catch (error) {
+      if (error instanceof AccessTokenVerificationError) {
+        throw new AuthDomainError({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          message: AUTH_MESSAGES.unauthorized,
+        });
+      }
+      throw error;
+    }
+
+    const match = await this.repository.findSessionWithUserByPublicId(claims.sid);
+    if (!match) {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+      });
+    }
+
+    const { session, user } = match;
+    const isAbsoluteExpired = session.expiresAt.getTime() <= currentTime.getTime();
+    const isIdleExpired =
+      currentTime.getTime() - session.lastUsedAt.getTime() > SESSION_IDLE_TTL_MS;
+
+    if (
+      user.publicId !== claims.sub ||
+      user.status !== 'active' ||
+      session.revokedAt !== null ||
+      isAbsoluteExpired ||
+      isIdleExpired
+    ) {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+      });
+    }
+
+    return { user, session };
+  }
+
+  /**
+   * Xoay vòng Refresh Token nguyên tử trong DB Transaction kèm Reuse Detection (Mục 6.2):
+   * - Nếu phát hiện Refresh Token cũ đã từng bị xoay vòng (`token_rotated` / `token_reuse`)
+   *   -> thu hồi TOÀN BỘ phiên còn sống cùng `family_id`, ghi Audit Log `TOKEN_REUSE_DETECTED`,
+   *   yêu cầu Route Handler xóa cookie và trả `401`.
+   * - Kiểm tra cả hạn tuyệt đối (30 ngày) và hạn không hoạt động (14 ngày).
+   */
+  async refreshSession(
+    refreshToken: string | null,
+    context: RequestClientContext,
+  ): Promise<RefreshSessionResult> {
+    const ipLimit = await this.rateLimiter.consume(
+      `refresh:ip:${context.rateLimitIpKey}`,
+      AUTH_RATE_LIMITS.refreshByIp,
+    );
+    if (!ipLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(ipLimit.retryAfterSeconds),
+        retryAfterSeconds: ipLimit.retryAfterSeconds,
+      });
+    }
+
+    if (!refreshToken || refreshToken.trim().length < MIN_OPAQUE_REFRESH_TOKEN_LENGTH) {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+        clearCookies: true,
+      });
+    }
+
+    const currentTime = this.now();
+    const tokenHash = hashTokenSha256(refreshToken);
+
+    // Quan trọng: trả về kết quả phân nhánh thay vì throw bên trong transaction,
+    // để lệnh thu hồi toàn bộ `family_id` và bản ghi `TOKEN_REUSE_DETECTED` LUÔN được COMMIT.
+    const outcome = await this.repository
+      .getDb()
+      .transaction<RefreshTransactionOutcome>(async (tx) => {
+        const session = await this.repository.lockSessionByRefreshTokenHash(tokenHash, tx);
+        if (!session) {
+          return { kind: 'invalid' };
+        }
+
+        if (session.revokedAt !== null) {
+          if (session.revokeReason === 'token_rotated' || session.revokeReason === 'token_reuse') {
+            const revokedIds = await this.repository.revokeSessionFamily(
+              session.familyId,
+              currentTime,
+              'token_reuse',
+              tx,
+            );
+
+            await this.auditLogService.record(
+              {
+                userId: session.userId,
+                action: 'TOKEN_REUSE_DETECTED',
+                ipAddress: context.ipAddress,
+                userAgent: context.userAgent,
+                metadata: {
+                  familyId: session.familyId,
+                  reusedSessionPublicId: session.publicId,
+                  revokedActiveSessionsCount: revokedIds.length,
+                },
+              },
+              tx,
+            );
+
+            return { kind: 'reuse_detected' };
+          }
+
+          return { kind: 'revoked' };
+        }
+
+        if (session.expiresAt.getTime() <= currentTime.getTime()) {
+          await this.repository.revokeSessionById(session.id, currentTime, 'expired', tx);
+          return { kind: 'expired' };
+        }
+
+        if (currentTime.getTime() - session.lastUsedAt.getTime() > SESSION_IDLE_TTL_MS) {
+          await this.repository.revokeSessionById(session.id, currentTime, 'idle_timeout', tx);
+          return { kind: 'idle_expired' };
+        }
+
+        const user = await this.repository.findUserById(session.userId, tx);
+        if (!user || user.status !== 'active') {
+          await this.repository.revokeSessionById(session.id, currentTime, 'account_inactive', tx);
+          return { kind: 'inactive_user' };
+        }
+
+        const newSessionId = generateUuidV7();
+        const newSessionPublicId = generatePublicId();
+        const newRefreshToken = generateSecureToken(32);
+        const newRefreshTokenHash = hashTokenSha256(newRefreshToken);
+        const deviceInfo = context.userAgent
+          ? parseDeviceInfo(context.userAgent)
+          : (session.deviceInfo ?? UNKNOWN_DEVICE_LABEL);
+        const ipAddress = context.ipAddress ?? session.ipAddress;
+
+        const rotatedSession = await this.repository.rotateSessionInFamily(
+          {
+            previousSessionId: session.id,
+            rotatedAt: currentTime,
+            newSession: {
+              id: newSessionId,
+              publicId: newSessionPublicId,
+              userId: session.userId,
+              familyId: session.familyId,
+              refreshTokenHash: newRefreshTokenHash,
+              deviceInfo,
+              ipAddress,
+              lastUsedAt: currentTime,
+              // Giữ nguyên mốc đăng nhập ban đầu và hạn tuyệt đối 30 ngày của chuỗi phiên.
+              expiresAt: session.expiresAt,
+              createdAt: session.createdAt,
+            },
+          },
+          tx,
+        );
+
+        if (!rotatedSession) {
+          return { kind: 'revoked' };
+        }
+
+        return {
+          kind: 'rotated',
+          user,
+          newSessionPublicId: rotatedSession.publicId,
+          newRefreshToken,
+        };
+      });
+
+    if (outcome.kind !== 'rotated') {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+        clearCookies: true,
+      });
+    }
+
+    const accessToken = await signAccessToken(
+      {
+        userPublicId: outcome.user.publicId,
+        sessionPublicId: outcome.newSessionPublicId,
+      },
+      {
+        nowSeconds: Math.floor(currentTime.getTime() / 1000),
+      },
+    );
+
+    return {
+      refreshed: true,
+      user: toPublicUserProfile(outcome.user),
+      tokens: {
+        accessToken,
+        refreshToken: outcome.newRefreshToken,
+      },
+    };
+  }
+
+  /**
+   * Đăng xuất thiết bị hiện tại: thu hồi phiên trong DB (hỗ trợ cả khi Access Token đã hết hạn
+   * bằng cách dự phòng tra cứu Refresh Token đang hoạt động) và ghi Audit Log `SESSION_REVOKED`.
+   */
+  async logoutCurrentSession(
+    tokens: { readonly accessToken: string | null; readonly refreshToken: string | null },
+    context: RequestClientContext,
+  ): Promise<LogoutSessionResult> {
+    const currentTime = this.now();
+    let targetSession: SessionRow | null = null;
+
+    if (tokens.accessToken && tokens.accessToken.trim().length > 0) {
+      try {
+        const claims = await verifyAccessToken(tokens.accessToken, { currentDate: currentTime });
+        const match = await this.repository.findSessionWithUserByPublicId(claims.sid);
+        if (match && match.user.publicId === claims.sub && match.session.revokedAt === null) {
+          targetSession = match.session;
+        }
+      } catch {
+        // Access Token có thể đã hết hạn sau 15 phút; rơi sang kiểm tra Refresh Token bên dưới.
+      }
+    }
+
+    if (
+      !targetSession &&
+      tokens.refreshToken &&
+      tokens.refreshToken.trim().length >= MIN_OPAQUE_REFRESH_TOKEN_LENGTH
+    ) {
+      const candidate = await this.repository.findSessionByRefreshTokenHash(
+        hashTokenSha256(tokens.refreshToken),
+      );
+      if (candidate && candidate.revokedAt === null) {
+        targetSession = candidate;
+      }
+    }
+
+    if (targetSession) {
+      const sessionToRevoke = targetSession;
+      await this.repository.getDb().transaction(async (tx) => {
+        const revoked = await this.repository.revokeSessionById(
+          sessionToRevoke.id,
+          currentTime,
+          'user_logout',
+          tx,
+        );
+
+        if (revoked) {
+          await this.auditLogService.record(
+            {
+              userId: sessionToRevoke.userId,
+              action: 'SESSION_REVOKED',
+              ipAddress: context.ipAddress,
+              userAgent: context.userAgent,
+              metadata: {
+                scope: 'current_session',
+                sessionPublicId: sessionToRevoke.publicId,
+                reason: 'user_logout',
+              },
+            },
+            tx,
+          );
+        }
+      });
+    }
+
+    return {
+      loggedOut: true,
+      message: AUTH_MESSAGES.logoutSuccess,
+    };
+  }
+
+  getCurrentUser(principal: AuthenticatedPrincipal): PublicUserProfile {
+    return toPublicUserProfile(principal.user);
+  }
+
+  async listActiveSessions(principal: AuthenticatedPrincipal): Promise<ListSessionsResult> {
+    assertCanAccessUserSessions(principal, principal.user.id);
+
+    const currentTime = this.now();
+    const idleCutoff = new Date(currentTime.getTime() - SESSION_IDLE_TTL_MS);
+    const activeRows = await this.repository.listActiveSessionsByUserId(
+      principal.user.id,
+      currentTime,
+      idleCutoff,
+    );
+
+    const items: PublicSessionItem[] = activeRows.map((row) => ({
+      public_id: row.publicId,
+      deviceInfo: row.deviceInfo ?? UNKNOWN_DEVICE_LABEL,
+      ipAddress: row.ipAddress,
+      createdAt: row.createdAt.toISOString(),
+      lastUsedAt: row.lastUsedAt.toISOString(),
+      expiresAt: row.expiresAt.toISOString(),
+      isCurrent: row.publicId === principal.session.publicId,
+    }));
+
+    return { sessions: items };
+  }
+
+  /**
+   * Thu hồi 1 thiết bị cụ thể theo `session.public_id`.
+   * Bắt buộc kiểm tra chủ sở hữu qua `assertCanRevokeSession` (Deny by default -> 404 nếu sai chủ).
+   */
+  async revokeSession(
+    principal: AuthenticatedPrincipal,
+    rawSessionPublicId: string,
+    context: RequestClientContext,
+  ): Promise<RevokeSessionResult> {
+    const parsedId = sessionPublicIdParamSchema.safeParse(rawSessionPublicId);
+    if (!parsedId.success) {
+      throw new AuthDomainError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: AUTH_MESSAGES.sessionNotFound,
+      });
+    }
+
+    const targetSession = await this.repository.findSessionByPublicId(parsedId.data);
+    assertCanRevokeSession(principal, targetSession);
+
+    if (targetSession.revokedAt !== null) {
+      throw new AuthDomainError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: AUTH_MESSAGES.sessionNotFound,
+      });
+    }
+
+    const currentTime = this.now();
+    const revokedCurrent = targetSession.id === principal.session.id;
+
+    const didRevoke = await this.repository.getDb().transaction(async (tx) => {
+      const revoked = await this.repository.revokeSessionById(
+        targetSession.id,
+        currentTime,
+        'session_revoked',
+        tx,
+      );
+
+      if (revoked) {
+        await this.auditLogService.record(
+          {
+            userId: principal.user.id,
+            action: 'SESSION_REVOKED',
+            ipAddress: context.ipAddress,
+            userAgent: context.userAgent,
+            metadata: {
+              scope: 'single_session',
+              targetSessionPublicId: targetSession.publicId,
+              revokedCurrent,
+            },
+          },
+          tx,
+        );
+      }
+
+      return revoked;
+    });
+
+    if (!didRevoke) {
+      throw new AuthDomainError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: AUTH_MESSAGES.sessionNotFound,
+      });
+    }
+
+    return {
+      revoked: true,
+      sessionPublicId: targetSession.publicId,
+      revokedCurrent,
+      message: AUTH_MESSAGES.sessionRevoked,
+    };
+  }
+
+  /**
+   * Đăng xuất đồng loạt tất cả thiết bị khác (mặc định `includeCurrent: false`) hoặc toàn bộ thiết bị.
+   * Bắt buộc kiểm tra qua `auth.policy.ts`.
+   */
+  async revokeAllSessions(
+    principal: AuthenticatedPrincipal,
+    rawInput: unknown,
+    context: RequestClientContext,
+  ): Promise<RevokeAllSessionsResult> {
+    assertCanRevokeUserSessions(principal, principal.user.id);
+
+    const parsed = revokeAllSessionsInputSchema.safeParse(rawInput ?? {});
+    if (!parsed.success) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    const { includeCurrent } = parsed.data;
+    const currentTime = this.now();
+
+    const revokedCount = await this.repository.getDb().transaction(async (tx) => {
+      const count = await this.repository.revokeAllUserSessions(
+        {
+          userId: principal.user.id,
+          excludeSessionId: includeCurrent ? undefined : principal.session.id,
+          revokedAt: currentTime,
+          reason: includeCurrent ? 'revoke_all_sessions' : 'revoke_other_sessions',
+        },
+        tx,
+      );
+
+      await this.auditLogService.record(
+        {
+          userId: principal.user.id,
+          action: 'SESSION_REVOKED',
+          ipAddress: context.ipAddress,
+          userAgent: context.userAgent,
+          metadata: {
+            scope: includeCurrent ? 'all_sessions' : 'other_sessions',
+            revokedCount: count,
+            currentSessionPublicId: principal.session.publicId,
+          },
+        },
+        tx,
+      );
+
+      return count;
+    });
+
+    return {
+      revokedCount,
+      includeCurrent,
+      message: includeCurrent
+        ? AUTH_MESSAGES.allSessionsRevoked
+        : AUTH_MESSAGES.allOtherSessionsRevoked,
+    };
+  }
+}
+
+export function createSessionService(deps: SessionServiceDependencies = {}): SessionService {
+  return new SessionService(deps);
+}
+
+const globalForSessionService = globalThis as typeof globalThis & {
+  __tomatoSessionService?: SessionService;
+};
+
+export function getSessionService(): SessionService {
+  if (!globalForSessionService.__tomatoSessionService) {
+    globalForSessionService.__tomatoSessionService = createSessionService();
+  }
+  return globalForSessionService.__tomatoSessionService;
+}
+
+export function setSessionServiceForTesting(service: SessionService): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('setSessionServiceForTesting chỉ được phép gọi trong môi trường test');
+  }
+  globalForSessionService.__tomatoSessionService = service;
+}
+
+export function resetSessionServiceForTesting(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('resetSessionServiceForTesting chỉ được phép gọi trong môi trường test');
+  }
+  globalForSessionService.__tomatoSessionService = undefined;
+}

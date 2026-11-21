@@ -260,7 +260,7 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
     expect(mockFindUser).not.toHaveBeenCalled();
   });
 
-  it('đăng ký trùng email đã active trả phản hồi trung tính giống hệt và gửi email nhắc nhở', async () => {
+  it('đăng ký trùng email đã active trả lỗi 409 CONFLICT rõ ràng để điều hướng sang Đăng nhập và ghi Audit Log', async () => {
     const sentMessages: EmailMessage[] = [];
     const auditRecord = vi.fn().mockResolvedValue({ id: 'audit-1' });
 
@@ -314,26 +314,27 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
       appUrl: allowedOrigin,
     });
 
-    const result = await service.register(
-      {
-        email: 'EXISTING-ACTIVE@example.com',
-        password: 'cụm mật khẩu an toàn khác hẳn 2026',
-        displayName: 'Người Thử Trùng',
-        dateOfBirth: '1999-03-03',
-        acceptedTerms: true,
-        captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
-      },
-      { ipAddress: '198.51.100.20', rateLimitIpKey: '198.51.100.20', userAgent: 'Vitest' },
+    await expect(
+      service.register(
+        {
+          email: 'EXISTING-ACTIVE@example.com',
+          password: 'cụm mật khẩu an toàn khác hẳn 2026',
+          displayName: 'Người Thử Trùng',
+          dateOfBirth: '1999-03-03',
+          acceptedTerms: true,
+          captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
+        },
+        { ipAddress: '198.51.100.20', rateLimitIpKey: '198.51.100.20', userAgent: 'Vitest' },
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof AuthDomainError &&
+        err.status === 409 &&
+        err.code === 'CONFLICT' &&
+        err.message === AUTH_MESSAGES.emailAlreadyExists,
     );
 
-    expect(result).toEqual({
-      message: AUTH_MESSAGES.registerAccepted,
-      verificationRequired: true,
-    });
-    expect(sentMessages).toHaveLength(1);
-    expect(sentMessages[0]?.to).toBe('existing-active@example.com');
-    expect(sentMessages[0]?.subject).toContain('Thông báo yêu cầu đăng ký');
-    expect(sentMessages[0]?.html).toContain('hoàn toàn an toàn');
+    expect(sentMessages).toHaveLength(0);
     expect(auditRecord).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'REGISTER',

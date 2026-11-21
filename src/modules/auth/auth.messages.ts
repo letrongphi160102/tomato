@@ -1,14 +1,32 @@
 /**
  * Bộ từ điển thông báo Tiếng Việt tập trung cho phân hệ Auth (Mục 2.2 — chuẩn bị nền tảng i18n P1).
- * Đảm bảo đồng nhất tuyệt đối các chuỗi chống lộ tồn tại tài khoản (Account Enumeration).
+ * Đảm bảo đồng nhất chuỗi thông báo lỗi đăng nhập chống lộ tài khoản qua `/login`.
  */
 export const AUTH_MESSAGES = Object.freeze({
-  // Phản hồi chung chống User Enumeration
-  registerAccepted:
-    'Nếu email hợp lệ và chưa được đăng ký, mã xác minh gồm 6 chữ số đã được gửi tới hộp thư của bạn.',
+  // Đăng ký & Xác minh Email
+  registerAccepted: 'Đăng ký thành công! Mã xác minh gồm 6 chữ số đã được gửi tới hộp thư của bạn.',
+  emailAlreadyExists: 'Địa chỉ email này đã được đăng ký tài khoản TOMATO. Vui lòng đăng nhập.',
   resendAccepted:
     'Nếu tài khoản đang chờ xác minh, mã xác minh mới đã được gửi tới hộp thư của bạn.',
   emailVerified: 'Xác minh email thành công! Tài khoản TOMATO của bạn đã được kích hoạt.',
+
+  // Đăng nhập, Trạng thái tài khoản & Quản lý Phiên (M3)
+  loginSuccess: 'Đăng nhập thành công.',
+  logoutSuccess: 'Bạn đã đăng xuất khỏi thiết bị này.',
+  // Thông báo duy nhất dùng chung cho cả sai email, sai mật khẩu và tài khoản đã xóa (Mục 4.2).
+  invalidCredentials: 'Email hoặc mật khẩu không chính xác.',
+  emailNotVerified:
+    'Tài khoản của bạn chưa được xác minh email. Vui lòng nhập mã OTP hoặc yêu cầu gửi lại mã mới.',
+  accountLocked:
+    'Tài khoản của bạn đang bị tạm khóa để bảo vệ an toàn. Vui lòng sử dụng tính năng Quên mật khẩu để mở khóa qua email.',
+  accountSuspended:
+    'Tài khoản của bạn đã bị tạm đình chỉ do vi phạm chính sách sử dụng của TOMATO.',
+  unauthorized: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.',
+  forbidden: 'Bạn không có quyền thực hiện thao tác này.',
+  sessionNotFound: 'Không tìm thấy phiên đăng nhập được yêu cầu.',
+  sessionRevoked: 'Đã đăng xuất thiết bị khỏi tài khoản của bạn.',
+  allOtherSessionsRevoked: 'Đã đăng xuất khỏi tất cả các thiết bị khác.',
+  allSessionsRevoked: 'Đã đăng xuất khỏi tất cả các thiết bị.',
 
   // Validation lỗi đầu vào
   invalidJsonBody: 'Dữ liệu gửi lên không phải định dạng JSON hợp lệ.',

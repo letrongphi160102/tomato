@@ -31,6 +31,7 @@ export interface RateLimiterOptions {
 export const AUTH_RATE_LIMITS = Object.freeze({
   registerByIp: Object.freeze({ limit: 5, windowSeconds: 15 * 60, strategy: 'sliding_window' }),
   loginByIp: Object.freeze({ limit: 10, windowSeconds: 15 * 60, strategy: 'sliding_window' }),
+  refreshByIp: Object.freeze({ limit: 30, windowSeconds: 15 * 60, strategy: 'sliding_window' }),
   forgotPasswordByIp: Object.freeze({
     limit: 3,
     windowSeconds: 15 * 60,
