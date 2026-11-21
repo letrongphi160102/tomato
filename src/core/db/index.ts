@@ -1,12 +1,26 @@
 import 'server-only';
 
+import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 
 import { getEnv } from '@/core/config/env';
+import * as schema from '@/core/db/schema';
 import { logger } from '@/core/logger';
+
+export type Database = NodePgDatabase<typeof schema>;
+export type DatabaseTransaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+export type DbExecutor = Database | DatabaseTransaction;
+
+export {
+  PG_ERROR_CODES,
+  extractPostgresConstraintName,
+  extractPostgresErrorCode,
+  isPostgresUniqueViolation,
+} from '@/core/db/errors';
 
 const globalForDb = globalThis as typeof globalThis & {
   __tomatoPgPool?: Pool;
+  __tomatoDrizzleDb?: Database;
 };
 
 function createDatabasePool(): Pool {
@@ -42,6 +56,13 @@ export function getDatabasePool(): Pool {
   return globalForDb.__tomatoPgPool;
 }
 
+export function getDb(): Database {
+  if (!globalForDb.__tomatoDrizzleDb) {
+    globalForDb.__tomatoDrizzleDb = drizzle(getDatabasePool(), { schema });
+  }
+  return globalForDb.__tomatoDrizzleDb;
+}
+
 export async function checkDatabaseHealth(timeoutMs = 2_000): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -73,6 +94,7 @@ export async function checkDatabaseHealth(timeoutMs = 2_000): Promise<boolean> {
 }
 
 export async function closeDatabasePool(): Promise<void> {
+  globalForDb.__tomatoDrizzleDb = undefined;
   if (globalForDb.__tomatoPgPool) {
     const pool = globalForDb.__tomatoPgPool;
     globalForDb.__tomatoPgPool = undefined;
