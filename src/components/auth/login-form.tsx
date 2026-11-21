@@ -3,20 +3,13 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { AlertCircle, CheckCircle2, Clock, Loader2, LogIn, MailCheck } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, Loader2, LogIn } from 'lucide-react';
 
 import { PasswordInput } from '@/components/auth/password-input';
 import { savePendingVerificationHint } from '@/components/auth/pending-verification-storage';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { authFetch } from '@/lib/auth-client';
@@ -177,6 +170,18 @@ export function LoginForm({ nextPath }: LoginFormProps) {
         return;
       }
 
+      // Nếu tài khoản chưa xác minh email, lưu email tạm vào sessionStorage và chuyển thẳng sang trang nhập OTP.
+      if (serverCode === 'EMAIL_NOT_VERIFIED') {
+        savePendingVerificationHint({
+          email: clientParsed.data.email,
+          savedAt: Date.now(),
+          sentAt: 0,
+          notice: serverMessage,
+        });
+        router.push('/verify-email');
+        return;
+      }
+
       const nextErrors: FieldErrors = {};
       for (const detail of errorBody.error?.details ?? []) {
         const key = detail.field as keyof FieldErrors | undefined;
@@ -194,19 +199,6 @@ export function LoginForm({ nextPath }: LoginFormProps) {
       setErrorCode(null);
       setBannerMessage('Không thể kết nối đến máy chủ. Vui lòng kiểm tra mạng và thử lại.');
     }
-  }
-
-  function handleGoToVerifyEmail() {
-    const normalizedEmail = email.trim().normalize('NFKC').toLowerCase();
-    if (normalizedEmail) {
-      savePendingVerificationHint({
-        email: normalizedEmail,
-        sentAt: 0,
-        notice:
-          'Tài khoản của bạn chưa xác minh email. Bạn có thể nhập mã OTP hoặc bấm gửi lại mã.',
-      });
-    }
-    router.push('/verify-email');
   }
 
   if (checkingSession) {
@@ -229,9 +221,6 @@ export function LoginForm({ nextPath }: LoginFormProps) {
     <Card className="w-full shadow-md">
       <CardHeader className="space-y-1">
         <CardTitle>Đăng nhập TOMATO</CardTitle>
-        <CardDescription>
-          Nhập email và mật khẩu để truy cập tài khoản và quản lý thiết bị của bạn.
-        </CardDescription>
       </CardHeader>
 
       <CardContent>
@@ -263,26 +252,7 @@ export function LoginForm({ nextPath }: LoginFormProps) {
             </Alert>
           ) : null}
 
-          {status === 'error' && errorCode === 'EMAIL_NOT_VERIFIED' ? (
-            <Alert variant="warning">
-              <MailCheck aria-hidden="true" />
-              <div className="space-y-2">
-                <AlertTitle>Email chưa được xác minh</AlertTitle>
-                <AlertDescription>{bannerMessage}</AlertDescription>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={handleGoToVerifyEmail}
-                  className="bg-background"
-                >
-                  Đi tới xác minh Email &amp; gửi lại OTP
-                </Button>
-              </div>
-            </Alert>
-          ) : null}
-
-          {status === 'error' && errorCode !== 'EMAIL_NOT_VERIFIED' && bannerMessage ? (
+          {status === 'error' && bannerMessage ? (
             <Alert variant={errorCode === 'ACCOUNT_LOCKED' ? 'warning' : 'destructive'}>
               <AlertCircle aria-hidden="true" />
               <div>
@@ -373,12 +343,6 @@ export function LoginForm({ nextPath }: LoginFormProps) {
           Chưa có tài khoản TOMATO?{' '}
           <Link href="/register" className="font-medium text-primary hover:underline">
             Đăng ký ngay
-          </Link>
-        </p>
-        <p className="text-xs">
-          Chưa xác minh email?{' '}
-          <Link href="/verify-email" className="font-medium text-primary hover:underline">
-            Nhập mã OTP xác minh
           </Link>
         </p>
       </CardFooter>

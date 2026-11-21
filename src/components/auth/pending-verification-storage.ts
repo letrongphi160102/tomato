@@ -3,6 +3,9 @@ const PENDING_HINT_TTL_MS = 30 * 60 * 1000; // 30 phút
 
 export interface PendingVerificationHint {
   readonly email: string;
+  /** Mốc lưu trạng thái tạm (ms) dùng để tính TTL 30 phút của phiên xác minh phía client. */
+  readonly savedAt: number;
+  /** Mốc gửi OTP gần nhất (ms) dùng cho cooldown 60s; đặt `0` nếu chuyển từ `/login` chưa vừa gửi. */
   readonly sentAt: number;
   readonly notice?: string;
 }
@@ -51,10 +54,12 @@ export function loadPendingVerificationHint(): PendingVerificationHint | null {
       return null;
     }
     const parsed = JSON.parse(raw) as Partial<PendingVerificationHint>;
+    const savedAt = typeof parsed.savedAt === 'number' ? parsed.savedAt : parsed.sentAt;
     if (
       typeof parsed.email !== 'string' ||
       typeof parsed.sentAt !== 'number' ||
-      Date.now() - parsed.sentAt > PENDING_HINT_TTL_MS
+      typeof savedAt !== 'number' ||
+      Date.now() - savedAt > PENDING_HINT_TTL_MS
     ) {
       window.sessionStorage.removeItem(STORAGE_KEY);
       cachedRaw = null;
@@ -64,6 +69,7 @@ export function loadPendingVerificationHint(): PendingVerificationHint | null {
     cachedRaw = raw;
     cachedHint = {
       email: parsed.email,
+      savedAt,
       sentAt: parsed.sentAt,
       notice: typeof parsed.notice === 'string' ? parsed.notice : undefined,
     };

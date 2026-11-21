@@ -22,9 +22,6 @@ export default function HomePage() {
         <Button asChild variant="outline" size="lg">
           <Link href="/register">Đăng ký tài khoản</Link>
         </Button>
-        <Button asChild variant="secondary" size="lg">
-          <Link href="/settings/security">Quản lý Thiết bị</Link>
-        </Button>
         <Button asChild variant="ghost" size="lg">
           <Link href="/api/health">Kiểm tra /api/health</Link>
         </Button>

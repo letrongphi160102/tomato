@@ -10,14 +10,7 @@ import { savePendingVerificationHint } from '@/components/auth/pending-verificat
 import { TurnstileWidget } from '@/components/auth/turnstile-widget';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -154,11 +147,13 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
 
       if (response.ok) {
         const data = (await response.json()) as RegisterSuccessPayload;
+        const now = Date.now();
         setStatus('success');
         setBannerMessage(data.message);
         savePendingVerificationHint({
           email: clientParsed.data.email,
-          sentAt: Date.now(),
+          savedAt: now,
+          sentAt: now,
           notice: data.message,
         });
         router.push('/verify-email');
@@ -212,9 +207,6 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
     <Card className="w-full shadow-md">
       <CardHeader className="space-y-1">
         <CardTitle>Tạo tài khoản TOMATO</CardTitle>
-        <CardDescription>
-          Nhập thông tin của bạn để đăng ký và nhận mã xác minh email 6 chữ số.
-        </CardDescription>
       </CardHeader>
 
       <CardContent>
@@ -272,7 +264,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
               name="displayName"
               type="text"
               autoComplete="name"
-              placeholder="Ví dụ: Nguyễn Minh Anh"
+              placeholder="Tên hiển thị"
               value={displayName}
               onChange={(event) => {
                 setDisplayName(event.target.value);
@@ -280,18 +272,14 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
               }}
               disabled={isSubmitting}
               aria-invalid={Boolean(fieldErrors.displayName)}
-              aria-describedby={fieldErrors.displayName ? 'displayName-error' : 'displayName-hint'}
+              aria-describedby={fieldErrors.displayName ? 'displayName-error' : undefined}
               required
             />
             {fieldErrors.displayName ? (
               <p id="displayName-error" role="alert" className="text-xs text-destructive">
                 {fieldErrors.displayName}
               </p>
-            ) : (
-              <p id="displayName-hint" className="text-xs text-muted-foreground">
-                Từ 2 đến 50 ký tự.
-              </p>
-            )}
+            ) : null}
           </div>
 
           <div className="space-y-1.5">
@@ -367,7 +355,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
               id="password"
               name="password"
               autoComplete="new-password"
-              placeholder="Tối thiểu 12 ký tự (hỗ trợ khoảng trắng và dấu tiếng Việt)"
+              placeholder="Mật khẩu mới"
               value={password}
               onChange={(event) => {
                 setPassword(event.target.value);
@@ -375,19 +363,14 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
               }}
               disabled={isSubmitting}
               aria-invalid={Boolean(fieldErrors.password)}
-              aria-describedby={fieldErrors.password ? 'password-error' : 'password-hint'}
+              aria-describedby={fieldErrors.password ? 'password-error' : undefined}
               required
             />
             {fieldErrors.password ? (
               <p id="password-error" role="alert" className="text-xs text-destructive">
                 {fieldErrors.password}
               </p>
-            ) : (
-              <p id="password-hint" className="text-xs text-muted-foreground">
-                Từ 12 đến 128 ký tự, cho phép dán từ trình quản lý mật khẩu, không trùng email, tên
-                hiển thị hoặc mật khẩu phổ biến.
-              </p>
-            )}
+            ) : null}
           </div>
 
           <div className="space-y-1.5">
@@ -460,12 +443,6 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
           Đã có tài khoản TOMATO?{' '}
           <Link href="/login" className="font-medium text-primary hover:underline">
             Đăng nhập ngay
-          </Link>
-        </p>
-        <p className="text-xs">
-          Đã nhận được mã xác minh?{' '}
-          <Link href="/verify-email" className="font-medium text-primary hover:underline">
-            Nhập mã OTP xác minh email
           </Link>
         </p>
       </CardFooter>
