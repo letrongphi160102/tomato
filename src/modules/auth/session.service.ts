@@ -485,16 +485,20 @@ export class SessionService {
     if (targetSession) {
       const sessionToRevoke = targetSession;
       await this.repository.getDb().transaction(async (tx) => {
+        // Tuân thủ thứ tự khóa chuẩn (`users FOR SHARE` -> `advisory(familyId)` -> `sessions`)
+        // và thu hồi toàn bộ chuỗi `family_id` của thiết bị hiện tại để triệt tiêu race condition
+        // khi `/refresh` vừa xoay vòng `RT1 -> RT2` song song trong cùng mili-giây với `/logout`.
+        await this.repository.lockUserById(sessionToRevoke.userId, tx, 'share');
         await this.repository.acquireSessionFamilyLock(sessionToRevoke.familyId, tx);
-        const revoked = await this.repository.revokeSessionById(
-          sessionToRevoke.id,
+        const revokedIds = await this.repository.revokeSessionFamily(
+          sessionToRevoke.familyId,
           sessionToRevoke.userId,
           currentTime,
           'user_logout',
           tx,
         );
 
-        if (revoked) {
+        if (revokedIds.length > 0) {
           await this.auditLogService.record(
             {
               userId: sessionToRevoke.userId,
@@ -504,6 +508,7 @@ export class SessionService {
               metadata: {
                 scope: 'current_session',
                 sessionPublicId: sessionToRevoke.publicId,
+                revokedSessionsCount: revokedIds.length,
                 reason: 'user_logout',
               },
             },
@@ -580,6 +585,9 @@ export class SessionService {
     const revokedCurrent = targetSession.id === principal.session.id;
 
     const didRevoke = await this.repository.getDb().transaction(async (tx) => {
+      // Tuân thủ thứ tự khóa toàn cục (`users FOR SHARE` -> `advisory(familyId)` -> `sessions`)
+      // để chống deadlock khi chạy đồng thời với `changePassword` / `resetPassword` (`users FOR UPDATE`).
+      await this.repository.lockUserById(principal.user.id, tx, 'share');
       await this.repository.acquireSessionFamilyLock(targetSession.familyId, tx);
       const revoked = await this.repository.revokeSessionById(
         targetSession.id,

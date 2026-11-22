@@ -114,11 +114,13 @@ describe('Security M0: Pino redact chống rò rỉ dữ liệu nhạy cảm', (
       'synthetic-smtp-app-password',
       'postgresql://tomato:synthetic-db-pass@127.0.0.1:5432/tomato',
       '__Host-tomato_at=synthetic-at-cookie',
+      'https://tomato.example.com/reset-password?token=synthetic-reset-token-256bit',
     ];
 
     testLogger.error(
       {
         csrfToken: extraSecrets[0],
+        resetUrl: extraSecrets[6],
         session: {
           refreshTokenHash: extraSecrets[1],
           otpTokenHash: extraSecrets[2],

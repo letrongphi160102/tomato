@@ -431,7 +431,18 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
           updatedAt: new Date(),
         }),
         lockUserById: vi.fn().mockResolvedValue(principal.user),
-        findSessionByPublicId: vi.fn().mockResolvedValue(principal.session),
+        findSessionByPublicIdForUser: vi.fn().mockResolvedValue(principal.session),
+        acquireSessionFamilyLock: vi.fn().mockResolvedValue(undefined),
+        findLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
+          id: '01950000-0000-7000-8000-000000004055',
+          userId: principal.user.id,
+          purpose: 'password_change',
+          tokenHash: wrongDomainOtpHash,
+          attemptCount: 0,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          consumedAt: null,
+          createdAt: new Date(),
+        }),
         lockLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
           id: '01950000-0000-7000-8000-000000004055',
           userId: principal.user.id,
@@ -561,5 +572,131 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
 
     expect(result.reset).toBe(true);
     expect(failingEmailProvider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('Security Audit Hardening: changePassword ném lỗi để ROLLBACK thay vì commit nửa vời khi thu hồi phiên hiện tại thất bại, và logout thu hồi cả family_id theo đúng thứ tự khóa', async () => {
+    const principal = makeActivePrincipal();
+    const currentPassword = 'current strong passphrase 2026!';
+    const hashed = await hashPassword(currentPassword);
+    const otpCode = '318294';
+    const validOtpHash = hashOtpCode(otpCode, {
+      userId: principal.user.id,
+      purpose: 'password_change',
+    });
+
+    const txRolledBack = vi.fn();
+    const callOrder: string[] = [];
+
+    const service = new AuthService({
+      rateLimiter: makeAllowRateLimiter(),
+      repository: {
+        getDb: () => ({
+          transaction: async <T>(fn: (tx: unknown) => Promise<T>) => {
+            try {
+              return await fn({});
+            } catch (err) {
+              txRolledBack();
+              throw err;
+            }
+          },
+        }),
+        findEmailIdentityByUserId: vi.fn().mockResolvedValue({
+          id: '01950000-0000-7000-8000-000000004002',
+          userId: principal.user.id,
+          provider: 'email_password',
+          identifierNormalized: 'rollback@tomato.test',
+          passwordHash: hashed.hash,
+          pepperVersion: hashed.pepperVersion,
+          verifiedAt: new Date(),
+          failedLoginAttempts: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+        findLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
+          id: '01950000-0000-7000-8000-000000004088',
+          userId: principal.user.id,
+          purpose: 'password_change',
+          tokenHash: validOtpHash,
+          attemptCount: 0,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          consumedAt: null,
+          createdAt: new Date(),
+        }),
+        lockUserById: vi.fn().mockResolvedValue(principal.user),
+        findSessionByPublicIdForUser: vi.fn().mockResolvedValue(principal.session),
+        acquireSessionFamilyLock: vi.fn().mockResolvedValue(undefined),
+        lockLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
+          id: '01950000-0000-7000-8000-000000004088',
+          userId: principal.user.id,
+          purpose: 'password_change',
+          tokenHash: validOtpHash,
+          attemptCount: 0,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          consumedAt: null,
+          createdAt: new Date(),
+        }),
+        updateIdentityPasswordHash: vi.fn().mockResolvedValue(true),
+        resetFailedLoginAttempts: vi.fn().mockResolvedValue(undefined),
+        consumeAllUnconsumedTokensByPurpose: vi.fn().mockResolvedValue(undefined),
+        revokeAllUserSessions: vi.fn().mockResolvedValue(1),
+        // Giả lập thu hồi phiên hiện tại thất bại bất ngờ sau khi đã cập nhật password trong tx.
+        revokeSessionById: vi.fn().mockResolvedValue(false),
+      } as unknown as AuthRepository,
+      emailProvider: { provider: 'memory', send: vi.fn() },
+      auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+      appUrl: allowedOrigin,
+    });
+
+    await expect(
+      service.changePassword(
+        principal,
+        {
+          currentPassword,
+          newPassword: 'brand new safe passphrase 2028!',
+          otpCode,
+        },
+        { ipAddress: '203.0.113.80', rateLimitIpKey: '203.0.113.80', userAgent: 'Vitest' },
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof AuthDomainError && err.status === 401 && err.code === 'UNAUTHORIZED',
+    );
+    expect(txRolledBack).toHaveBeenCalledTimes(1);
+
+    // Kiểm tra logoutCurrentSession khóa đúng thứ tự `users FOR SHARE` -> `advisory(familyId)` -> `revokeSessionFamily`.
+    const sessionSvc = new SessionService({
+      rateLimiter: makeAllowRateLimiter(),
+      auditLogService: {
+        record: vi.fn().mockResolvedValue({ id: 'audit-logout' }),
+      } as unknown as AuditLogService,
+      repository: {
+        getDb: () => ({
+          transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn({}),
+        }),
+        findSessionByRefreshTokenHash: vi.fn().mockResolvedValue(principal.session),
+        lockUserById: vi.fn(async () => {
+          callOrder.push('lockUserById:share');
+          return principal.user;
+        }),
+        acquireSessionFamilyLock: vi.fn(async () => {
+          callOrder.push('acquireSessionFamilyLock');
+        }),
+        revokeSessionFamily: vi.fn(async () => {
+          callOrder.push('revokeSessionFamily');
+          return [principal.session.id];
+        }),
+      } as unknown as AuthRepository,
+    });
+
+    const logoutRes = await sessionSvc.logoutCurrentSession(
+      { accessToken: null, refreshToken: generateSecureToken(32) },
+      { ipAddress: '203.0.113.81', rateLimitIpKey: '203.0.113.81', userAgent: 'Vitest' },
+    );
+    expect(logoutRes.loggedOut).toBe(true);
+    expect(callOrder).toEqual([
+      'lockUserById:share',
+      'acquireSessionFamilyLock',
+      'revokeSessionFamily',
+    ]);
   });
 });

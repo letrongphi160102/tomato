@@ -33,6 +33,7 @@ describe('AuditLogService & Metadata Sanitization', () => {
         leakedJwtInSafeKey: syntheticJwt,
         leakedArgon2InSafeKey: '$argon2id$v=19$m=19456,t=2,p=1$salt$digest',
         leakedSessionValInSafeKey: '__Host-tomato_rt=synthetic-leaked-value',
+        leakedResetUrlInSafeKey: 'https://tomato.example.com/reset-password?token=secret-reset-val',
       },
     });
 
@@ -45,6 +46,7 @@ describe('AuditLogService & Metadata Sanitization', () => {
         leakedJwtInSafeKey: '[REDACTED]',
         leakedArgon2InSafeKey: '[REDACTED]',
         leakedSessionValInSafeKey: '[REDACTED]',
+        leakedResetUrlInSafeKey: '[REDACTED]',
       },
     });
   });

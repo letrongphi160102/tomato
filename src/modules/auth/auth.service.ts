@@ -1186,7 +1186,6 @@ export class AuthService {
               unlockedFromLocked: wasLocked,
               revokedSessionsCount,
               deviceInfo,
-              pepperVersion,
             },
           },
           tx,
@@ -1308,15 +1307,12 @@ export class AuthService {
           return { kind: 'unauthorized' };
         }
 
-        const currentSession = await this.repository.findSessionByPublicId(
+        const currentSession = await this.repository.findSessionByPublicIdForUser(
           principal.session.publicId,
+          lockedUser.id,
           tx,
         );
-        if (
-          !currentSession ||
-          currentSession.userId !== lockedUser.id ||
-          currentSession.revokedAt !== null
-        ) {
+        if (!currentSession || currentSession.revokedAt !== null) {
           return { kind: 'unauthorized' };
         }
 
@@ -1458,6 +1454,20 @@ export class AuthService {
       });
     }
 
+    // Kiểm tra sơ bộ có tồn tại OTP `password_change` chưa tiêu thụ trước khi tốn CPU chạy Argon2id lần 2.
+    const candidateOtp = await this.repository.findLatestUnconsumedTokenByPurpose(
+      principal.user.id,
+      'password_change',
+    );
+    if (!candidateOtp) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'TOKEN_INVALID',
+        message: AUTH_MESSAGES.otpInvalidOrExpired,
+        details: [{ field: 'otpCode', message: AUTH_MESSAGES.otpInvalidOrExpired }],
+      });
+    }
+
     // Băm mật khẩu mới bằng Argon2id + CURRENT_PEPPER_VERSION ngoài transaction.
     const { hash: newPasswordHash, pepperVersion } = await hashPassword(
       input.newPassword,
@@ -1467,8 +1477,9 @@ export class AuthService {
     const currentTime = this.now();
     const expectedPreviousHash = identity.passwordHash;
 
-    // Quan trọng: trả về kết quả phân nhánh thay vì throw trong transaction,
+    // Quan trọng: trả về kết quả phân nhánh cho các nhánh lỗi OTP trước khi ghi dữ liệu mới
     // để việc tăng `attempt_count` hoặc hủy OTP sau 5 lần sai KHÔNG bị PostgreSQL ROLLBACK.
+    // Ngược lại, mọi thất bại bất ngờ SAU khi đã bắt đầu ghi mật khẩu mới phải `throw` để ROLLBACK toàn bộ.
     const outcome = await this.repository
       .getDb()
       .transaction<ChangePasswordTransactionOutcome>(async (tx) => {
@@ -1477,17 +1488,18 @@ export class AuthService {
           return { kind: 'unauthorized' };
         }
 
-        const currentSession = await this.repository.findSessionByPublicId(
+        const currentSession = await this.repository.findSessionByPublicIdForUser(
           principal.session.publicId,
+          lockedUser.id,
           tx,
         );
-        if (
-          !currentSession ||
-          currentSession.userId !== lockedUser.id ||
-          currentSession.revokedAt !== null
-        ) {
+        if (!currentSession || currentSession.revokedAt !== null) {
           return { kind: 'unauthorized' };
         }
+
+        // Tuân thủ thứ tự khóa toàn cục (`users FOR UPDATE` -> `advisory(familyId)` -> `verification_tokens` -> `sessions`)
+        // TRƯỚC khi thực hiện bất kỳ thao tác ghi nào.
+        await this.repository.acquireSessionFamilyLock(currentSession.familyId, tx);
 
         const freshIdentity = await this.repository.findEmailIdentityByUserId(lockedUser.id, tx);
         if (!freshIdentity || freshIdentity.passwordHash !== expectedPreviousHash) {
@@ -1585,7 +1597,6 @@ export class AuthService {
 
         // 2. Xoay vòng hoàn toàn phiên của thiết bị hiện tại (chống session fixation):
         //    thu hồi phiên cũ để token AT/RT cũ không thể tái sử dụng rồi phát hành phiên + family_id mới.
-        await this.repository.acquireSessionFamilyLock(currentSession.familyId, tx);
         const rotatedOldSession = await this.repository.revokeSessionById(
           currentSession.id,
           lockedUser.id,
@@ -1594,7 +1605,13 @@ export class AuthService {
           tx,
         );
         if (!rotatedOldSession) {
-          return { kind: 'unauthorized' };
+          // Bắt buộc `throw` để PostgreSQL ROLLBACK toàn bộ cập nhật mật khẩu & thu hồi phiên
+          // thay vì commit nửa vời không cấp được phiên mới cho thiết bị hiện tại.
+          throw new AuthDomainError({
+            status: 401,
+            code: 'UNAUTHORIZED',
+            message: AUTH_MESSAGES.unauthorized,
+          });
         }
 
         const created = await this.sessionService.createSessionForUser(lockedUser, context, tx);
@@ -1611,7 +1628,6 @@ export class AuthService {
               previousSessionPublicId: currentSession.publicId,
               newSessionPublicId: created.session.publicId,
               deviceInfo: created.session.deviceInfo,
-              pepperVersion,
             },
           },
           tx,

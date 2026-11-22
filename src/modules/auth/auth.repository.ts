@@ -365,6 +365,31 @@ export class AuthRepository {
   }
 
   /**
+   * Đọc nhanh mã OTP chưa tiêu thụ mới nhất theo `purpose` (không khóa) dùng cho pre-check
+   * trước khi chạy Argon2id tốn CPU; mọi kiểm tra chính thức vẫn chạy `FOR UPDATE` trong transaction.
+   */
+  async findLatestUnconsumedTokenByPurpose(
+    userId: string,
+    purpose: VerificationTokenPurpose,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<VerificationTokenRow | null> {
+    const rows = await executor
+      .select()
+      .from(verificationTokens)
+      .where(
+        and(
+          eq(verificationTokens.userId, userId),
+          eq(verificationTokens.purpose, purpose),
+          isNull(verificationTokens.consumedAt),
+        ),
+      )
+      .orderBy(desc(verificationTokens.createdAt))
+      .limit(1);
+
+    return rows[0] ?? null;
+  }
+
+  /**
    * Khóa dòng `FOR UPDATE` trên mã OTP chưa tiêu thụ mới nhất theo `purpose`
    * để triệt tiêu race condition khi nhiều request thử sai OTP đồng thời cố vượt ngưỡng 5 lần thử.
    */
@@ -642,6 +667,22 @@ export class AuthRepository {
     return rows[0] ?? null;
   }
 
+  /**
+   * Tra cứu phiên kèm điều kiện chủ sở hữu `user_id` ngay tại tầng SQL (phòng thủ chiều sâu chống IDOR).
+   */
+  async findSessionByPublicIdForUser(
+    sessionPublicId: string,
+    userId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<SessionRow | null> {
+    const rows = await executor
+      .select()
+      .from(sessions)
+      .where(and(eq(sessions.publicId, sessionPublicId), eq(sessions.userId, userId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async findSessionByRefreshTokenHash(
     refreshTokenHash: string,
     executor: DbExecutor = this.getDefaultDb(),
@@ -794,11 +835,11 @@ export class AuthRepository {
 
   async revokeAllUserSessions(
     params: RevokeAllUserSessionsParams,
-    executor: DbExecutor = this.getDefaultDb(),
+    tx: DatabaseTransaction,
   ): Promise<number> {
-    // Khóa `users FOR UPDATE` trước khi thu hồi đồng loạt để đồng bộ với các giao dịch
-    // `/refresh` đang giữ `users FOR SHARE`, đảm bảo không phiên xoay vòng mới nào sống sót.
-    await executor
+    // Bắt buộc nhận `tx: DatabaseTransaction` để lệnh khóa `users FOR UPDATE` thực sự giữ khóa
+    // cho đến hết thao tác cập nhật, đồng bộ tuyệt đối với các giao dịch `/refresh` (`users FOR SHARE`).
+    await tx
       .select({ id: users.id })
       .from(users)
       .where(eq(users.id, params.userId))
@@ -810,7 +851,7 @@ export class AuthRepository {
       conditions.push(ne(sessions.id, params.excludeSessionId));
     }
 
-    const rows = await executor
+    const rows = await tx
       .update(sessions)
       .set({
         revokedAt: params.revokedAt,
