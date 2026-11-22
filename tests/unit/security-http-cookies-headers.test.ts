@@ -169,4 +169,24 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     expect(csp).not.toContain('unsafe-eval');
     expect(csp).not.toContain('upgrade-insecure-requests');
   });
+
+  it('trang /reset-password (isSensitiveTokenPage) ép Referrer-Policy: no-referrer và Cache-Control: no-store', () => {
+    const headers = buildSecurityHeaders({
+      nonce: generateCspNonce(),
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      isAuthApiRoute: false,
+      isSensitiveTokenPage: true,
+    });
+    expect(headers['Referrer-Policy']).toBe('no-referrer');
+    expect(headers['Cache-Control']).toBe(AUTH_CACHE_CONTROL_HEADER);
+    expect(headers['Pragma']).toBe('no-cache');
+
+    const resetReq = new NextRequest('http://localhost:3000/reset-password?token=sensitive-token');
+    const resetRes = proxy(resetReq);
+    expect(resetRes.headers.get('Referrer-Policy')).toBe('no-referrer');
+    expect(resetRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+    expect(resetRes.headers.get('Pragma')).toBe('no-cache');
+  });
 });

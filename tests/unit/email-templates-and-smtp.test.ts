@@ -5,6 +5,10 @@ import {
   EmailDeliveryError,
   SmtpEmailAdapter,
   buildDuplicateRegistrationEmail,
+  buildPasswordChangeOtpEmail,
+  buildPasswordChangedAlertEmail,
+  buildPasswordResetAlertEmail,
+  buildPasswordResetLinkEmail,
   buildVerificationOtpEmail,
   createEmailProvider,
   escapeHtml,
@@ -120,5 +124,78 @@ describe('Unit M2: Email Templates & SmtpEmailAdapter', () => {
         BREVO_API_KEY: 'synthetic-key',
       }),
     ).toThrow(/M2/);
+  });
+
+  it('buildPasswordResetLinkEmail escape displayName, chỉ chấp nhận URL http/https và gắn rel=noreferrer', () => {
+    const rendered = buildPasswordResetLinkEmail({
+      displayName: '<img src=x onerror=alert(1)>',
+      resetUrl: 'https://tomato.example.com/reset-password?token=abc123token',
+      expiresInMinutes: 15,
+    });
+
+    expect(rendered.subject).toContain('đặt lại mật khẩu');
+    expect(rendered.html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(rendered.html).not.toContain('<img src=x');
+    expect(rendered.html).toContain('https://tomato.example.com/reset-password?token=abc123token');
+    expect(rendered.html).toContain('rel="noreferrer"');
+    expect(rendered.html).toContain('15 phút');
+    expect(rendered.text).toContain('https://tomato.example.com/reset-password?token=abc123token');
+    expect(rendered.text).toContain('15 phút');
+
+    const unsafe = buildPasswordResetLinkEmail({
+      displayName: 'Minh Anh',
+      resetUrl: 'javascript:alert(1)',
+      expiresInMinutes: 15,
+    });
+    expect(unsafe.html).not.toContain('javascript:');
+    expect(unsafe.text).not.toContain('javascript:');
+  });
+
+  it('buildPasswordResetAlertEmail & buildPasswordChangedAlertEmail hiển thị thời gian, IP, thiết bị đã escape', () => {
+    const occurredAt = new Date('2026-11-22T10:30:00.000Z');
+    const resetAlert = buildPasswordResetAlertEmail({
+      displayName: 'Minh <Anh>',
+      occurredAt,
+      ipAddress: '203.0.113.88',
+      deviceInfo: 'Chrome 130 / <Windows>',
+      appUrl: 'https://tomato.example.com',
+    });
+
+    expect(resetAlert.subject).toContain('đặt lại');
+    expect(resetAlert.html).toContain('Minh &lt;Anh&gt;');
+    expect(resetAlert.html).toContain('203.0.113.88');
+    expect(resetAlert.html).toContain('Chrome 130 / &lt;Windows&gt;');
+    expect(resetAlert.html).toContain('https://tomato.example.com/forgot-password');
+    expect(resetAlert.text).toContain('203.0.113.88');
+    expect(resetAlert.text).toContain('Chrome 130 / <Windows>');
+
+    const changedAlert = buildPasswordChangedAlertEmail({
+      displayName: 'Minh Anh',
+      occurredAt,
+      ipAddress: null,
+      deviceInfo: 'Safari 18 / macOS',
+      appUrl: 'javascript:alert(1)',
+    });
+
+    expect(changedAlert.subject).toContain('thay đổi');
+    expect(changedAlert.html).toContain('Không xác định');
+    expect(changedAlert.html).toContain('Safari 18 / macOS');
+    expect(changedAlert.html).not.toContain('javascript:');
+    expect(changedAlert.text).toContain('Không xác định');
+  });
+
+  it('buildPasswordChangeOtpEmail không lộ mã OTP trong subject nhưng hiển thị rõ OTP & hạn 10 phút trong nội dung', () => {
+    const rendered = buildPasswordChangeOtpEmail({
+      displayName: '<b>User</b>',
+      otpCode: '654321',
+      expiresInMinutes: 10,
+    });
+
+    expect(rendered.subject).not.toContain('654321');
+    expect(rendered.html).toContain('654321');
+    expect(rendered.html).toContain('10 phút');
+    expect(rendered.html).toContain('&lt;b&gt;User&lt;/b&gt;');
+    expect(rendered.text).toContain('654321');
+    expect(rendered.text).toContain('10 phút');
   });
 });

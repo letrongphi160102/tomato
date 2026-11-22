@@ -7,6 +7,7 @@ import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
 export const HSTS_HEADER_VALUE = 'max-age=31536000; includeSubDomains';
 export const PERMISSIONS_POLICY_VALUE = 'camera=(), microphone=(), geolocation=()';
 export const REFERRER_POLICY_VALUE = 'strict-origin-when-cross-origin';
+export const NO_REFERRER_POLICY_VALUE = 'no-referrer';
 export const API_CSP_VALUE = "default-src 'none'; frame-ancestors 'none'";
 
 const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
@@ -17,6 +18,8 @@ export interface SecurityHeadersContext {
   readonly isHttps: boolean;
   readonly isApiRoute: boolean;
   readonly isAuthApiRoute: boolean;
+  /** Bật `Referrer-Policy: no-referrer` + `Cache-Control: no-store` cho trang mang token nhạy cảm trên URL (ví dụ `/reset-password`). */
+  readonly isSensitiveTokenPage?: boolean;
 }
 
 /**
@@ -91,7 +94,9 @@ export function buildSecurityHeaders(context: SecurityHeadersContext): Record<st
     'Content-Security-Policy': buildContentSecurityPolicy(context),
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
-    'Referrer-Policy': REFERRER_POLICY_VALUE,
+    'Referrer-Policy': context.isSensitiveTokenPage
+      ? NO_REFERRER_POLICY_VALUE
+      : REFERRER_POLICY_VALUE,
     'Permissions-Policy': PERMISSIONS_POLICY_VALUE,
   };
 
@@ -100,7 +105,7 @@ export function buildSecurityHeaders(context: SecurityHeadersContext): Record<st
     headers['Strict-Transport-Security'] = HSTS_HEADER_VALUE;
   }
 
-  if (context.isAuthApiRoute) {
+  if (context.isAuthApiRoute || context.isSensitiveTokenPage) {
     headers['Cache-Control'] = AUTH_CACHE_CONTROL_HEADER;
     headers['Pragma'] = 'no-cache';
   }

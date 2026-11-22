@@ -16,6 +16,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 
+import { ChangePasswordCard } from '@/components/settings/change-password-card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -561,6 +562,8 @@ export function SecuritySessionsPanel() {
           )}
         </CardContent>
       </Card>
+
+      <ChangePasswordCard onPasswordChanged={handleRefreshSessions} />
     </div>
   );
 }

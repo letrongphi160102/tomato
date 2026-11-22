@@ -29,6 +29,26 @@ export const AUTH_MESSAGES = Object.freeze({
   allOtherSessionsRevoked: 'Đã đăng xuất khỏi tất cả các thiết bị khác.',
   allSessionsRevoked: 'Đã đăng xuất khỏi tất cả các thiết bị.',
 
+  // Quên mật khẩu, Đặt lại mật khẩu & Đổi mật khẩu (M4)
+  forgotPasswordSent:
+    'Liên kết đặt lại mật khẩu đã được gửi tới hộp thư của bạn. Vui lòng kiểm tra email trong vòng 15 phút.',
+  forgotPasswordEmailNotFound: 'Không tìm thấy tài khoản TOMATO nào gắn với địa chỉ email này.',
+  resetTokenInvalidOrExpired: 'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã được sử dụng.',
+  resetTokenExpired: 'Liên kết đặt lại mật khẩu đã hết hạn. Vui lòng yêu cầu liên kết mới.',
+  passwordResetSuccess:
+    'Đặt lại mật khẩu thành công! Toàn bộ phiên đăng nhập cũ đã được đăng xuất. Vui lòng đăng nhập lại với mật khẩu mới.',
+  changePasswordOtpSent:
+    'Mã OTP xác nhận đổi mật khẩu gồm 6 chữ số đã được gửi tới email tài khoản của bạn (hiệu lực 10 phút).',
+  changePasswordOtpCooldown: (retryAfterSeconds: number) =>
+    `Vui lòng chờ ${retryAfterSeconds} giây trước khi yêu cầu gửi lại mã OTP đổi mật khẩu.`,
+  currentPasswordRequired: 'Vui lòng nhập mật khẩu hiện tại.',
+  currentPasswordIncorrect: 'Mật khẩu hiện tại không chính xác.',
+  newPasswordSameAsCurrent: 'Mật khẩu mới không được trùng với mật khẩu hiện tại.',
+  passwordChangedSuccess:
+    'Đổi mật khẩu thành công! Tất cả các thiết bị khác đã được đăng xuất và phiên hiện tại của bạn đã được làm mới.',
+  passwordChangeConcurrentConflict:
+    'Mật khẩu tài khoản vừa được thay đổi bởi một yêu cầu khác. Vui lòng kiểm tra lại.',
+
   // Validation lỗi đầu vào
   invalidJsonBody: 'Dữ liệu gửi lên không phải định dạng JSON hợp lệ.',
   payloadTooLarge: 'Kích thước yêu cầu vượt quá giới hạn cho phép.',

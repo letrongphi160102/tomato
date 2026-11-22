@@ -3,6 +3,7 @@ import 'server-only';
 import { randomInt } from 'node:crypto';
 
 import { getCaptchaProvider, type CaptchaProvider } from '@/core/captcha';
+import { getEnv } from '@/core/config/env';
 import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
 import { generateOtpCode, hashOtpCode, verifyOtpCode } from '@/core/crypto/otp';
 import {
@@ -12,27 +13,42 @@ import {
   verifyPassword,
   type PepperSecretProvider,
 } from '@/core/crypto/password';
+import { generateSecureToken, hashTokenSha256, timingSafeEqualHex } from '@/core/crypto/token';
 import { isPostgresUniqueViolation } from '@/core/db';
 import type { UserGender, UserRow, UserStatus } from '@/core/db/schema';
 import {
   EmailDeliveryError,
+  buildPasswordChangeOtpEmail,
+  buildPasswordChangedAlertEmail,
+  buildPasswordResetAlertEmail,
+  buildPasswordResetLinkEmail,
   buildVerificationOtpEmail,
   getEmailProvider,
   type EmailProvider,
 } from '@/core/email';
+import { logger } from '@/core/logger';
 import { AUTH_RATE_LIMITS, getRateLimiter, type RateLimiter } from '@/core/redis';
 import { getAuditLogService, type AuditLogService } from '@/core/security/audit-log.service';
 import type { RequestClientContext } from '@/core/security/client-context';
 import { formatZodErrorDetails } from '@/core/security/http-response';
 import { AuthDomainError } from '@/modules/auth/auth.errors';
 import { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
+import {
+  assertCanChangeOwnPassword,
+  type AuthenticatedPrincipal,
+} from '@/modules/auth/auth.policy';
 import { AuthRepository, type IdentityWithUser } from '@/modules/auth/auth.repository';
 import {
+  changePasswordInputSchema,
   createRegisterInputSchema,
+  forgotPasswordInputSchema,
+  getWeakPasswordContextViolation,
   loginInputSchema,
   resendVerificationInputSchema,
+  resetPasswordInputSchema,
   verifyEmailInputSchema,
 } from '@/modules/auth/auth.schemas';
+import { parseDeviceInfo } from '@/modules/auth/device-info';
 import {
   SessionService,
   toPublicUserProfile,
@@ -45,6 +61,13 @@ export const EMAIL_VERIFY_OTP_TTL_MINUTES = 15;
 export const EMAIL_VERIFY_OTP_TTL_MS = EMAIL_VERIFY_OTP_TTL_MINUTES * 60 * 1000;
 export const EMAIL_VERIFY_OTP_MAX_ATTEMPTS = 5;
 export const RESEND_COOLDOWN_SECONDS = AUTH_RATE_LIMITS.resendVerificationCooldown.windowSeconds;
+export const PASSWORD_RESET_TOKEN_TTL_MINUTES = 15;
+export const PASSWORD_RESET_TOKEN_TTL_MS = PASSWORD_RESET_TOKEN_TTL_MINUTES * 60 * 1000;
+export const PASSWORD_CHANGE_OTP_TTL_MINUTES = 10;
+export const PASSWORD_CHANGE_OTP_TTL_MS = PASSWORD_CHANGE_OTP_TTL_MINUTES * 60 * 1000;
+export const PASSWORD_CHANGE_OTP_MAX_ATTEMPTS = 5;
+export const CHANGE_PASSWORD_OTP_COOLDOWN_SECONDS =
+  AUTH_RATE_LIMITS.changePasswordOtpCooldown.windowSeconds;
 // Sau 24 giờ không xác minh, tài khoản pending_verification được phép đăng ký đè theo Mục 4.1.
 export const PENDING_VERIFICATION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 // Sàn thời gian tối thiểu + jitter cho `/resend-verification` nhằm triệt tiêu timing oracle
@@ -69,6 +92,29 @@ export interface ResendVerificationResult {
 
 export interface LoginResult {
   readonly user: PublicUserProfile;
+  readonly message: string;
+  readonly tokens: IssuedSessionTokens;
+}
+
+export interface ForgotPasswordResult {
+  readonly message: string;
+  readonly expiresInMinutes: number;
+}
+
+export interface ResetPasswordResult {
+  readonly reset: true;
+  readonly message: string;
+}
+
+export interface RequestPasswordChangeOtpResult {
+  readonly message: string;
+  readonly cooldownSeconds: number;
+  readonly expiresInMinutes: number;
+}
+
+export interface ChangePasswordResult {
+  readonly changed: true;
+  readonly revokedOtherSessionsCount: number;
   readonly message: string;
   readonly tokens: IssuedSessionTokens;
 }
@@ -98,6 +144,43 @@ type LoginTransactionOutcome =
   | { readonly kind: 'created'; readonly created: CreatedSessionResult; readonly user: UserRow }
   | { readonly kind: 'status_changed'; readonly status: UserStatus };
 
+type ForgotPasswordTransactionOutcome =
+  | { readonly kind: 'issued'; readonly user: UserRow }
+  | { readonly kind: 'not_found' }
+  | { readonly kind: 'not_verified' }
+  | { readonly kind: 'suspended' };
+
+type ResetPasswordTransactionOutcome =
+  | {
+      readonly kind: 'reset';
+      readonly user: UserRow;
+      readonly email: string;
+      readonly unlockedFromLocked: boolean;
+      readonly revokedSessionsCount: number;
+    }
+  | { readonly kind: 'invalid' }
+  | { readonly kind: 'expired' }
+  | { readonly kind: 'password_violation'; readonly message: string };
+
+type RequestPasswordChangeOtpTransactionOutcome =
+  | { readonly kind: 'issued'; readonly user: UserRow; readonly email: string }
+  | { readonly kind: 'unauthorized' };
+
+type ChangePasswordTransactionOutcome =
+  | {
+      readonly kind: 'changed';
+      readonly user: UserRow;
+      readonly email: string;
+      readonly created: CreatedSessionResult;
+      readonly revokedOtherSessionsCount: number;
+    }
+  | { readonly kind: 'unauthorized' }
+  | { readonly kind: 'conflict' }
+  | { readonly kind: 'otp_invalid' }
+  | { readonly kind: 'otp_expired' }
+  | { readonly kind: 'otp_max_attempts' }
+  | { readonly kind: 'otp_wrong'; readonly remainingAttempts: number };
+
 /**
  * Tầng nghiệp vụ Auth cốt lõi (tách biệt hoàn toàn khỏi Next.js HTTP/cookies).
  */
@@ -109,6 +192,7 @@ export class AuthService {
   private readonly captchaProvider: CaptchaProvider;
   private readonly auditLogService: AuditLogService;
   private readonly pepperProvider: PepperSecretProvider;
+  private readonly appUrlOverride?: string;
   private readonly now: () => Date;
   private readonly minResendResponseMs: number;
 
@@ -119,6 +203,7 @@ export class AuthService {
     this.captchaProvider = deps.captchaProvider ?? getCaptchaProvider();
     this.auditLogService = deps.auditLogService ?? getAuditLogService();
     this.pepperProvider = deps.pepperProvider ?? new EnvPepperSecretProvider();
+    this.appUrlOverride = deps.appUrl;
     this.now = deps.now ?? (() => new Date());
     this.minResendResponseMs =
       deps.minResendResponseMs ??
@@ -754,6 +839,856 @@ export class AuthService {
     };
   }
 
+  /**
+   * Yêu cầu đặt lại mật khẩu qua liên kết dùng một lần (Mục 4.4 — Phương án B UX kiểu Facebook):
+   * 1. Rate Limit chạy TRƯỚC theo IP (3/15p), sau khi chuẩn hóa email chạy thêm theo Email (3/15p).
+   * 2. Không tìm thấy email hoặc tài khoản đã `deleted` -> `404 NOT_FOUND` rõ ràng;
+   *    `pending_verification` / `suspended` -> `403` tương ứng.
+   * 3. Tài khoản `active` hoặc `locked` -> khóa `users FOR UPDATE`, vô hiệu hóa mọi token
+   *    `password_reset` cũ, sinh token 256-bit (lưu SHA-256, hạn 15 phút) và gửi link qua email.
+   */
+  async forgotPassword(
+    rawInput: unknown,
+    context: RequestClientContext,
+  ): Promise<ForgotPasswordResult> {
+    const ipLimit = await this.rateLimiter.consume(
+      `forgot-password:ip:${context.rateLimitIpKey}`,
+      AUTH_RATE_LIMITS.forgotPasswordByIp,
+    );
+    if (!ipLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(ipLimit.retryAfterSeconds),
+        retryAfterSeconds: ipLimit.retryAfterSeconds,
+      });
+    }
+
+    const parsed = forgotPasswordInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+    const { email } = parsed.data;
+
+    const emailLimit = await this.rateLimiter.consume(
+      `forgot-password:email:${email}`,
+      AUTH_RATE_LIMITS.forgotPasswordByEmail,
+    );
+    if (!emailLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(emailLimit.retryAfterSeconds),
+        retryAfterSeconds: emailLimit.retryAfterSeconds,
+      });
+    }
+
+    const existing = await this.repository.findEmailIdentityWithUser(email);
+    if (!existing || existing.user.status === 'deleted') {
+      throw new AuthDomainError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: AUTH_MESSAGES.forgotPasswordEmailNotFound,
+        details: [{ field: 'email', message: AUTH_MESSAGES.forgotPasswordEmailNotFound }],
+      });
+    }
+
+    if (existing.user.status === 'pending_verification') {
+      throw new AuthDomainError({
+        status: 403,
+        code: 'EMAIL_NOT_VERIFIED',
+        message: AUTH_MESSAGES.emailNotVerified,
+      });
+    }
+
+    if (existing.user.status === 'suspended') {
+      throw new AuthDomainError({
+        status: 403,
+        code: 'ACCOUNT_SUSPENDED',
+        message: AUTH_MESSAGES.accountSuspended,
+      });
+    }
+
+    const currentTime = this.now();
+    const rawResetToken = generateSecureToken(32);
+    const resetTokenHash = hashTokenSha256(rawResetToken);
+    const expiresAt = new Date(currentTime.getTime() + PASSWORD_RESET_TOKEN_TTL_MS);
+
+    // Khóa `users FOR UPDATE` trong transaction để đảm bảo tại mọi thời điểm chỉ có duy nhất
+    // 1 token `password_reset` còn hiệu lực và chặn TOCTOU nếu tài khoản vừa bị đình chỉ/xóa.
+    const outcome = await this.repository
+      .getDb()
+      .transaction<ForgotPasswordTransactionOutcome>(async (tx) => {
+        const lockedUser = await this.repository.lockUserById(existing.user.id, tx, 'update');
+        if (!lockedUser || lockedUser.status === 'deleted') {
+          return { kind: 'not_found' };
+        }
+        if (lockedUser.status === 'pending_verification') {
+          return { kind: 'not_verified' };
+        }
+        if (lockedUser.status === 'suspended') {
+          return { kind: 'suspended' };
+        }
+
+        await this.repository.reissueVerificationToken(
+          {
+            userId: lockedUser.id,
+            purpose: 'password_reset',
+            tokenHash: resetTokenHash,
+            expiresAt,
+            now: currentTime,
+          },
+          tx,
+        );
+
+        return { kind: 'issued', user: lockedUser };
+      });
+
+    switch (outcome.kind) {
+      case 'not_found':
+        throw new AuthDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: AUTH_MESSAGES.forgotPasswordEmailNotFound,
+          details: [{ field: 'email', message: AUTH_MESSAGES.forgotPasswordEmailNotFound }],
+        });
+      case 'not_verified':
+        throw new AuthDomainError({
+          status: 403,
+          code: 'EMAIL_NOT_VERIFIED',
+          message: AUTH_MESSAGES.emailNotVerified,
+        });
+      case 'suspended':
+        throw new AuthDomainError({
+          status: 403,
+          code: 'ACCOUNT_SUSPENDED',
+          message: AUTH_MESSAGES.accountSuspended,
+        });
+      case 'issued':
+        break;
+    }
+
+    const resetUrl = this.buildPasswordResetUrl(rawResetToken);
+    await this.sendPasswordResetLinkEmail(email, outcome.user.fullName, resetUrl);
+
+    return {
+      message: AUTH_MESSAGES.forgotPasswordSent,
+      expiresInMinutes: PASSWORD_RESET_TOKEN_TTL_MINUTES,
+    };
+  }
+
+  /**
+   * Đặt lại mật khẩu bằng token ngẫu nhiên dùng một lần (Mục 4.4):
+   * 1. Rate Limit IP chạy TRƯỚC khi truy vấn DB hoặc băm Argon2id.
+   * 2. Xác thực token chưa dùng, chưa hết hạn và kiểm tra chính sách mật khẩu mới (12–128 ký tự).
+   * 3. Băm Argon2id + CURRENT_PEPPER_VERSION ngoài transaction.
+   * 4. Trong DB Transaction (khóa `users FOR UPDATE` -> `verification_tokens FOR UPDATE`):
+   *    - Xác minh lại token + trạng thái (`active` hoặc `locked`), mở khóa `locked -> active`,
+   *      reset `failed_login_attempts = 0`, tiêu thụ toàn bộ token `password_reset`/`password_change`.
+   *    - Thu hồi MỌI phiên đăng nhập cũ trong DB (`reason: 'password_reset'`) và ghi Audit Log `PASSWORD_RESET`.
+   * 5. Gửi email cảnh báo bảo mật (kèm thời gian, IP, thiết bị).
+   */
+  async resetPassword(
+    rawInput: unknown,
+    context: RequestClientContext,
+  ): Promise<ResetPasswordResult> {
+    const ipLimit = await this.rateLimiter.consume(
+      `reset-password:ip:${context.rateLimitIpKey}`,
+      AUTH_RATE_LIMITS.resetPasswordByIp,
+    );
+    if (!ipLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(ipLimit.retryAfterSeconds),
+        retryAfterSeconds: ipLimit.retryAfterSeconds,
+      });
+    }
+
+    const parsed = resetPasswordInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+    const input = parsed.data;
+
+    const currentTime = this.now();
+    const tokenHash = hashTokenSha256(input.token);
+
+    // Tra cứu sơ bộ trước khi băm Argon2id nhằm tránh bị DoS CPU bằng các token giả/hết hạn.
+    const candidateToken = await this.repository.findVerificationTokenByHash(
+      'password_reset',
+      tokenHash,
+    );
+    if (
+      !candidateToken ||
+      candidateToken.consumedAt !== null ||
+      !timingSafeEqualHex(tokenHash, candidateToken.tokenHash)
+    ) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'TOKEN_INVALID',
+        message: AUTH_MESSAGES.resetTokenInvalidOrExpired,
+      });
+    }
+
+    if (candidateToken.expiresAt.getTime() <= currentTime.getTime()) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'TOKEN_EXPIRED',
+        message: AUTH_MESSAGES.resetTokenExpired,
+      });
+    }
+
+    const candidateUser = await this.repository.findUserById(candidateToken.userId);
+    const candidateIdentity = candidateUser
+      ? await this.repository.findEmailIdentityByUserId(candidateUser.id)
+      : null;
+
+    if (
+      !candidateUser ||
+      !candidateIdentity ||
+      (candidateUser.status !== 'active' && candidateUser.status !== 'locked')
+    ) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'TOKEN_INVALID',
+        message: AUTH_MESSAGES.resetTokenInvalidOrExpired,
+      });
+    }
+
+    const contextViolation = getWeakPasswordContextViolation(input.newPassword, {
+      email: candidateIdentity.identifierNormalized,
+      fullName: candidateUser.fullName,
+      username: candidateUser.username,
+    });
+    if (contextViolation) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.validationFailed,
+        details: [{ field: 'newPassword', message: contextViolation }],
+      });
+    }
+
+    // Băm mật khẩu mới ngoài DB Transaction để không giữ khóa/kết nối PG trong lúc chạy Argon2id.
+    const { hash: passwordHash, pepperVersion } = await hashPassword(
+      input.newPassword,
+      this.pepperProvider,
+    );
+    const deviceInfo = parseDeviceInfo(context.userAgent);
+
+    // Tuân thủ thứ tự khóa toàn cục (`users FOR UPDATE` -> `verification_tokens FOR UPDATE`
+    // -> `auth_identities` -> `sessions`) để triệt tiêu deadlock và chống replay đồng thời 1 token.
+    const outcome = await this.repository
+      .getDb()
+      .transaction<ResetPasswordTransactionOutcome>(async (tx) => {
+        const lockedUser = await this.repository.lockUserById(candidateToken.userId, tx, 'update');
+        if (!lockedUser || (lockedUser.status !== 'active' && lockedUser.status !== 'locked')) {
+          return { kind: 'invalid' };
+        }
+
+        const lockedToken = await this.repository.lockVerificationTokenById(
+          candidateToken.id,
+          lockedUser.id,
+          tx,
+        );
+        if (
+          !lockedToken ||
+          lockedToken.purpose !== 'password_reset' ||
+          lockedToken.consumedAt !== null ||
+          !timingSafeEqualHex(tokenHash, lockedToken.tokenHash)
+        ) {
+          return { kind: 'invalid' };
+        }
+
+        if (lockedToken.expiresAt.getTime() <= currentTime.getTime()) {
+          await this.repository.consumeVerificationToken(
+            lockedToken.id,
+            lockedUser.id,
+            currentTime,
+            tx,
+          );
+          return { kind: 'expired' };
+        }
+
+        const identity = await this.repository.findEmailIdentityByUserId(lockedUser.id, tx);
+        if (!identity) {
+          return { kind: 'invalid' };
+        }
+
+        const freshViolation = getWeakPasswordContextViolation(input.newPassword, {
+          email: identity.identifierNormalized,
+          fullName: lockedUser.fullName,
+          username: lockedUser.username,
+        });
+        if (freshViolation) {
+          return { kind: 'password_violation', message: freshViolation };
+        }
+
+        const wasLocked = lockedUser.status === 'locked';
+        if (wasLocked) {
+          await this.repository.unlockLockedUser(lockedUser.id, currentTime, tx);
+        }
+
+        await this.repository.updateIdentityPasswordHash(
+          {
+            identityId: identity.id,
+            userId: lockedUser.id,
+            passwordHash,
+            pepperVersion,
+            now: currentTime,
+          },
+          tx,
+        );
+
+        await this.repository.resetFailedLoginAttempts(identity.id, lockedUser.id, currentTime, tx);
+
+        await this.repository.consumeAllUnconsumedTokensByPurpose(
+          lockedUser.id,
+          'password_reset',
+          currentTime,
+          tx,
+        );
+        await this.repository.consumeAllUnconsumedTokensByPurpose(
+          lockedUser.id,
+          'password_change',
+          currentTime,
+          tx,
+        );
+
+        const revokedSessionsCount = await this.repository.revokeAllUserSessions(
+          {
+            userId: lockedUser.id,
+            revokedAt: currentTime,
+            reason: 'password_reset',
+          },
+          tx,
+        );
+
+        await this.auditLogService.record(
+          {
+            userId: lockedUser.id,
+            action: 'PASSWORD_RESET',
+            ipAddress: context.ipAddress,
+            userAgent: context.userAgent,
+            metadata: {
+              provider: 'email_password',
+              unlockedFromLocked: wasLocked,
+              revokedSessionsCount,
+              deviceInfo,
+              pepperVersion,
+            },
+          },
+          tx,
+        );
+
+        return {
+          kind: 'reset',
+          user: lockedUser,
+          email: identity.identifierNormalized,
+          unlockedFromLocked: wasLocked,
+          revokedSessionsCount,
+        };
+      });
+
+    switch (outcome.kind) {
+      case 'invalid':
+        throw new AuthDomainError({
+          status: 400,
+          code: 'TOKEN_INVALID',
+          message: AUTH_MESSAGES.resetTokenInvalidOrExpired,
+        });
+      case 'expired':
+        throw new AuthDomainError({
+          status: 400,
+          code: 'TOKEN_EXPIRED',
+          message: AUTH_MESSAGES.resetTokenExpired,
+        });
+      case 'password_violation':
+        throw new AuthDomainError({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          message: AUTH_MESSAGES.validationFailed,
+          details: [{ field: 'newPassword', message: outcome.message }],
+        });
+      case 'reset':
+        break;
+    }
+
+    await this.sendPasswordAlertEmailSafe('reset', {
+      toEmail: outcome.email,
+      displayName: outcome.user.fullName,
+      occurredAt: currentTime,
+      ipAddress: context.ipAddress,
+      deviceInfo,
+    });
+
+    return {
+      reset: true,
+      message: AUTH_MESSAGES.passwordResetSuccess,
+    };
+  }
+
+  /**
+   * Phát hành mã OTP 6 chữ số xác nhận đổi mật khẩu cho người dùng đã đăng nhập (Mục 4.5):
+   * - Kiểm tra quyền sở hữu qua `auth.policy.ts` (Deny by default).
+   * - Áp dụng cooldown bắt buộc 60 giây + giới hạn IP & giới hạn giờ theo `user.id`.
+   * - Vô hiệu hóa mọi OTP `password_change` cũ chưa dùng, tạo mã OTP mới (hạn 10 phút, HMAC-SHA256)
+   *   và gửi tới email chủ tài khoản.
+   */
+  async requestPasswordChangeOtp(
+    principal: AuthenticatedPrincipal,
+    context: RequestClientContext,
+  ): Promise<RequestPasswordChangeOtpResult> {
+    assertCanChangeOwnPassword(principal);
+
+    const ipLimit = await this.rateLimiter.consume(
+      `change-password-otp:ip:${context.rateLimitIpKey}`,
+      AUTH_RATE_LIMITS.changePasswordOtpByIp,
+    );
+    if (!ipLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(ipLimit.retryAfterSeconds),
+        retryAfterSeconds: ipLimit.retryAfterSeconds,
+      });
+    }
+
+    // Kiểm tra cooldown 60 giây trước hạn mức giờ để tránh nhấn lặp làm tiêu hao lượt giờ.
+    const cooldownLimit = await this.rateLimiter.consume(
+      `change-password-otp:cooldown:${principal.user.id}`,
+      AUTH_RATE_LIMITS.changePasswordOtpCooldown,
+    );
+    if (!cooldownLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.changePasswordOtpCooldown(cooldownLimit.retryAfterSeconds),
+        retryAfterSeconds: cooldownLimit.retryAfterSeconds,
+      });
+    }
+
+    const hourlyLimit = await this.rateLimiter.consume(
+      `change-password-otp:user1h:${principal.user.id}`,
+      AUTH_RATE_LIMITS.changePasswordOtpByUserHourly,
+    );
+    if (!hourlyLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(hourlyLimit.retryAfterSeconds),
+        retryAfterSeconds: hourlyLimit.retryAfterSeconds,
+      });
+    }
+
+    const currentTime = this.now();
+    const otpCode = generateOtpCode();
+    const otpTokenHash = hashOtpCode(otpCode, {
+      userId: principal.user.id,
+      purpose: 'password_change',
+    });
+    const otpExpiresAt = new Date(currentTime.getTime() + PASSWORD_CHANGE_OTP_TTL_MS);
+
+    const outcome = await this.repository
+      .getDb()
+      .transaction<RequestPasswordChangeOtpTransactionOutcome>(async (tx) => {
+        const lockedUser = await this.repository.lockUserById(principal.user.id, tx, 'update');
+        if (!lockedUser || lockedUser.status !== 'active') {
+          return { kind: 'unauthorized' };
+        }
+
+        const currentSession = await this.repository.findSessionByPublicId(
+          principal.session.publicId,
+          tx,
+        );
+        if (
+          !currentSession ||
+          currentSession.userId !== lockedUser.id ||
+          currentSession.revokedAt !== null
+        ) {
+          return { kind: 'unauthorized' };
+        }
+
+        const identity = await this.repository.findEmailIdentityByUserId(lockedUser.id, tx);
+        if (!identity) {
+          return { kind: 'unauthorized' };
+        }
+
+        await this.repository.reissueVerificationToken(
+          {
+            userId: lockedUser.id,
+            purpose: 'password_change',
+            tokenHash: otpTokenHash,
+            expiresAt: otpExpiresAt,
+            now: currentTime,
+          },
+          tx,
+        );
+
+        return {
+          kind: 'issued',
+          user: lockedUser,
+          email: identity.identifierNormalized,
+        };
+      });
+
+    if (outcome.kind === 'unauthorized') {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+      });
+    }
+
+    await this.sendPasswordChangeOtpEmail(outcome.email, outcome.user.fullName, otpCode);
+
+    return {
+      message: AUTH_MESSAGES.changePasswordOtpSent,
+      cooldownSeconds: CHANGE_PASSWORD_OTP_COOLDOWN_SECONDS,
+      expiresInMinutes: PASSWORD_CHANGE_OTP_TTL_MINUTES,
+    };
+  }
+
+  /**
+   * Đổi mật khẩu khi đã đăng nhập (Mục 4.5):
+   * 1. Rate Limit IP + User chạy TRƯỚC Argon2id và truy vấn DB nặng.
+   * 2. Xác thực đầu vào (`currentPassword`, `newPassword`, `otpCode`), đảm bảo `newPassword !== currentPassword`
+   *    và tuân thủ đầy đủ quy tắc mật khẩu mạnh (12–128 ký tự, không dấu tiếng Việt, không trùng email/họ tên/username).
+   * 3. Xác minh `currentPassword` (Argon2id + Pepper) ngoài transaction; nếu sai trả `400 INVALID_CREDENTIALS`
+   *    (không trả `401` để tránh nhầm với hết phiên và không trừ lượt thử OTP).
+   * 4. Trong DB Transaction (trả kết quả phân nhánh để bộ đếm sai OTP tối đa 5 lần luôn được COMMIT):
+   *    - Khóa `users FOR UPDATE`, kiểm tra lại phiên + CAS `password_hash` hiện tại.
+   *    - Xác minh OTP `password_change` (hạn 10 phút, tối đa 5 lần sai).
+   *    - Cập nhật `password_hash` + `pepper_version` mới, thu hồi mọi phiên thiết bị khác,
+   *      thu hồi phiên cũ hiện tại và cấp phiên mới hoàn toàn (xoay vòng chống session fixation).
+   *    - Ghi Audit Log `PASSWORD_CHANGED`.
+   * 5. Gửi email cảnh báo bảo mật (kèm thời gian, IP, thiết bị).
+   */
+  async changePassword(
+    principal: AuthenticatedPrincipal,
+    rawInput: unknown,
+    context: RequestClientContext,
+  ): Promise<ChangePasswordResult> {
+    assertCanChangeOwnPassword(principal);
+
+    const ipLimit = await this.rateLimiter.consume(
+      `change-password:ip:${context.rateLimitIpKey}`,
+      AUTH_RATE_LIMITS.changePasswordByIp,
+    );
+    if (!ipLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(ipLimit.retryAfterSeconds),
+        retryAfterSeconds: ipLimit.retryAfterSeconds,
+      });
+    }
+
+    const userLimit = await this.rateLimiter.consume(
+      `change-password:user:${principal.user.id}`,
+      AUTH_RATE_LIMITS.changePasswordByUser,
+    );
+    if (!userLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(userLimit.retryAfterSeconds),
+        retryAfterSeconds: userLimit.retryAfterSeconds,
+      });
+    }
+
+    const parsed = changePasswordInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+    const input = parsed.data;
+
+    const identity = await this.repository.findEmailIdentityByUserId(principal.user.id);
+    if (!identity || !identity.passwordHash) {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+      });
+    }
+
+    const contextViolation = getWeakPasswordContextViolation(input.newPassword, {
+      email: identity.identifierNormalized,
+      fullName: principal.user.fullName,
+      username: principal.user.username,
+    });
+    if (contextViolation) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: AUTH_MESSAGES.validationFailed,
+        details: [{ field: 'newPassword', message: contextViolation }],
+      });
+    }
+
+    // Xác minh mật khẩu hiện tại ngoài DB Transaction trước khi chạm vào lượt thử OTP.
+    const currentVerification = await verifyPassword(
+      input.currentPassword,
+      identity.passwordHash,
+      identity.pepperVersion,
+      this.pepperProvider,
+    );
+    if (!currentVerification.valid) {
+      throw new AuthDomainError({
+        status: 400,
+        code: 'INVALID_CREDENTIALS',
+        message: AUTH_MESSAGES.currentPasswordIncorrect,
+        details: [{ field: 'currentPassword', message: AUTH_MESSAGES.currentPasswordIncorrect }],
+      });
+    }
+
+    // Băm mật khẩu mới bằng Argon2id + CURRENT_PEPPER_VERSION ngoài transaction.
+    const { hash: newPasswordHash, pepperVersion } = await hashPassword(
+      input.newPassword,
+      this.pepperProvider,
+    );
+
+    const currentTime = this.now();
+    const expectedPreviousHash = identity.passwordHash;
+
+    // Quan trọng: trả về kết quả phân nhánh thay vì throw trong transaction,
+    // để việc tăng `attempt_count` hoặc hủy OTP sau 5 lần sai KHÔNG bị PostgreSQL ROLLBACK.
+    const outcome = await this.repository
+      .getDb()
+      .transaction<ChangePasswordTransactionOutcome>(async (tx) => {
+        const lockedUser = await this.repository.lockUserById(principal.user.id, tx, 'update');
+        if (!lockedUser || lockedUser.status !== 'active') {
+          return { kind: 'unauthorized' };
+        }
+
+        const currentSession = await this.repository.findSessionByPublicId(
+          principal.session.publicId,
+          tx,
+        );
+        if (
+          !currentSession ||
+          currentSession.userId !== lockedUser.id ||
+          currentSession.revokedAt !== null
+        ) {
+          return { kind: 'unauthorized' };
+        }
+
+        const freshIdentity = await this.repository.findEmailIdentityByUserId(lockedUser.id, tx);
+        if (!freshIdentity || freshIdentity.passwordHash !== expectedPreviousHash) {
+          return { kind: 'conflict' };
+        }
+
+        const token = await this.repository.lockLatestUnconsumedTokenByPurpose(
+          lockedUser.id,
+          'password_change',
+          tx,
+        );
+        if (!token) {
+          return { kind: 'otp_invalid' };
+        }
+
+        if (token.expiresAt.getTime() <= currentTime.getTime()) {
+          await this.repository.consumeVerificationToken(token.id, lockedUser.id, currentTime, tx);
+          return { kind: 'otp_expired' };
+        }
+
+        if (token.attemptCount >= PASSWORD_CHANGE_OTP_MAX_ATTEMPTS) {
+          await this.repository.consumeVerificationToken(token.id, lockedUser.id, currentTime, tx);
+          return { kind: 'otp_max_attempts' };
+        }
+
+        const matched = verifyOtpCode(input.otpCode, token.tokenHash, {
+          userId: lockedUser.id,
+          purpose: 'password_change',
+        });
+        if (!matched) {
+          const nextAttempts = token.attemptCount + 1;
+          const exhausted = nextAttempts >= PASSWORD_CHANGE_OTP_MAX_ATTEMPTS;
+          await this.repository.updateVerificationTokenAttempt(
+            token.id,
+            lockedUser.id,
+            nextAttempts,
+            exhausted ? currentTime : null,
+            tx,
+          );
+          if (exhausted) {
+            return { kind: 'otp_max_attempts' };
+          }
+          return {
+            kind: 'otp_wrong',
+            remainingAttempts: PASSWORD_CHANGE_OTP_MAX_ATTEMPTS - nextAttempts,
+          };
+        }
+
+        const updatedPassword = await this.repository.updateIdentityPasswordHash(
+          {
+            identityId: freshIdentity.id,
+            userId: lockedUser.id,
+            passwordHash: newPasswordHash,
+            pepperVersion,
+            expectedCurrentPasswordHash: expectedPreviousHash,
+            now: currentTime,
+          },
+          tx,
+        );
+        if (!updatedPassword) {
+          return { kind: 'conflict' };
+        }
+
+        await this.repository.resetFailedLoginAttempts(
+          freshIdentity.id,
+          lockedUser.id,
+          currentTime,
+          tx,
+        );
+
+        await this.repository.consumeAllUnconsumedTokensByPurpose(
+          lockedUser.id,
+          'password_change',
+          currentTime,
+          tx,
+        );
+        // Vô hiệu hóa luôn mọi link quên mật khẩu còn tồn đọng khi chủ tài khoản vừa chủ động đổi mật khẩu.
+        await this.repository.consumeAllUnconsumedTokensByPurpose(
+          lockedUser.id,
+          'password_reset',
+          currentTime,
+          tx,
+        );
+
+        // 1. Thu hồi tất cả các phiên trên thiết bị khác.
+        const revokedOtherSessionsCount = await this.repository.revokeAllUserSessions(
+          {
+            userId: lockedUser.id,
+            excludeSessionId: currentSession.id,
+            revokedAt: currentTime,
+            reason: 'password_changed',
+          },
+          tx,
+        );
+
+        // 2. Xoay vòng hoàn toàn phiên của thiết bị hiện tại (chống session fixation):
+        //    thu hồi phiên cũ để token AT/RT cũ không thể tái sử dụng rồi phát hành phiên + family_id mới.
+        await this.repository.acquireSessionFamilyLock(currentSession.familyId, tx);
+        const rotatedOldSession = await this.repository.revokeSessionById(
+          currentSession.id,
+          lockedUser.id,
+          currentTime,
+          'password_changed_rotated',
+          tx,
+        );
+        if (!rotatedOldSession) {
+          return { kind: 'unauthorized' };
+        }
+
+        const created = await this.sessionService.createSessionForUser(lockedUser, context, tx);
+
+        await this.auditLogService.record(
+          {
+            userId: lockedUser.id,
+            action: 'PASSWORD_CHANGED',
+            ipAddress: context.ipAddress,
+            userAgent: context.userAgent,
+            metadata: {
+              provider: 'email_password',
+              revokedOtherSessionsCount,
+              previousSessionPublicId: currentSession.publicId,
+              newSessionPublicId: created.session.publicId,
+              deviceInfo: created.session.deviceInfo,
+              pepperVersion,
+            },
+          },
+          tx,
+        );
+
+        return {
+          kind: 'changed',
+          user: lockedUser,
+          email: freshIdentity.identifierNormalized,
+          created,
+          revokedOtherSessionsCount,
+        };
+      });
+
+    switch (outcome.kind) {
+      case 'unauthorized':
+        throw new AuthDomainError({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          message: AUTH_MESSAGES.unauthorized,
+        });
+      case 'conflict':
+        throw new AuthDomainError({
+          status: 409,
+          code: 'CONFLICT',
+          message: AUTH_MESSAGES.passwordChangeConcurrentConflict,
+        });
+      case 'otp_invalid':
+        throw new AuthDomainError({
+          status: 400,
+          code: 'TOKEN_INVALID',
+          message: AUTH_MESSAGES.otpInvalidOrExpired,
+          details: [{ field: 'otpCode', message: AUTH_MESSAGES.otpInvalidOrExpired }],
+        });
+      case 'otp_expired':
+        throw new AuthDomainError({
+          status: 400,
+          code: 'TOKEN_EXPIRED',
+          message: AUTH_MESSAGES.otpExpired,
+          details: [{ field: 'otpCode', message: AUTH_MESSAGES.otpExpired }],
+        });
+      case 'otp_max_attempts':
+        throw new AuthDomainError({
+          status: 400,
+          code: 'TOKEN_INVALID',
+          message: AUTH_MESSAGES.otpRevokedMaxAttempts,
+          details: [{ field: 'otpCode', message: AUTH_MESSAGES.otpRevokedMaxAttempts }],
+        });
+      case 'otp_wrong': {
+        const wrongMsg = AUTH_MESSAGES.otpIncorrectWithRemaining(outcome.remainingAttempts);
+        throw new AuthDomainError({
+          status: 400,
+          code: 'TOKEN_INVALID',
+          message: wrongMsg,
+          details: [{ field: 'otpCode', message: wrongMsg }],
+        });
+      }
+      case 'changed':
+        break;
+    }
+
+    await this.sendPasswordAlertEmailSafe('changed', {
+      toEmail: outcome.email,
+      displayName: outcome.user.fullName,
+      occurredAt: currentTime,
+      ipAddress: context.ipAddress,
+      deviceInfo: outcome.created.session.deviceInfo ?? parseDeviceInfo(context.userAgent),
+    });
+
+    return {
+      changed: true,
+      revokedOtherSessionsCount: outcome.revokedOtherSessionsCount,
+      message: AUTH_MESSAGES.passwordChangedSuccess,
+      tokens: outcome.created.tokens,
+    };
+  }
+
   private async handleExistingAccountRegistration(
     existing: IdentityWithUser,
     input: {
@@ -1089,6 +2024,16 @@ export class AuthService {
     }
   }
 
+  private resolveAppUrl(): string {
+    return this.appUrlOverride ?? getEnv().APP_URL;
+  }
+
+  private buildPasswordResetUrl(rawResetToken: string): string {
+    const url = new URL('/reset-password', this.resolveAppUrl());
+    url.searchParams.set('token', rawResetToken);
+    return url.toString();
+  }
+
   private async sendVerificationOtpEmail(
     toEmail: string,
     displayName: string,
@@ -1117,6 +2062,117 @@ export class AuthService {
         });
       }
       throw error;
+    }
+  }
+
+  private async sendPasswordResetLinkEmail(
+    toEmail: string,
+    displayName: string,
+    resetUrl: string,
+  ): Promise<void> {
+    const template = buildPasswordResetLinkEmail({
+      displayName,
+      resetUrl,
+      expiresInMinutes: PASSWORD_RESET_TOKEN_TTL_MINUTES,
+    });
+
+    try {
+      await this.emailProvider.send({
+        to: toEmail,
+        subject: template.subject,
+        html: template.html,
+        text: template.text,
+      });
+    } catch (error) {
+      if (error instanceof EmailDeliveryError) {
+        throw new AuthDomainError({
+          status: 503,
+          code: 'INTERNAL_ERROR',
+          message: AUTH_MESSAGES.emailDeliveryUnavailable,
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async sendPasswordChangeOtpEmail(
+    toEmail: string,
+    displayName: string,
+    otpCode: string,
+  ): Promise<void> {
+    const template = buildPasswordChangeOtpEmail({
+      displayName,
+      otpCode,
+      expiresInMinutes: PASSWORD_CHANGE_OTP_TTL_MINUTES,
+    });
+
+    try {
+      await this.emailProvider.send({
+        to: toEmail,
+        subject: template.subject,
+        html: template.html,
+        text: template.text,
+      });
+    } catch (error) {
+      if (error instanceof EmailDeliveryError) {
+        throw new AuthDomainError({
+          status: 503,
+          code: 'INTERNAL_ERROR',
+          message: AUTH_MESSAGES.emailDeliveryUnavailable,
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Gửi email cảnh báo bảo mật sau khi giao dịch đặt lại/đổi mật khẩu ĐÃ COMMIT thành công:
+   * nếu dịch vụ SMTP tạm gián đoạn chỉ ghi log cảnh báo an toàn (không chứa dữ liệu nhạy cảm)
+   * để không làm hỏng phản hồi HTTP hoặc làm mất cookie phiên mới vừa cấp cho thiết bị hiện tại.
+   */
+  private async sendPasswordAlertEmailSafe(
+    kind: 'reset' | 'changed',
+    data: {
+      readonly toEmail: string;
+      readonly displayName: string;
+      readonly occurredAt: Date;
+      readonly ipAddress: string | null;
+      readonly deviceInfo: string;
+    },
+  ): Promise<void> {
+    const templateData = {
+      displayName: data.displayName,
+      occurredAt: data.occurredAt,
+      ipAddress: data.ipAddress,
+      deviceInfo: data.deviceInfo,
+      appUrl: this.resolveAppUrl(),
+    };
+    const template =
+      kind === 'reset'
+        ? buildPasswordResetAlertEmail(templateData)
+        : buildPasswordChangedAlertEmail(templateData);
+
+    try {
+      await this.emailProvider.send({
+        to: data.toEmail,
+        subject: template.subject,
+        html: template.html,
+        text: template.text,
+      });
+    } catch (error) {
+      logger.warn(
+        {
+          component: 'auth-service',
+          event:
+            kind === 'reset'
+              ? 'password_reset_alert_email_failed'
+              : 'password_changed_alert_email_failed',
+          errorName: error instanceof Error ? error.name : 'Error',
+        },
+        'Không thể gửi email cảnh báo thay đổi mật khẩu sau khi giao dịch đã hoàn tất',
+      );
     }
   }
 }

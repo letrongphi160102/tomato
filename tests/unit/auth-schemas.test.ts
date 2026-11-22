@@ -2,10 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   calculateAgeYears,
+  changePasswordInputSchema,
   createRegisterInputSchema,
+  forgotPasswordInputSchema,
+  getWeakPasswordContextViolation,
   hasVietnameseDiacritics,
   parseStrictIsoDate,
   resendVerificationInputSchema,
+  resetPasswordInputSchema,
   verifyEmailInputSchema,
 } from '@/modules/auth/auth.schemas';
 
@@ -244,5 +248,79 @@ describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
 
     const resend = resendVerificationInputSchema.parse({ email: '  USER@TOMATO.VN ' });
     expect(resend).toEqual({ email: 'user@tomato.vn' });
+  });
+
+  it('validate chính xác forgotPasswordInputSchema, resetPasswordInputSchema và changePasswordInputSchema (M4)', () => {
+    const forgot = forgotPasswordInputSchema.parse({ email: '  Ｕｓｅｒ＠Tomato.VN  ' });
+    expect(forgot.email).toBe('user@tomato.vn');
+
+    const validResetToken = 'a'.repeat(43);
+    const resetOk = resetPasswordInputSchema.safeParse({
+      token: ` ${validResetToken} `,
+      newPassword: '  my brand new safe passphrase 2026  ',
+    });
+    expect(resetOk.success).toBe(true);
+    if (resetOk.success) {
+      expect(resetOk.data.token).toBe(validResetToken);
+      // Không trim khoảng trắng ở mật khẩu mới.
+      expect(resetOk.data.newPassword).toBe('  my brand new safe passphrase 2026  ');
+    }
+
+    expect(
+      resetPasswordInputSchema.safeParse({
+        token: 'short-token',
+        newPassword: 'valid passphrase long enough 2026',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      resetPasswordInputSchema.safeParse({
+        token: validResetToken,
+        newPassword: 'mat khau co dau tieng viet á 2026',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      resetPasswordInputSchema.safeParse({
+        token: validResetToken,
+        newPassword: 'password123456',
+      }).success,
+    ).toBe(false);
+
+    // Đổi mật khẩu: cấm trùng mật khẩu hiện tại (kể cả sau chuẩn hóa NFKC).
+    const samePass = changePasswordInputSchema.safeParse({
+      currentPassword: 'old safe passphrase 2026!',
+      newPassword: 'old safe passphrase 2026!',
+      otpCode: '123456',
+    });
+    expect(samePass.success).toBe(false);
+    if (!samePass.success) {
+      expect(samePass.error.issues.some((i) => i.path[0] === 'newPassword')).toBe(true);
+    }
+
+    const changeOk = changePasswordInputSchema.safeParse({
+      currentPassword: 'old safe passphrase 2026!',
+      newPassword: 'brand new passphrase 2027!',
+      otpCode: ' 049821 ',
+    });
+    expect(changeOk.success).toBe(true);
+    if (changeOk.success) {
+      expect(changeOk.data.otpCode).toBe('049821');
+    }
+
+    expect(
+      getWeakPasswordContextViolation('prefix-alice@example.com-suffix', {
+        email: 'alice@example.com',
+        fullName: 'Alice Nguyen',
+        username: 'alice_ng',
+      }),
+    ).toBeTruthy();
+    expect(
+      getWeakPasswordContextViolation('completely independent passphrase 2026', {
+        email: 'alice@example.com',
+        fullName: 'Alice Nguyen',
+        username: 'alice_ng',
+      }),
+    ).toBeNull();
   });
 });

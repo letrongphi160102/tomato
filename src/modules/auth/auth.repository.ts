@@ -13,6 +13,7 @@ import {
   type SessionRow,
   type UserGender,
   type UserRow,
+  type VerificationTokenPurpose,
   type VerificationTokenRow,
 } from '@/core/db/schema';
 
@@ -64,6 +65,14 @@ export interface ReissueEmailVerifyTokenParams {
   readonly userId: string;
   readonly otpTokenHash: string;
   readonly otpExpiresAt: Date;
+  readonly now: Date;
+}
+
+export interface ReissueVerificationTokenParams {
+  readonly userId: string;
+  readonly purpose: VerificationTokenPurpose;
+  readonly tokenHash: string;
+  readonly expiresAt: Date;
   readonly now: Date;
 }
 
@@ -194,6 +203,18 @@ export class AuthRepository {
     };
   }
 
+  async findEmailIdentityByUserId(
+    userId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<AuthIdentityRow | null> {
+    const rows = await executor
+      .select()
+      .from(authIdentities)
+      .where(and(eq(authIdentities.userId, userId), eq(authIdentities.provider, 'email_password')))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async createPendingUserWithIdentityAndOtp(
     params: CreatePendingUserParams,
     tx: DatabaseTransaction,
@@ -294,11 +315,11 @@ export class AuthRepository {
   }
 
   /**
-   * Vô hiệu hóa toàn bộ mã OTP xác minh email chưa dùng trước đó rồi mới tạo mã mới
-   * trong cùng transaction để tại mọi thời điểm chỉ có duy nhất 1 OTP còn hiệu lực.
+   * Vô hiệu hóa toàn bộ mã token/OTP chưa dùng cùng `purpose` rồi chèn bản ghi mới trong cùng
+   * transaction để tại mọi thời điểm chỉ có duy nhất 1 token còn hiệu lực cho mục đích đó.
    */
-  async reissueEmailVerifyToken(
-    params: ReissueEmailVerifyTokenParams,
+  async reissueVerificationToken(
+    params: ReissueVerificationTokenParams,
     tx: DatabaseTransaction,
   ): Promise<void> {
     await tx
@@ -307,7 +328,7 @@ export class AuthRepository {
       .where(
         and(
           eq(verificationTokens.userId, params.userId),
-          eq(verificationTokens.purpose, 'email_verify'),
+          eq(verificationTokens.purpose, params.purpose),
           isNull(verificationTokens.consumedAt),
         ),
       );
@@ -315,12 +336,58 @@ export class AuthRepository {
     await tx.insert(verificationTokens).values({
       id: generateUuidV7(),
       userId: params.userId,
-      purpose: 'email_verify',
-      tokenHash: params.otpTokenHash,
+      purpose: params.purpose,
+      tokenHash: params.tokenHash,
       attemptCount: 0,
-      expiresAt: params.otpExpiresAt,
+      expiresAt: params.expiresAt,
       createdAt: params.now,
     });
+  }
+
+  /**
+   * Vô hiệu hóa toàn bộ mã OTP xác minh email chưa dùng trước đó rồi mới tạo mã mới
+   * trong cùng transaction để tại mọi thời điểm chỉ có duy nhất 1 OTP còn hiệu lực.
+   */
+  async reissueEmailVerifyToken(
+    params: ReissueEmailVerifyTokenParams,
+    tx: DatabaseTransaction,
+  ): Promise<void> {
+    await this.reissueVerificationToken(
+      {
+        userId: params.userId,
+        purpose: 'email_verify',
+        tokenHash: params.otpTokenHash,
+        expiresAt: params.otpExpiresAt,
+        now: params.now,
+      },
+      tx,
+    );
+  }
+
+  /**
+   * Khóa dòng `FOR UPDATE` trên mã OTP chưa tiêu thụ mới nhất theo `purpose`
+   * để triệt tiêu race condition khi nhiều request thử sai OTP đồng thời cố vượt ngưỡng 5 lần thử.
+   */
+  async lockLatestUnconsumedTokenByPurpose(
+    userId: string,
+    purpose: VerificationTokenPurpose,
+    tx: DatabaseTransaction,
+  ): Promise<VerificationTokenRow | null> {
+    const rows = await tx
+      .select()
+      .from(verificationTokens)
+      .where(
+        and(
+          eq(verificationTokens.userId, userId),
+          eq(verificationTokens.purpose, purpose),
+          isNull(verificationTokens.consumedAt),
+        ),
+      )
+      .orderBy(desc(verificationTokens.createdAt))
+      .limit(1)
+      .for('update');
+
+    return rows[0] ?? null;
   }
 
   /**
@@ -331,21 +398,75 @@ export class AuthRepository {
     userId: string,
     tx: DatabaseTransaction,
   ): Promise<VerificationTokenRow | null> {
-    const rows = await tx
+    return this.lockLatestUnconsumedTokenByPurpose(userId, 'email_verify', tx);
+  }
+
+  async findVerificationTokenByHash(
+    purpose: VerificationTokenPurpose,
+    tokenHash: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<VerificationTokenRow | null> {
+    const rows = await executor
       .select()
       .from(verificationTokens)
       .where(
-        and(
-          eq(verificationTokens.userId, userId),
-          eq(verificationTokens.purpose, 'email_verify'),
-          isNull(verificationTokens.consumedAt),
-        ),
+        and(eq(verificationTokens.purpose, purpose), eq(verificationTokens.tokenHash, tokenHash)),
       )
       .orderBy(desc(verificationTokens.createdAt))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Khóa dòng `verification_tokens` bằng `FOR UPDATE` SAU khi đã khóa `users FOR UPDATE`
+   * để tuân thủ thứ tự khóa chuẩn, chống deadlock và ngăn replay đồng thời 1 token đặt lại mật khẩu.
+   */
+  async lockVerificationTokenById(
+    tokenId: string,
+    userId: string,
+    tx: DatabaseTransaction,
+  ): Promise<VerificationTokenRow | null> {
+    const rows = await tx
+      .select()
+      .from(verificationTokens)
+      .where(and(eq(verificationTokens.id, tokenId), eq(verificationTokens.userId, userId)))
       .limit(1)
       .for('update');
-
     return rows[0] ?? null;
+  }
+
+  async consumeAllUnconsumedTokensByPurpose(
+    userId: string,
+    purpose: VerificationTokenPurpose,
+    consumedAt: Date,
+    tx: DatabaseTransaction,
+  ): Promise<void> {
+    await tx
+      .update(verificationTokens)
+      .set({ consumedAt })
+      .where(
+        and(
+          eq(verificationTokens.userId, userId),
+          eq(verificationTokens.purpose, purpose),
+          isNull(verificationTokens.consumedAt),
+        ),
+      );
+  }
+
+  /**
+   * Mở khóa tài khoản từ trạng thái `locked` về `active` khi người dùng đặt lại mật khẩu thành công.
+   * Chỉ khớp đúng điều kiện `status = 'locked'` để tuyệt đối không tự mở tài khoản `suspended`/`deleted`.
+   */
+  async unlockLockedUser(userId: string, now: Date, tx: DatabaseTransaction): Promise<boolean> {
+    const rows = await tx
+      .update(users)
+      .set({
+        status: 'active',
+        updatedAt: now,
+      })
+      .where(and(eq(users.id, userId), eq(users.status, 'locked')))
+      .returning({ id: users.id });
+    return rows.length > 0;
   }
 
   async updateVerificationTokenAttempt(

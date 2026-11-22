@@ -155,9 +155,49 @@ const genderSchema = z.enum(USER_GENDERS, {
   error: AUTH_MESSAGES.genderRequired,
 });
 
+export const PASSWORD_RESET_TOKEN_MIN_LENGTH = 32;
+export const PASSWORD_RESET_TOKEN_MAX_LENGTH = 512;
+
+export interface PasswordUserContext {
+  readonly email: string;
+  readonly fullName: string;
+  readonly username: string;
+}
+
+/**
+ * Kiểm tra mật khẩu mới có trùng/chứa email, trùng họ tên, trùng username hoặc nằm trong danh sách
+ * mật khẩu quá phổ biến hay không (áp dụng thống nhất cho Đăng ký, Đặt lại mật khẩu và Đổi mật khẩu).
+ */
+export function getWeakPasswordContextViolation(
+  normalizedPassword: string,
+  userContext: PasswordUserContext,
+): string | null {
+  const passwordComparable = normalizedPassword.trim().toLowerCase();
+  const emailComparable = userContext.email.trim().toLowerCase();
+  const fullNameComparable = userContext.fullName.trim().toLowerCase();
+  const usernameComparable = userContext.username.trim().toLowerCase();
+
+  if (
+    emailComparable.length > 0 &&
+    (passwordComparable === emailComparable || passwordComparable.includes(emailComparable))
+  ) {
+    return AUTH_MESSAGES.passwordMatchesEmail;
+  }
+  if (fullNameComparable.length > 0 && passwordComparable === fullNameComparable) {
+    return AUTH_MESSAGES.passwordMatchesFullName;
+  }
+  if (usernameComparable.length > 0 && passwordComparable === usernameComparable) {
+    return AUTH_MESSAGES.passwordMatchesUsername;
+  }
+  if (isCommonOrWeakPassword(normalizedPassword)) {
+    return AUTH_MESSAGES.passwordTooCommon;
+  }
+  return null;
+}
+
 // Áp dụng chuẩn hóa NFKC nhưng TUYỆT ĐỐI không `.trim()` và không cắt ngắn mật khẩu > 128 ký tự;
 // không ép kiểu ký tự (hoa/số/đặc biệt) nhưng chặn dấu tiếng Việt.
-const registrationPasswordSchema = z
+export const strongPasswordSchema = z
   .string({ error: AUTH_MESSAGES.passwordRequired })
   .transform((val) => normalizePassword(val))
   .refine((val) => val.length > 0, { message: AUTH_MESSAGES.passwordRequired })
@@ -171,6 +211,10 @@ const registrationPasswordSchema = z
     message: AUTH_MESSAGES.passwordTooLong,
   });
 
+const newPasswordPolicySchema = strongPasswordSchema.refine((val) => !isCommonOrWeakPassword(val), {
+  message: AUTH_MESSAGES.passwordTooCommon,
+});
+
 export function createRegisterInputSchema(now: () => Date = () => new Date()) {
   return z
     .object({
@@ -178,7 +222,7 @@ export function createRegisterInputSchema(now: () => Date = () => new Date()) {
       username: usernameSchema,
       gender: genderSchema,
       email: normalizedEmailSchema,
-      password: registrationPasswordSchema,
+      password: strongPasswordSchema,
       dateOfBirth: z
         .string({ error: AUTH_MESSAGES.dateOfBirthRequired })
         .trim()
@@ -220,32 +264,16 @@ export function createRegisterInputSchema(now: () => Date = () => new Date()) {
       }
 
       // 2. Cấm mật khẩu trùng email, trùng họ tên, trùng ID tài khoản hoặc nằm trong danh sách mật khẩu phổ biến.
-      const passwordComparable = data.password.trim().toLowerCase();
-      const fullNameComparable = data.fullName.trim().toLowerCase();
-
-      if (passwordComparable === data.email || passwordComparable.includes(data.email)) {
+      const passwordViolation = getWeakPasswordContextViolation(data.password, {
+        email: data.email,
+        fullName: data.fullName,
+        username: data.username,
+      });
+      if (passwordViolation) {
         ctx.addIssue({
           code: 'custom',
           path: ['password'],
-          message: AUTH_MESSAGES.passwordMatchesEmail,
-        });
-      } else if (passwordComparable === fullNameComparable) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['password'],
-          message: AUTH_MESSAGES.passwordMatchesFullName,
-        });
-      } else if (passwordComparable === data.username) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['password'],
-          message: AUTH_MESSAGES.passwordMatchesUsername,
-        });
-      } else if (isCommonOrWeakPassword(data.password)) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['password'],
-          message: AUTH_MESSAGES.passwordTooCommon,
+          message: passwordViolation,
         });
       }
     });
@@ -302,3 +330,51 @@ export const revokeAllSessionsInputSchema = z.object({
 });
 
 export type RevokeAllSessionsInput = z.infer<typeof revokeAllSessionsInputSchema>;
+
+export const forgotPasswordInputSchema = z.object({
+  email: normalizedEmailSchema,
+  // Trường tùy chọn sẵn sàng cho ngưỡng Turnstile nâng cao tại Cột mốc M5 (giống `/login`).
+  captchaToken: z.string().trim().max(4096).optional(),
+});
+
+export type ForgotPasswordInput = z.infer<typeof forgotPasswordInputSchema>;
+
+export const resetPasswordInputSchema = z.object({
+  token: z
+    .string({ error: AUTH_MESSAGES.resetTokenInvalidOrExpired })
+    .trim()
+    .min(PASSWORD_RESET_TOKEN_MIN_LENGTH, AUTH_MESSAGES.resetTokenInvalidOrExpired)
+    .max(PASSWORD_RESET_TOKEN_MAX_LENGTH, AUTH_MESSAGES.resetTokenInvalidOrExpired),
+  newPassword: newPasswordPolicySchema,
+});
+
+export type ResetPasswordInput = z.infer<typeof resetPasswordInputSchema>;
+
+const currentPasswordSchema = z
+  .string({ error: AUTH_MESSAGES.currentPasswordRequired })
+  .transform((val) => normalizePassword(val))
+  .refine((val) => val.length > 0, { message: AUTH_MESSAGES.currentPasswordRequired })
+  .refine((val) => val.length <= PASSWORD_MAX_LENGTH, {
+    message: AUTH_MESSAGES.passwordTooLong,
+  });
+
+export const changePasswordInputSchema = z
+  .object({
+    currentPassword: currentPasswordSchema,
+    newPassword: newPasswordPolicySchema,
+    otpCode: z
+      .string({ error: AUTH_MESSAGES.otpFormatInvalid })
+      .trim()
+      .regex(OTP_CODE_REGEX, AUTH_MESSAGES.otpFormatInvalid),
+  })
+  .superRefine((data, ctx) => {
+    if (data.newPassword === data.currentPassword) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['newPassword'],
+        message: AUTH_MESSAGES.newPasswordSameAsCurrent,
+      });
+    }
+  });
+
+export type ChangePasswordInput = z.infer<typeof changePasswordInputSchema>;

@@ -265,7 +265,16 @@ export function LoginForm({ nextPath }: LoginFormProps) {
                       ? 'Tài khoản bị tạm đình chỉ'
                       : 'Đăng nhập không thành công'}
                 </AlertTitle>
-                <AlertDescription>{bannerMessage}</AlertDescription>
+                <AlertDescription>
+                  {bannerMessage}
+                  {errorCode === 'ACCOUNT_LOCKED' ? (
+                    <span className="mt-1.5 block">
+                      <Link href="/forgot-password" className="font-medium underline">
+                        Đặt lại mật khẩu để mở khóa tài khoản
+                      </Link>
+                    </span>
+                  ) : null}
+                </AlertDescription>
               </div>
             </Alert>
           ) : null}
@@ -299,7 +308,15 @@ export function LoginForm({ nextPath }: LoginFormProps) {
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="login-password">Mật khẩu</Label>
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="login-password">Mật khẩu</Label>
+              <Link
+                href="/forgot-password"
+                className="text-xs font-medium text-primary hover:underline"
+              >
+                Quên mật khẩu?
+              </Link>
+            </div>
             <PasswordInput
               id="login-password"
               name="password"

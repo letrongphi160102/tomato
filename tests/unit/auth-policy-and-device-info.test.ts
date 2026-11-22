@@ -8,9 +8,11 @@ import {
   AuthDomainError,
   UNKNOWN_DEVICE_LABEL,
   assertCanAccessUserSessions,
+  assertCanChangeOwnPassword,
   assertCanRevokeSession,
   assertCanRevokeUserSessions,
   canAccessUserSessions,
+  canChangeOwnPassword,
   canRevokeSession,
   loginInputSchema,
   parseDeviceInfo,
@@ -207,5 +209,28 @@ describe('Unit M3: Device Info Parser, Auth Policy (Deny-by-default), Login Sche
     const refreshOnlyRes = proxy(refreshOnlyReq);
     expect(refreshOnlyRes.status).toBe(200);
     expect(refreshOnlyRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+  });
+
+  it('auth.policy.ts áp dụng Deny by default cho quyền đổi mật khẩu (canChangeOwnPassword)', () => {
+    const activeUser = makeUser({ status: 'active' });
+    const activeSession = makeSession({ userId: activeUser.id, revokedAt: null });
+    const validPrincipal: AuthenticatedPrincipal = { user: activeUser, session: activeSession };
+
+    expect(canChangeOwnPassword(validPrincipal)).toBe(true);
+    expect(() => assertCanChangeOwnPassword(validPrincipal)).not.toThrow();
+
+    const revokedPrincipal: AuthenticatedPrincipal = {
+      user: activeUser,
+      session: makeSession({ userId: activeUser.id, revokedAt: new Date() }),
+    };
+    expect(canChangeOwnPassword(revokedPrincipal)).toBe(false);
+    expect(() => assertCanChangeOwnPassword(revokedPrincipal)).toThrow(AuthDomainError);
+
+    const lockedPrincipal: AuthenticatedPrincipal = {
+      user: makeUser({ status: 'locked' }),
+      session: activeSession,
+    };
+    expect(canChangeOwnPassword(lockedPrincipal)).toBe(false);
+    expect(canChangeOwnPassword(null)).toBe(false);
   });
 });

@@ -19,11 +19,16 @@ function isProtectedSettingsRoute(pathname: string): boolean {
   return pathname === '/settings' || pathname.startsWith('/settings/');
 }
 
+function isSensitiveTokenPageRoute(pathname: string): boolean {
+  return pathname === '/reset-password' || pathname.startsWith('/reset-password/');
+}
+
 /**
  * Next.js 16 Proxy (thay thế `middleware.ts` đã deprecated):
  * - Sinh CSP nonce duy nhất cho mỗi request và chuyển tiếp qua header `x-nonce` cho SSR.
  * - Gắn toàn bộ Security Headers (CSP, X-Content-Type-Options, X-Frame-Options,
  *   Referrer-Policy, Permissions-Policy, và HSTS khi chạy Production HTTPS).
+ * - Ép `Referrer-Policy: no-referrer` + `Cache-Control: no-store` cho `/reset-password` để chống rò rỉ token qua Referer/cache.
  * - Gắn phòng thủ `Cache-Control: no-store, max-age=0` cho mọi endpoint `/api/v1/auth/*` và `/settings/*`.
  * - Bảo vệ route `/settings/*`: chuyển hướng về `/login` nếu người dùng hoàn toàn chưa có
  *   cả cookie Access Token lẫn Refresh Token (giữ lại quyền auto-refresh khi AT vừa hết hạn 15 phút).
@@ -35,6 +40,7 @@ export function proxy(request: NextRequest): NextResponse {
   const isApiRoute = pathname.startsWith('/api/');
   const isAuthApiRoute = pathname === '/api/v1/auth' || pathname.startsWith('/api/v1/auth/');
   const isProtectedRoute = isProtectedSettingsRoute(pathname);
+  const isSensitiveTokenPage = isSensitiveTokenPageRoute(pathname);
 
   const nonce = generateCspNonce();
   const securityHeaders = buildSecurityHeaders({
@@ -43,6 +49,7 @@ export function proxy(request: NextRequest): NextResponse {
     isHttps,
     isApiRoute,
     isAuthApiRoute,
+    isSensitiveTokenPage,
   });
 
   if (isProtectedRoute) {

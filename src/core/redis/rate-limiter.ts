@@ -67,6 +67,36 @@ export const AUTH_RATE_LIMITS = Object.freeze({
     windowSeconds: 15 * 60,
     strategy: 'sliding_window',
   }),
+  resetPasswordByIp: Object.freeze({
+    limit: 10,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  changePasswordOtpByIp: Object.freeze({
+    limit: 10,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  changePasswordOtpCooldown: Object.freeze({
+    limit: 1,
+    windowSeconds: 60,
+    strategy: 'fixed_window',
+  }),
+  changePasswordOtpByUserHourly: Object.freeze({
+    limit: 5,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  changePasswordByIp: Object.freeze({
+    limit: 10,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  changePasswordByUser: Object.freeze({
+    limit: 10,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
 } satisfies Record<string, RateLimitRule>);
 
 // Lua script nguyên tử cho Fixed Window: kiểm tra giới hạn, chỉ tăng bộ đếm khi còn hạn mức

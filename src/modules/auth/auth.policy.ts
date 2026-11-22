@@ -97,3 +97,25 @@ export function assertCanRevokeUserSessions(
     });
   }
 }
+
+/**
+ * Nguyên tắc Deny by default: chỉ cho phép chính chủ tài khoản `active` có phiên hợp lệ
+ * yêu cầu OTP và thực hiện đổi mật khẩu cho chính tài khoản của mình.
+ */
+export function canChangeOwnPassword(
+  principal: AuthenticatedPrincipal | null | undefined,
+): boolean {
+  return isActivePrincipal(principal);
+}
+
+export function assertCanChangeOwnPassword(
+  principal: AuthenticatedPrincipal | null | undefined,
+): asserts principal is AuthenticatedPrincipal {
+  if (!canChangeOwnPassword(principal)) {
+    throw new AuthDomainError({
+      status: 403,
+      code: 'FORBIDDEN',
+      message: AUTH_MESSAGES.forbidden,
+    });
+  }
+}
