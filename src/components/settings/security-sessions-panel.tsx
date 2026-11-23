@@ -227,7 +227,7 @@ export function SecuritySessionsPanel() {
 
       if (response.ok) {
         if (sessionItem.isCurrent) {
-          router.replace('/');
+          router.replace('/login');
           router.refresh();
           return;
         }

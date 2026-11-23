@@ -72,7 +72,7 @@ export function AppTopBar({ user }: AppTopBarProps) {
     } finally {
       setMenuOpen(false);
       setLoggingOut(false);
-      router.replace('/');
+      router.replace('/login');
       router.refresh();
     }
   }

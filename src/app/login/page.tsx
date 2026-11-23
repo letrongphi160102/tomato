@@ -3,6 +3,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
 import { LoginForm } from '@/components/auth/login-form';
+import { LoginSplitLayout } from '@/components/auth/login-split-layout';
 import { SilentSessionGate } from '@/components/auth/silent-session-gate';
 import { getEnv } from '@/core/config/env';
 import { sanitizeRedirectPath } from '@/lib/auth-client';
@@ -35,17 +36,21 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const cspNonce = requestHeaders.get('x-nonce') ?? undefined;
   const env = getEnv();
 
-  const loginForm = (
-    <LoginForm
-      nextPath={safeNextPath}
-      turnstileSiteKey={env.NEXT_PUBLIC_TURNSTILE_SITE_KEY}
-      cspNonce={cspNonce}
-    />
+  const loginScreen = (
+    <LoginSplitLayout>
+      <LoginForm
+        nextPath={safeNextPath}
+        turnstileSiteKey={env.NEXT_PUBLIC_TURNSTILE_SITE_KEY}
+        cspNonce={cspNonce}
+      />
+    </LoginSplitLayout>
   );
 
   if (authState.status === 'needs_refresh') {
-    return <SilentSessionGate mode="auth-redirect" nextPath={safeNextPath} fallback={loginForm} />;
+    return (
+      <SilentSessionGate mode="auth-redirect" nextPath={safeNextPath} fallback={loginScreen} />
+    );
   }
 
-  return loginForm;
+  return loginScreen;
 }

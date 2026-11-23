@@ -5,13 +5,13 @@ import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { metadata as loginPageMetadata } from '@/app/(auth)/login/page';
 import { metadata as devicesPageMetadata } from '@/app/(dashboard)/settings/devices/page';
 import { POST as changePasswordPost } from '@/app/api/v1/auth/change-password/route';
 import { POST as verifyOtpPost } from '@/app/api/v1/auth/change-password/verify-otp/route';
 import { metadata as rootMetadata } from '@/app/layout';
+import { metadata as loginPageMetadata } from '@/app/login/page';
+import { LoginSplitLayout } from '@/components/auth/login-split-layout';
 import { AuthenticatedHome } from '@/components/home/authenticated-home';
-import { LandingHero } from '@/components/home/landing-hero';
 import { AccountOverviewCard } from '@/components/settings/account-overview-card';
 import { getEnv, resetEnvCacheForTesting } from '@/core/config/env';
 import { hashPassword } from '@/core/crypto/password';
@@ -458,29 +458,35 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
     expect(ticketCookie).toContain('Max-Age=600');
   });
 
-  it('LandingHero dùng logo transparent PNG Tomato, đúng slogan "Kết nối và khám phá cùng nhau", favicon & metadata đúng chuẩn và ẩn /api/health ở Production', () => {
-    const prodHtml = renderToStaticMarkup(
-      React.createElement(LandingHero, { showDevHealthLink: false }),
+  it('LoginSplitLayout dùng homeland.png (trái) + form đăng nhập (phải), favicon & metadata chuẩn và trang chủ "/" chuyển thẳng sang "/login" khi chưa đăng nhập', () => {
+    const loginLayoutHtml = renderToStaticMarkup(
+      React.createElement(
+        LoginSplitLayout,
+        null,
+        React.createElement('div', null, 'Login Form Slot'),
+      ),
     );
-    expect(prodHtml).toContain('Tomato');
-    expect(prodHtml).toContain('/images/brand/tomato-logo.png');
-    expect(prodHtml).toContain('Kết nối và khám phá cùng nhau');
-    expect(prodHtml).not.toContain('/api/health');
-    expect(prodHtml).not.toContain('Giai đoạn 1');
-    expect(prodHtml).not.toContain('Modular Monolith');
-    expect(prodHtml).not.toContain('Argon2id');
+    expect(loginLayoutHtml).toContain('/images/brand/tomato-logo.png');
+    expect(loginLayoutHtml).toContain('/images/brand/homeland.png');
+    expect(loginLayoutHtml).toContain('Kết nối và');
+    expect(loginLayoutHtml).toContain('khám phá cùng nhau');
+    expect(loginLayoutHtml).toContain('Login Form Slot');
+    expect(loginLayoutHtml).not.toContain('/api/health');
+    expect(loginLayoutHtml).not.toContain('Giai đoạn 1');
+    expect(loginLayoutHtml).not.toContain('Modular Monolith');
 
-    const devHtml = renderToStaticMarkup(
-      React.createElement(LandingHero, { showDevHealthLink: true }),
-    );
-    expect(devHtml).toContain('/api/health');
-
-    // Tiêu đề tab trang chủ và các trang khác đổi TOMATO -> Tomato, tồn tại icon & logo transparent.
+    // Tiêu đề tab trang chủ và các trang khác đổi TOMATO -> Tomato, tồn tại icon, logo và homeland transparent.
     expect(rootMetadata.title).toBe('Tomato - Kết nối và khám phá cùng nhau');
     expect(loginPageMetadata.title).toBe('Đăng nhập — Tomato');
     expect(devicesPageMetadata.title).toBe('Thiết bị đăng nhập — Tomato');
     expect(existsSync(join(process.cwd(), 'src/app/icon.png'))).toBe(true);
     expect(existsSync(join(process.cwd(), 'public/images/brand/tomato-logo.png'))).toBe(true);
+    expect(existsSync(join(process.cwd(), 'public/images/brand/homeland.png'))).toBe(true);
+
+    // Trang chủ "/" khi chưa đăng nhập chuyển hướng thẳng sang "/login" (không còn LandingHero 2 nút).
+    const homeSource = readFileSync(join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+    expect(homeSource).toContain("redirect('/login')");
+    expect(homeSource).not.toContain('LandingHero');
 
     // Giao diện đổi mật khẩu không còn thanh 2 tab Bước 1/Bước 2 hay nút "Quay lại Bước 1".
     const changePasswordSource = readFileSync(

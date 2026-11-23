@@ -10,7 +10,6 @@ import { savePendingVerificationHint } from '@/components/auth/pending-verificat
 import { TurnstileWidget } from '@/components/auth/turnstile-widget';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { loginInputSchema } from '@/modules/auth/auth.schemas';
@@ -219,176 +218,176 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
   const isBlocked = isSubmitting || retryAfterSeconds > 0 || status === 'success';
 
   return (
-    <Card className="w-full shadow-md">
-      <CardHeader className="space-y-1 text-center">
-        <CardTitle>Đăng nhập vào Tomato</CardTitle>
-      </CardHeader>
+    <div className="w-full space-y-6 rounded-2xl border border-border/70 bg-card p-6 shadow-sm lg:border-0 lg:bg-transparent lg:p-2 lg:shadow-none">
+      <div className="space-y-1">
+        <h2 className="text-xl font-semibold tracking-tight text-foreground">
+          Đăng nhập vào Tomato
+        </h2>
+      </div>
 
-      <CardContent>
-        <div aria-live="polite" className="mb-4 space-y-3">
-          {status === 'success' ? (
-            <Alert variant="success">
-              <CheckCircle2 aria-hidden="true" />
-              <div>
-                <AlertTitle>Đăng nhập thành công</AlertTitle>
-                <AlertDescription>Đang đưa bạn vào trang chủ...</AlertDescription>
-              </div>
-            </Alert>
-          ) : null}
+      <div aria-live="polite" className="space-y-3 empty:hidden">
+        {status === 'success' ? (
+          <Alert variant="success">
+            <CheckCircle2 aria-hidden="true" />
+            <div>
+              <AlertTitle>Đăng nhập thành công</AlertTitle>
+              <AlertDescription>Đang đưa bạn vào trang chủ...</AlertDescription>
+            </div>
+          </Alert>
+        ) : null}
 
-          {status === 'rate_limited' ? (
-            <Alert variant="warning">
-              <Clock aria-hidden="true" />
-              <div>
-                <AlertTitle>Vui lòng chờ một lát</AlertTitle>
-                <AlertDescription>
-                  {bannerMessage}
-                  {retryAfterSeconds > 0 ? (
-                    <span className="mt-1 block font-medium">
-                      Thời gian chờ còn lại: {retryAfterSeconds} giây.
-                    </span>
-                  ) : null}
-                </AlertDescription>
-              </div>
-            </Alert>
-          ) : null}
+        {status === 'rate_limited' ? (
+          <Alert variant="warning">
+            <Clock aria-hidden="true" />
+            <div>
+              <AlertTitle>Vui lòng chờ một lát</AlertTitle>
+              <AlertDescription>
+                {bannerMessage}
+                {retryAfterSeconds > 0 ? (
+                  <span className="mt-1 block font-medium">
+                    Thời gian chờ còn lại: {retryAfterSeconds} giây.
+                  </span>
+                ) : null}
+              </AlertDescription>
+            </div>
+          </Alert>
+        ) : null}
 
-          {status === 'error' && bannerMessage ? (
-            <Alert variant={errorCode === 'ACCOUNT_LOCKED' ? 'warning' : 'destructive'}>
-              <AlertCircle aria-hidden="true" />
-              <div>
-                <AlertTitle>
-                  {errorCode === 'ACCOUNT_LOCKED'
-                    ? 'Tài khoản đang tạm khóa'
-                    : errorCode === 'ACCOUNT_SUSPENDED'
-                      ? 'Tài khoản bị tạm đình chỉ'
-                      : 'Đăng nhập không thành công'}
-                </AlertTitle>
-                <AlertDescription>
-                  {bannerMessage}
-                  {errorCode === 'ACCOUNT_LOCKED' ? (
-                    <span className="mt-1.5 block">
-                      <Link href="/forgot-password" className="font-medium underline">
-                        Đặt lại mật khẩu để mở khóa tài khoản
-                      </Link>
-                    </span>
-                  ) : null}
-                </AlertDescription>
-              </div>
-            </Alert>
+        {status === 'error' && bannerMessage ? (
+          <Alert variant={errorCode === 'ACCOUNT_LOCKED' ? 'warning' : 'destructive'}>
+            <AlertCircle aria-hidden="true" />
+            <div>
+              <AlertTitle>
+                {errorCode === 'ACCOUNT_LOCKED'
+                  ? 'Tài khoản đang tạm khóa'
+                  : errorCode === 'ACCOUNT_SUSPENDED'
+                    ? 'Tài khoản bị tạm đình chỉ'
+                    : 'Đăng nhập không thành công'}
+              </AlertTitle>
+              <AlertDescription>
+                {bannerMessage}
+                {errorCode === 'ACCOUNT_LOCKED' ? (
+                  <span className="mt-1.5 block">
+                    <Link href="/forgot-password" className="font-medium underline">
+                      Đặt lại mật khẩu để mở khóa tài khoản
+                    </Link>
+                  </span>
+                ) : null}
+              </AlertDescription>
+            </div>
+          </Alert>
+        ) : null}
+      </div>
+
+      <form onSubmit={handleSubmit} noValidate className="space-y-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="login-email">Địa chỉ email</Label>
+          <Input
+            id="login-email"
+            name="email"
+            type="email"
+            inputMode="email"
+            autoComplete="email"
+            placeholder="ban@example.com"
+            value={email}
+            onChange={(event) => {
+              setEmail(event.target.value);
+              clearFieldError('email');
+            }}
+            disabled={isSubmitting}
+            aria-invalid={Boolean(fieldErrors.email)}
+            aria-describedby={fieldErrors.email ? 'login-email-error' : undefined}
+            className="h-11 rounded-xl"
+            required
+          />
+          {fieldErrors.email ? (
+            <p id="login-email-error" role="alert" className="text-xs text-destructive">
+              {fieldErrors.email}
+            </p>
           ) : null}
         </div>
 
-        <form onSubmit={handleSubmit} noValidate className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="login-email">Địa chỉ email</Label>
-            <Input
-              id="login-email"
-              name="email"
-              type="email"
-              inputMode="email"
-              autoComplete="email"
-              placeholder="ban@example.com"
-              value={email}
-              onChange={(event) => {
-                setEmail(event.target.value);
-                clearFieldError('email');
-              }}
-              disabled={isSubmitting}
-              aria-invalid={Boolean(fieldErrors.email)}
-              aria-describedby={fieldErrors.email ? 'login-email-error' : undefined}
-              required
-            />
-            {fieldErrors.email ? (
-              <p id="login-email-error" role="alert" className="text-xs text-destructive">
-                {fieldErrors.email}
-              </p>
-            ) : null}
-          </div>
-
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="login-password">Mật khẩu</Label>
-              <Link
-                href="/forgot-password"
-                className="text-xs font-medium text-primary hover:underline"
-              >
-                Quên mật khẩu?
-              </Link>
-            </div>
-            <PasswordInput
-              id="login-password"
-              name="password"
-              autoComplete="current-password"
-              placeholder="Mật khẩu"
-              value={password}
-              onChange={(event) => {
-                setPassword(event.target.value);
-                clearFieldError('password');
-              }}
-              disabled={isSubmitting}
-              aria-invalid={Boolean(fieldErrors.password)}
-              aria-describedby={fieldErrors.password ? 'login-password-error' : undefined}
-              required
-            />
-            {fieldErrors.password ? (
-              <p id="login-password-error" role="alert" className="text-xs text-destructive">
-                {fieldErrors.password}
-              </p>
-            ) : null}
-          </div>
-
-          {requireCaptcha ? (
-            <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
-                <ShieldAlert className="size-4 shrink-0 text-amber-700" aria-hidden="true" />
-                <span>Vui lòng hoàn tất xác nhận bảo mật để tiếp tục đăng nhập.</span>
-              </div>
-              <TurnstileWidget
-                siteKey={turnstileSiteKey}
-                nonce={cspNonce}
-                resetSignal={turnstileResetSignal}
-                onTokenChange={(token) => {
-                  setCaptchaToken(token);
-                  if (token) {
-                    clearFieldError('captchaToken');
-                  }
-                }}
-              />
-              {fieldErrors.captchaToken ? (
-                <p id="login-captcha-error" role="alert" className="text-xs text-destructive">
-                  {fieldErrors.captchaToken}
-                </p>
-              ) : null}
-            </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="login-password">Mật khẩu</Label>
+          <PasswordInput
+            id="login-password"
+            name="password"
+            autoComplete="current-password"
+            placeholder="Mật khẩu"
+            value={password}
+            onChange={(event) => {
+              setPassword(event.target.value);
+              clearFieldError('password');
+            }}
+            disabled={isSubmitting}
+            aria-invalid={Boolean(fieldErrors.password)}
+            aria-describedby={fieldErrors.password ? 'login-password-error' : undefined}
+            className="h-11 rounded-xl"
+            required
+          />
+          {fieldErrors.password ? (
+            <p id="login-password-error" role="alert" className="text-xs text-destructive">
+              {fieldErrors.password}
+            </p>
           ) : null}
+        </div>
 
-          <Button type="submit" size="lg" className="w-full" disabled={isBlocked}>
-            {isSubmitting ? (
-              <>
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                Đang đăng nhập...
-              </>
-            ) : retryAfterSeconds > 0 ? (
-              `Thử lại sau ${retryAfterSeconds}s`
-            ) : (
-              <>
-                <LogIn className="size-4" aria-hidden="true" />
-                Đăng nhập
-              </>
-            )}
-          </Button>
-        </form>
-      </CardContent>
+        {requireCaptcha ? (
+          <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/60 p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
+              <ShieldAlert className="size-4 shrink-0 text-amber-700" aria-hidden="true" />
+              <span>Vui lòng hoàn tất xác nhận bảo mật để tiếp tục đăng nhập.</span>
+            </div>
+            <TurnstileWidget
+              siteKey={turnstileSiteKey}
+              nonce={cspNonce}
+              resetSignal={turnstileResetSignal}
+              onTokenChange={(token) => {
+                setCaptchaToken(token);
+                if (token) {
+                  clearFieldError('captchaToken');
+                }
+              }}
+            />
+            {fieldErrors.captchaToken ? (
+              <p id="login-captcha-error" role="alert" className="text-xs text-destructive">
+                {fieldErrors.captchaToken}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
-      <CardFooter className="flex flex-col gap-2 border-t pt-4 text-center text-sm text-muted-foreground">
-        <p>
-          Chưa có tài khoản Tomato?{' '}
-          <Link href="/register" className="font-medium text-primary hover:underline">
-            Đăng ký ngay
+        <Button type="submit" size="lg" className="h-11 w-full rounded-full" disabled={isBlocked}>
+          {isSubmitting ? (
+            <>
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              Đang đăng nhập...
+            </>
+          ) : retryAfterSeconds > 0 ? (
+            `Thử lại sau ${retryAfterSeconds}s`
+          ) : (
+            <>
+              <LogIn className="size-4" aria-hidden="true" />
+              Đăng nhập
+            </>
+          )}
+        </Button>
+
+        <div className="pt-1 text-center">
+          <Link
+            href="/forgot-password"
+            className="text-sm font-medium text-foreground transition-colors hover:text-primary hover:underline"
+          >
+            Quên mật khẩu?
           </Link>
-        </p>
-      </CardFooter>
-    </Card>
+        </div>
+      </form>
+
+      <div className="border-t pt-5">
+        <Button asChild variant="outline" size="lg" className="h-11 w-full rounded-full">
+          <Link href="/register">Tạo tài khoản mới</Link>
+        </Button>
+      </div>
+    </div>
   );
 }
