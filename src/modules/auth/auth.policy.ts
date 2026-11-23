@@ -11,6 +11,8 @@ import { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
 export interface AuthenticatedPrincipal {
   readonly user: UserRow;
   readonly session: SessionRow;
+  /** Mốc hết hạn của Access Token JWT hiện tại (Unix ms) để client chủ động làm mới trước khi hết hạn. */
+  readonly accessTokenExpiresAtMs?: number;
 }
 
 function isActivePrincipal(

@@ -9,6 +9,7 @@ export interface AppShellProps {
   readonly user: PublicUserProfile;
   readonly profile?: Pick<UserProfileDto, 'handle' | 'avatarUrl'>;
   readonly initialShowActiveStatus?: boolean;
+  readonly initialAccessTokenRemainingMs?: number;
   readonly children: ReactNode;
 }
 
@@ -16,10 +17,14 @@ export function AppShell({
   user,
   profile,
   initialShowActiveStatus = true,
+  initialAccessTokenRemainingMs,
   children,
 }: AppShellProps) {
   return (
-    <RealtimePresenceProvider initialShowActiveStatus={initialShowActiveStatus}>
+    <RealtimePresenceProvider
+      initialShowActiveStatus={initialShowActiveStatus}
+      initialAccessTokenRemainingMs={initialAccessTokenRemainingMs}
+    >
       <div className="min-h-screen bg-muted/30">
         <AppTopBar
           user={user}

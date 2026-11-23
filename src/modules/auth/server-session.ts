@@ -17,6 +17,8 @@ export type ServerAuthState =
       readonly user: PublicUserProfile;
       readonly profile: UserProfileDto;
       readonly principal: AuthenticatedPrincipal;
+      /** Thời gian sống còn lại (ms) của Access Token hiện tại để client làm mới chủ động, tránh lệch đồng hồ. */
+      readonly accessTokenRemainingMs?: number;
     }
   | { readonly status: 'needs_refresh' }
   | { readonly status: 'unauthenticated' };
@@ -38,11 +40,16 @@ export async function resolveServerAuthState(): Promise<ServerAuthState> {
   if (accessToken) {
     try {
       const principal = await getSessionService().authenticateAccessToken(accessToken);
+      const accessTokenRemainingMs =
+        typeof principal.accessTokenExpiresAtMs === 'number'
+          ? Math.max(0, principal.accessTokenExpiresAtMs - Date.now())
+          : undefined;
       return {
         status: 'authenticated',
         user: toPublicUserProfile(principal.user),
         profile: toUserProfileDto(principal.user, principal.user.id),
         principal,
+        accessTokenRemainingMs,
       };
     } catch {
       // Access Token có thể vừa hết hạn 15 phút; rơi xuống kiểm tra Refresh Token bên dưới.

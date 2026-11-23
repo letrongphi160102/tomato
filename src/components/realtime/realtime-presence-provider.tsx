@@ -7,7 +7,7 @@ import {
   type DeleteNotificationOutcome,
   type RealtimePresenceContextValue,
 } from '@/components/realtime/realtime-presence-context';
-import { authFetch } from '@/lib/auth-client';
+import { authFetch, seedAccessTokenFreshness } from '@/lib/auth-client';
 import {
   connectUserRealtime,
   disconnectAllRealtimeConnections,
@@ -21,6 +21,7 @@ export const PRESENCE_CLIENT_HEARTBEAT_INTERVAL_MS = 60_000;
 
 export interface RealtimePresenceProviderProps {
   readonly initialShowActiveStatus: boolean;
+  readonly initialAccessTokenRemainingMs?: number;
   readonly children: React.ReactNode;
 }
 
@@ -43,6 +44,7 @@ function isNotificationItemDto(value: unknown): value is NotificationItemDto {
 
 export function RealtimePresenceProvider({
   initialShowActiveStatus,
+  initialAccessTokenRemainingMs,
   children,
 }: RealtimePresenceProviderProps) {
   const [notifications, setNotifications] = React.useState<readonly NotificationItemDto[]>([]);
@@ -488,6 +490,13 @@ export function RealtimePresenceProvider({
     }
     disconnectAllRealtimeConnections();
   }, [stopHeartbeatTimer]);
+
+  // Khởi tạo mốc hết hạn Access Token từ SSR TRƯỚC các effect gọi API để làm mới chủ động không phát sinh 401.
+  React.useEffect(() => {
+    if (typeof initialAccessTokenRemainingMs === 'number') {
+      seedAccessTokenFreshness(initialAccessTokenRemainingMs);
+    }
+  }, [initialAccessTokenRemainingMs]);
 
   // Nạp danh sách thông báo ban đầu và thiết lập kênh nhận thông báo trực tiếp.
   React.useEffect(() => {

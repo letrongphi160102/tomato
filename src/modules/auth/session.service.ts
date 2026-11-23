@@ -395,7 +395,11 @@ export class SessionService {
       effectiveSession = { ...session, lastUsedAt: currentTime };
     }
 
-    return { user, session: effectiveSession };
+    return {
+      user,
+      session: effectiveSession,
+      accessTokenExpiresAtMs: claims.exp * 1000,
+    };
   }
 
   /**

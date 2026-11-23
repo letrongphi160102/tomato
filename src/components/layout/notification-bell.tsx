@@ -371,6 +371,7 @@ export function NotificationBell() {
                           ) : null}
 
                           <DropdownMenu
+                            modal={false}
                             open={isMenuOpen}
                             onOpenChange={(nextOpen) =>
                               setOpenMenuId(nextOpen ? item.public_id : null)

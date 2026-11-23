@@ -12,6 +12,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { markAccessTokenFresh } from '@/lib/auth-client';
 import { loginInputSchema } from '@/modules/auth/auth.schemas';
 
 interface ApiErrorPayload {
@@ -142,6 +143,7 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
 
       if (response.ok) {
         const data = (await response.json()) as LoginSuccessPayload;
+        markAccessTokenFresh();
         setStatus('success');
         setBannerMessage(data.message);
         router.replace(nextPath);

@@ -16,6 +16,7 @@ export default async function HomePage() {
         user={authState.user}
         profile={authState.profile}
         initialShowActiveStatus={authState.principal.user.showActiveStatus}
+        initialAccessTokenRemainingMs={authState.accessTokenRemainingMs}
       >
         <AuthenticatedHome user={authState.user} profile={authState.profile} />
       </AppShell>

@@ -21,7 +21,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { authFetch } from '@/lib/auth-client';
+import { authFetch, clearAccessTokenFreshness } from '@/lib/auth-client';
 import {
   groupDevicesForDisplay,
   type ActiveDeviceGroup,
@@ -227,6 +227,7 @@ export function SecuritySessionsPanel() {
 
       if (response.ok) {
         if (sessionItem.isCurrent) {
+          clearAccessTokenFreshness();
           router.replace('/login');
           router.refresh();
           return;

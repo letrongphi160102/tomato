@@ -25,7 +25,7 @@ import { UserSearchBar } from '@/components/layout/user-search-bar';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { Button } from '@/components/ui/button';
-import { authFetch } from '@/lib/auth-client';
+import { authFetch, clearAccessTokenFreshness } from '@/lib/auth-client';
 import { disconnectAllRealtimeConnections } from '@/lib/realtime-client';
 import { cn } from '@/lib/utils';
 import type { PublicUserProfile } from '@/modules/auth/session.service';
@@ -83,7 +83,8 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
       return;
     }
     setLoggingOut(true);
-    // Đóng kết nối Realtime (Ably/EventSource) và dừng heartbeat ngay lập tức khi đăng xuất.
+    // Đóng kết nối Realtime (Ably/EventSource), xóa mốc Access Token và dừng heartbeat ngay lập tức khi đăng xuất.
+    clearAccessTokenFreshness();
     realtime?.disconnectAll();
     disconnectAllRealtimeConnections();
     try {

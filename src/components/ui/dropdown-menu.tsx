@@ -5,7 +5,17 @@ import * as DropdownMenuPrimitive from '@radix-ui/react-dropdown-menu';
 
 import { cn } from '@/lib/utils';
 
-const DropdownMenu = DropdownMenuPrimitive.Root;
+/**
+ * Mặc định đặt `modal={false}` để Radix Menu không gắn `react-remove-scroll`
+ * (tránh tiêm thẻ `<style>` nội tuyến vi phạm CSP `style-src-elem` chặt trên Production).
+ */
+function DropdownMenu({
+  modal = false,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
+  return <DropdownMenuPrimitive.Root modal={modal} {...props} />;
+}
+
 const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 const DropdownMenuPortal = DropdownMenuPrimitive.Portal;
 
