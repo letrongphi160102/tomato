@@ -79,7 +79,8 @@ export function buildContentSecurityPolicy(
     "default-src 'self'",
     `script-src ${scriptSources.join(' ')}`,
     `style-src ${styleSources.join(' ')}`,
-    // Cho phép inline attribute `style="..."` của Radix Primitives / Turnstile / react-easy-crop mà vẫn khóa thẻ `<style>`.
+    // Tách tường minh `style-src-elem` (khóa chặt thẻ `<style>` theo nonce/'self') và chỉ mở `style-src-attr` cho thuộc tính `style="..."` động (pan/zoom, Radix, Turnstile).
+    `style-src-elem ${styleSources.join(' ')}`,
     "style-src-attr 'unsafe-inline'",
     // Giữ `blob:` cho URL.createObjectURL khi người dùng cắt ảnh cục bộ và chỉ mở CDN ảnh đại diện Vercel Blob.
     `img-src 'self' data: blob: ${VERCEL_BLOB_IMAGE_ORIGIN}`,

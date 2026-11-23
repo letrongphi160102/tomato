@@ -189,6 +189,8 @@ function AvatarCropDialogBody({
             showGrid={false}
             minZoom={1}
             maxZoom={3}
+            // Đã import CSS tĩnh `react-easy-crop/react-easy-crop.css` ('self'); tắt tiêm thẻ `<style>` động để tuân thủ chặt CSP `style-src-elem`.
+            disableAutomaticStylesInjection
             onCropChange={setCrop}
             onZoomChange={setZoom}
             onCropComplete={(_croppedArea, pixels) => setCroppedAreaPixels(pixels)}

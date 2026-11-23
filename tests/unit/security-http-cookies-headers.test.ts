@@ -252,13 +252,33 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     expect(withInsecureDsn).toContain("connect-src 'self' https://challenges.cloudflare.com;");
   });
 
-  it('M6: CSP img-src giữ blob: cho crop ảnh cục bộ và chỉ mở CDN ảnh đại diện Vercel Blob', () => {
+  it('M6: CSP tách chặt style-src-elem (nonce) với style-src-attr, giữ script-src sạch và img-src cho phép blob + Vercel Blob', () => {
+    const nonce = 'nonce-m6';
     const csp = buildContentSecurityPolicy({
-      nonce: 'nonce-m6',
+      nonce,
       isProduction: true,
       isHttps: true,
       isApiRoute: false,
     });
+
+    // 1. script-src tuyệt đối không có 'unsafe-inline' hay 'unsafe-eval'.
+    const scriptDirective = csp
+      .split('; ')
+      .find((directive) => directive.startsWith('script-src '));
+    expect(scriptDirective).toBe(
+      `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://challenges.cloudflare.com`,
+    );
+    expect(scriptDirective).not.toContain("'unsafe-inline'");
+    expect(scriptDirective).not.toContain("'unsafe-eval'");
+
+    // 2. style-src & style-src-elem khóa chặt theo nonce/'self'; chỉ mở style-src-attr cho thuộc tính inline động (pan/zoom).
+    expect(csp).toContain(`style-src 'self' 'nonce-${nonce}' https://challenges.cloudflare.com`);
+    expect(csp).toContain(
+      `style-src-elem 'self' 'nonce-${nonce}' https://challenges.cloudflare.com`,
+    );
+    expect(csp).toContain("style-src-attr 'unsafe-inline'");
+
+    // 3. img-src giữ blob: (xem trước ảnh crop cục bộ) và chỉ mở đúng domain ảnh đại diện Vercel Blob.
     expect(csp).toContain("img-src 'self' data: blob: https://*.public.blob.vercel-storage.com");
     expect(csp).not.toContain('img-src https:');
 
