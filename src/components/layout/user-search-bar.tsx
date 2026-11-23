@@ -19,6 +19,8 @@ const SEARCH_DEBOUNCE_MS = 280;
 
 export function UserSearchBar({ className }: UserSearchBarProps) {
   const router = useRouter();
+  const searchInputId = React.useId();
+  const resultsListId = `${searchInputId}-results`;
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -160,11 +162,14 @@ export function UserSearchBar({ className }: UserSearchBarProps) {
         />
         <input
           ref={inputRef}
+          id={searchInputId}
+          name="userSearch"
           type="search"
+          autoComplete="off"
           role="combobox"
           aria-label="Tìm kiếm người dùng theo tên hoặc ID tài khoản"
           aria-expanded={open}
-          aria-controls="tomato-user-search-results"
+          aria-controls={resultsListId}
           aria-autocomplete="list"
           value={query}
           placeholder="Tìm kiếm người dùng..."
@@ -190,7 +195,7 @@ export function UserSearchBar({ className }: UserSearchBarProps) {
 
       {open && query.trim().length > 0 ? (
         <div
-          id="tomato-user-search-results"
+          id={resultsListId}
           role="listbox"
           aria-label="Kết quả tìm kiếm người dùng"
           className="absolute left-0 right-0 z-40 mt-2 max-h-96 overflow-y-auto rounded-2xl border bg-background p-1.5 shadow-xl"

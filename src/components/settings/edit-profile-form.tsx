@@ -303,6 +303,8 @@ export function EditProfileForm({ initialProfile }: EditProfileFormProps) {
               <div className="flex flex-wrap items-center gap-2.5">
                 <input
                   ref={fileInputRef}
+                  id="profile-avatar-file"
+                  name="avatarFile"
                   type="file"
                   accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
                   onChange={handleSelectAvatarFile}

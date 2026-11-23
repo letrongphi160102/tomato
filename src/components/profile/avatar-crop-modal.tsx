@@ -202,6 +202,8 @@ function AvatarCropDialogBody({
             <div className="flex flex-1 items-center gap-3">
               <ZoomOut className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
               <input
+                id="avatar-crop-zoom"
+                name="avatarZoom"
                 type="range"
                 aria-label="Mức thu phóng ảnh đại diện"
                 min={1}

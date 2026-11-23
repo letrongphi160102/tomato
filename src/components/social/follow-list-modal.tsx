@@ -36,6 +36,7 @@ function FollowListDialogBody({
   onOwnFollowingCountChanged,
 }: FollowListDialogBodyProps) {
   const titleId = React.useId();
+  const searchInputId = React.useId();
 
   const [query, setQuery] = React.useState('');
   const [items, setItems] = React.useState<readonly SocialUserListItemDto[]>([]);
@@ -293,7 +294,10 @@ function FollowListDialogBody({
                 aria-hidden="true"
               />
               <input
+                id={searchInputId}
+                name="followListSearch"
                 type="search"
+                autoComplete="off"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Tìm kiếm trong danh sách..."
