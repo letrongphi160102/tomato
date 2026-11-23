@@ -6,6 +6,8 @@ export interface AuthDomainErrorOptions {
   readonly message: string;
   readonly details?: readonly ApiErrorDetail[];
   readonly retryAfterSeconds?: number;
+  /** Khi `true`, báo cho Frontend tự động hiển thị widget Cloudflare Turnstile. */
+  readonly requireCaptcha?: boolean;
   /** Khi `true`, Route Handler bắt buộc xóa toàn bộ cookie phiên (ví dụ khi phát hiện Token Reuse). */
   readonly clearCookies?: boolean;
   readonly cause?: unknown;
@@ -20,6 +22,7 @@ export class AuthDomainError extends Error {
   public readonly code: ApiErrorCode;
   public readonly details: readonly ApiErrorDetail[];
   public readonly retryAfterSeconds?: number;
+  public readonly requireCaptcha?: boolean;
   public readonly clearCookies: boolean;
 
   constructor(options: AuthDomainErrorOptions) {
@@ -29,6 +32,7 @@ export class AuthDomainError extends Error {
     this.code = options.code;
     this.details = options.details ?? [];
     this.retryAfterSeconds = options.retryAfterSeconds;
+    this.requireCaptcha = options.requireCaptcha;
     this.clearCookies = options.clearCookies ?? false;
   }
 }

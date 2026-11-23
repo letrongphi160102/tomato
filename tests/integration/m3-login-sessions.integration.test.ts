@@ -20,7 +20,13 @@ import {
   type UserGender,
   type UserStatus,
 } from '@/core/db/schema';
-import { AUTH_RATE_LIMITS, RateLimiter, closeRedisClient, getRedisClient } from '@/core/redis';
+import {
+  AUTH_RATE_LIMITS,
+  LoginBruteForceGuard,
+  RateLimiter,
+  closeRedisClient,
+  getRedisClient,
+} from '@/core/redis';
 import { AuditLogService } from '@/core/security/audit-log.service';
 import { CSRF_HEADER_NAME } from '@/core/security/csrf';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
@@ -193,6 +199,10 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
       keyPrefix: testRunPrefix,
       now: () => testClockMs,
     });
+    const testLoginProtection = new LoginBruteForceGuard(redis, {
+      keyPrefix: `${testRunPrefix}:bf`,
+      now: () => testClockMs,
+    });
 
     const sessionService = new SessionService({
       repository,
@@ -205,6 +215,7 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
       repository,
       sessionService,
       rateLimiter: testRateLimiter,
+      loginProtection: testLoginProtection,
       auditLogService,
       pepperProvider: options?.pepperProvider,
       now: () => new Date(testClockMs),
@@ -907,11 +918,12 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
     });
     expect(wrongPassBody).toEqual(wrongEmailBody);
 
-    // Đã dùng 2 lượt từ `ip`, thêm 8 lượt nữa (tổng 10 lượt/15p) -> lượt thứ 11 phải bị chặn 429.
+    // Đã dùng 2 lượt từ `ip`, thêm 8 lượt nữa với các email khác nhau (mô phỏng credential stuffing theo IP
+    // mà không chạm backoff cặp `(email + IP)` của M5) -> lượt thứ 11 phải bị chặn 429 bởi `loginByIp` (10/15p).
     for (let i = 0; i < 8; i += 1) {
       const attemptRes = await loginPost(
         makeJsonPostRequest('/api/v1/auth/login', {
-          body: { email, password: 'Mật khẩu không đúng 2026!' },
+          body: { email: makeUniqueEmail(`rl-target-${i}`), password: 'Mật khẩu không đúng 2026!' },
           ip,
         }),
       );

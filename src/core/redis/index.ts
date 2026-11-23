@@ -4,6 +4,20 @@ import { getEnv, type Env } from '@/core/config/env';
 import { logger } from '@/core/logger';
 import { LocalRedisAdapter } from '@/core/redis/local-adapter';
 import {
+  LOGIN_BACKOFF_SCHEDULE_SECONDS,
+  LOGIN_BACKOFF_START_ATTEMPT,
+  LOGIN_CAPTCHA_REQUIRED_ATTEMPT,
+  LOGIN_PAIR_FAILURE_TTL_SECONDS,
+  LoginBruteForceGuard,
+  computeLoginBackoffSeconds,
+  hashLoginPairKey,
+  isCaptchaRequiredForFailureCount,
+  type LoginBruteForceGuardOptions,
+  type LoginBruteForceState,
+  type LoginBruteForceStore,
+  type LoginFailureRecordResult,
+} from '@/core/redis/login-brute-force';
+import {
   AUTH_RATE_LIMITS,
   RateLimiter,
   type RateLimitResult,
@@ -16,7 +30,19 @@ import { UpstashRedisAdapter } from '@/core/redis/upstash-adapter';
 
 export {
   AUTH_RATE_LIMITS,
+  LOGIN_BACKOFF_SCHEDULE_SECONDS,
+  LOGIN_BACKOFF_START_ATTEMPT,
+  LOGIN_CAPTCHA_REQUIRED_ATTEMPT,
+  LOGIN_PAIR_FAILURE_TTL_SECONDS,
+  LoginBruteForceGuard,
   RateLimiter,
+  computeLoginBackoffSeconds,
+  hashLoginPairKey,
+  isCaptchaRequiredForFailureCount,
+  type LoginBruteForceGuardOptions,
+  type LoginBruteForceState,
+  type LoginBruteForceStore,
+  type LoginFailureRecordResult,
   type RateLimitResult,
   type RateLimitRule,
   type RateLimitStrategy,
@@ -46,6 +72,7 @@ export function createRedisClient(config: RedisEnvConfig): RedisClient {
 const globalForRedis = globalThis as typeof globalThis & {
   __tomatoRedisClient?: RedisClient;
   __tomatoRateLimiter?: RateLimiter;
+  __tomatoLoginBruteForceGuard?: LoginBruteForceGuard;
 };
 
 export function getRedisClient(): RedisClient {
@@ -60,6 +87,13 @@ export function getRateLimiter(): RateLimiter {
     globalForRedis.__tomatoRateLimiter = new RateLimiter(getRedisClient());
   }
   return globalForRedis.__tomatoRateLimiter;
+}
+
+export function getLoginBruteForceGuard(): LoginBruteForceGuard {
+  if (!globalForRedis.__tomatoLoginBruteForceGuard) {
+    globalForRedis.__tomatoLoginBruteForceGuard = new LoginBruteForceGuard(getRedisClient());
+  }
+  return globalForRedis.__tomatoLoginBruteForceGuard;
 }
 
 export async function checkRedisHealth(timeoutMs = 2_000): Promise<boolean> {
@@ -99,6 +133,7 @@ export async function checkRedisHealth(timeoutMs = 2_000): Promise<boolean> {
 
 export async function closeRedisClient(): Promise<void> {
   globalForRedis.__tomatoRateLimiter = undefined;
+  globalForRedis.__tomatoLoginBruteForceGuard = undefined;
   if (globalForRedis.__tomatoRedisClient) {
     const client = globalForRedis.__tomatoRedisClient;
     globalForRedis.__tomatoRedisClient = undefined;

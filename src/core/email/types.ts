@@ -1,6 +1,6 @@
 import 'server-only';
 
-export type EmailProviderType = 'smtp' | 'brevo' | 'memory';
+export type EmailProviderType = 'mailpit' | 'gmail' | 'brevo' | 'smtp' | 'memory';
 
 export interface EmailMessage {
   readonly to: string;

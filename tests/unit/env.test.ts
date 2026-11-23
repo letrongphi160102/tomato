@@ -152,4 +152,52 @@ describe('parseEnv (fail-fast Zod validation)', () => {
       expect(paths).toContain('TURNSTILE_SECRET_KEY');
     }
   });
+
+  it('M5: hỗ trợ EMAIL_PROVIDER=mailpit|gmail|brevo, chặn mailpit trên production và ép credentials cho gmail', () => {
+    const localMailpit = parseEnv(
+      createBaseEnv({
+        EMAIL_PROVIDER: 'mailpit',
+        SMTP_HOST: '',
+        SMTP_PORT: '',
+      }),
+    );
+    expect(localMailpit.EMAIL_PROVIDER).toBe('mailpit');
+
+    const prodGmail = parseEnv(
+      createBaseEnv({
+        NODE_ENV: 'production',
+        APP_URL: 'https://tomato.example.com',
+        EMAIL_PROVIDER: 'gmail',
+        SMTP_HOST: '',
+        SMTP_PORT: '',
+        SMTP_USER: 'tomato.demo@gmail.com',
+        SMTP_PASS: 'synthetic-app-password-16ch',
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: 'prod-site-key-non-dummy',
+        TURNSTILE_SECRET_KEY: 'prod-secret-key-non-dummy',
+      }),
+    );
+    expect(prodGmail.EMAIL_PROVIDER).toBe('gmail');
+
+    expect(() =>
+      parseEnv(
+        createBaseEnv({
+          NODE_ENV: 'production',
+          APP_URL: 'https://tomato.example.com',
+          EMAIL_PROVIDER: 'mailpit',
+          NEXT_PUBLIC_TURNSTILE_SITE_KEY: 'prod-site-key-non-dummy',
+          TURNSTILE_SECRET_KEY: 'prod-secret-key-non-dummy',
+        }),
+      ),
+    ).toThrow(EnvValidationError);
+
+    expect(() =>
+      parseEnv(
+        createBaseEnv({
+          EMAIL_PROVIDER: 'gmail',
+          SMTP_USER: '',
+          SMTP_PASS: '',
+        }),
+      ),
+    ).toThrow(EnvValidationError);
+  });
 });

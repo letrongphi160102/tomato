@@ -106,7 +106,7 @@ describe('Unit M2: Email Templates & SmtpEmailAdapter', () => {
     });
   });
 
-  it('createEmailProvider tạo SmtpEmailAdapter khi EMAIL_PROVIDER=smtp và báo lỗi với provider chưa mở ở M2', () => {
+  it('createEmailProvider tạo đúng adapter cho mailpit, gmail, brevo và smtp tương thích ngược', () => {
     const smtpProvider = createEmailProvider({
       EMAIL_PROVIDER: 'smtp',
       EMAIL_FROM: 'Tomato <no-reply@tomato.local>',
@@ -116,14 +116,29 @@ describe('Unit M2: Email Templates & SmtpEmailAdapter', () => {
     });
     expect(smtpProvider.provider).toBe('smtp');
 
-    expect(() =>
-      createEmailProvider({
-        EMAIL_PROVIDER: 'brevo',
-        EMAIL_FROM: 'Tomato <no-reply@tomato.local>',
-        SMTP_SECURE: false,
-        BREVO_API_KEY: 'synthetic-key',
-      }),
-    ).toThrow(/M2/);
+    const mailpitProvider = createEmailProvider({
+      EMAIL_PROVIDER: 'mailpit',
+      EMAIL_FROM: 'Tomato <no-reply@tomato.local>',
+      SMTP_SECURE: false,
+    });
+    expect(mailpitProvider.provider).toBe('smtp');
+
+    const gmailProvider = createEmailProvider({
+      EMAIL_PROVIDER: 'gmail',
+      EMAIL_FROM: 'Tomato <tomato@gmail.com>',
+      SMTP_SECURE: true,
+      SMTP_USER: 'tomato@gmail.com',
+      SMTP_PASS: 'synthetic-gmail-app-password',
+    });
+    expect(gmailProvider.provider).toBe('gmail');
+
+    const brevoProvider = createEmailProvider({
+      EMAIL_PROVIDER: 'brevo',
+      EMAIL_FROM: 'Tomato <no-reply@tomato.example.com>',
+      SMTP_SECURE: false,
+      BREVO_API_KEY: 'synthetic-key',
+    });
+    expect(brevoProvider.provider).toBe('brevo');
   });
 
   it('buildPasswordResetLinkEmail escape displayName, chỉ chấp nhận URL http/https và gắn rel=noreferrer', () => {

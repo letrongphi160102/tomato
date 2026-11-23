@@ -3,10 +3,11 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { AlertCircle, CheckCircle2, Clock, Loader2, LogIn } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, Loader2, LogIn, ShieldAlert } from 'lucide-react';
 
 import { PasswordInput } from '@/components/auth/password-input';
 import { savePendingVerificationHint } from '@/components/auth/pending-verification-storage';
+import { TurnstileWidget } from '@/components/auth/turnstile-widget';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -19,6 +20,7 @@ interface ApiErrorPayload {
   readonly error?: {
     readonly code?: string;
     readonly message?: string;
+    readonly requireCaptcha?: boolean;
     readonly details?: readonly { readonly field?: string; readonly message: string }[];
   };
 }
@@ -35,17 +37,22 @@ interface LoginSuccessPayload {
 }
 
 type FormStatus = 'idle' | 'loading' | 'success' | 'error' | 'rate_limited';
-type FieldErrors = Partial<Record<'email' | 'password', string>>;
+type FieldErrors = Partial<Record<'email' | 'password' | 'captchaToken', string>>;
 
 export interface LoginFormProps {
   readonly nextPath: string;
+  readonly turnstileSiteKey: string;
+  readonly cspNonce?: string;
 }
 
-export function LoginForm({ nextPath }: LoginFormProps) {
+export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormProps) {
   const router = useRouter();
 
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');
+  const [requireCaptcha, setRequireCaptcha] = React.useState(false);
+  const [captchaToken, setCaptchaToken] = React.useState('');
+  const [turnstileResetSignal, setTurnstileResetSignal] = React.useState(0);
 
   const [checkingSession, setCheckingSession] = React.useState(true);
   const [status, setStatus] = React.useState<FormStatus>('idle');
@@ -117,7 +124,11 @@ export function LoginForm({ nextPath }: LoginFormProps) {
     setBannerMessage('');
     setErrorCode(null);
 
-    const clientParsed = loginInputSchema.safeParse({ email, password });
+    const clientParsed = loginInputSchema.safeParse({
+      email,
+      password,
+      ...(requireCaptcha ? { captchaToken } : {}),
+    });
     if (!clientParsed.success) {
       const nextErrors: FieldErrors = {};
       for (const issue of clientParsed.error.issues) {
@@ -129,6 +140,16 @@ export function LoginForm({ nextPath }: LoginFormProps) {
       setFieldErrors(nextErrors);
       setStatus('error');
       setBannerMessage('Vui lòng nhập đầy đủ địa chỉ email và mật khẩu.');
+      return;
+    }
+
+    if (requireCaptcha && !captchaToken.trim()) {
+      setFieldErrors({
+        captchaToken: 'Vui lòng hoàn thành bước xác thực bảo mật Cloudflare Turnstile.',
+      });
+      setStatus('error');
+      setErrorCode('CAPTCHA_REQUIRED');
+      setBannerMessage('Vui lòng hoàn thành bước xác thực bảo mật Cloudflare Turnstile.');
       return;
     }
 
@@ -144,6 +165,7 @@ export function LoginForm({ nextPath }: LoginFormProps) {
         body: JSON.stringify({
           email,
           password,
+          ...(requireCaptcha && captchaToken ? { captchaToken } : {}),
         }),
       });
 
@@ -160,6 +182,18 @@ export function LoginForm({ nextPath }: LoginFormProps) {
       const serverCode = errorBody.error?.code ?? null;
       const serverMessage =
         errorBody.error?.message ?? 'Đăng nhập không thành công. Vui lòng thử lại.';
+      const serverRequiresCaptcha =
+        errorBody.error?.requireCaptcha === true ||
+        serverCode === 'CAPTCHA_REQUIRED' ||
+        serverCode === 'CAPTCHA_INVALID';
+
+      if (serverRequiresCaptcha) {
+        setRequireCaptcha(true);
+      }
+      // Token Turnstile chỉ dùng được một lần: tự động làm mới widget sau mỗi lần submit lỗi.
+      if (requireCaptcha || serverRequiresCaptcha) {
+        setTurnstileResetSignal((prev) => prev + 1);
+      }
 
       if (response.status === 429 || serverCode === 'RATE_LIMITED') {
         const retryHeader = Number(response.headers.get('Retry-After') ?? '60');
@@ -191,12 +225,18 @@ export function LoginForm({ nextPath }: LoginFormProps) {
           nextErrors[key] = detail.message;
         }
       }
+      if (serverCode === 'CAPTCHA_REQUIRED' || serverCode === 'CAPTCHA_INVALID') {
+        nextErrors.captchaToken = serverMessage;
+      }
 
       setFieldErrors(nextErrors);
       setErrorCode(serverCode);
       setStatus('error');
       setBannerMessage(serverMessage);
     } catch {
+      if (requireCaptcha) {
+        setTurnstileResetSignal((prev) => prev + 1);
+      }
       setStatus('error');
       setErrorCode(null);
       setBannerMessage('Không thể kết nối đến máy chủ. Vui lòng kiểm tra mạng và thử lại.');
@@ -338,6 +378,34 @@ export function LoginForm({ nextPath }: LoginFormProps) {
               </p>
             ) : null}
           </div>
+
+          {requireCaptcha ? (
+            <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+              <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
+                <ShieldAlert className="size-4 shrink-0 text-amber-700" aria-hidden="true" />
+                <span>
+                  Xác thực bổ sung: Vui lòng hoàn thành Cloudflare Turnstile trước khi thử đăng nhập
+                  lại.
+                </span>
+              </div>
+              <TurnstileWidget
+                siteKey={turnstileSiteKey}
+                nonce={cspNonce}
+                resetSignal={turnstileResetSignal}
+                onTokenChange={(token) => {
+                  setCaptchaToken(token);
+                  if (token) {
+                    clearFieldError('captchaToken');
+                  }
+                }}
+              />
+              {fieldErrors.captchaToken ? (
+                <p id="login-captcha-error" role="alert" className="text-xs text-destructive">
+                  {fieldErrors.captchaToken}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
           <Button type="submit" size="lg" className="w-full" disabled={isBlocked}>
             {isSubmitting ? (

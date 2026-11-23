@@ -189,4 +189,29 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     expect(resetRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
     expect(resetRes.headers.get('Pragma')).toBe('no-cache');
   });
+
+  it('M5: CSP connect-src chỉ cho phép đúng origin HTTPS của Sentry DSN khi được cấu hình', () => {
+    const withSentry = buildContentSecurityPolicy({
+      nonce: 'nonce-m5',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      sentryDsnOrigin: 'https://publickey@o123456.ingest.us.sentry.io/999',
+    });
+    expect(withSentry).toContain(
+      "connect-src 'self' https://challenges.cloudflare.com https://o123456.ingest.us.sentry.io",
+    );
+    // Không bao giờ mở wildcard hoặc lộ public key của DSN trong header CSP.
+    expect(withSentry).not.toContain('publickey');
+    expect(withSentry).not.toContain('https: ');
+
+    const withInsecureDsn = buildContentSecurityPolicy({
+      nonce: 'nonce-m5',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      sentryDsnOrigin: 'http://insecure.sentry.local/1',
+    });
+    expect(withInsecureDsn).toContain("connect-src 'self' https://challenges.cloudflare.com;");
+  });
 });

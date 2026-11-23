@@ -33,6 +33,8 @@ export interface ApiErrorPayload {
     readonly code: ApiErrorCode;
     readonly message: string;
     readonly details: readonly ApiErrorDetail[];
+    /** Chỉ xuất hiện khi `true`: báo cho Frontend tự động hiển thị widget Cloudflare Turnstile. */
+    readonly requireCaptcha?: true;
   };
 }
 
@@ -42,6 +44,7 @@ export interface CreateErrorResponseInput {
   readonly message: string;
   readonly details?: readonly ApiErrorDetail[];
   readonly retryAfterSeconds?: number;
+  readonly requireCaptcha?: boolean;
   readonly headers?: HeadersInit;
 }
 
@@ -69,6 +72,7 @@ export function createErrorResponse(
       code: input.code,
       message: input.message,
       details: input.details ? [...input.details] : [],
+      ...(input.requireCaptcha ? { requireCaptcha: true as const } : {}),
     },
   };
 

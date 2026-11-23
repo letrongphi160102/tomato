@@ -1,5 +1,6 @@
 import 'server-only';
 
+import * as Sentry from '@sentry/nextjs';
 import type { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 
@@ -151,6 +152,7 @@ export function handleAuthRouteError(
       message: error.message,
       details: error.details,
       retryAfterSeconds: error.retryAfterSeconds,
+      requireCaptcha: error.requireCaptcha,
     });
 
     if (error.clearCookies) {
@@ -185,6 +187,16 @@ export function handleAuthRouteError(
     },
     'Lỗi không mong đợi tại Auth API endpoint',
   );
+
+  // Chỉ báo cáo lỗi hệ thống 500 thực sự lên Sentry (không gửi lỗi nghiệp vụ 4xx như sai mật khẩu/rate limit).
+  // Mọi PII/cookie/token đều đã đi qua bộ lọc `beforeSend` trong `sentry.server.config.ts`.
+  if (process.env.SENTRY_DSN) {
+    Sentry.withScope((scope) => {
+      scope.setTag('component', 'auth-api');
+      scope.setTag('endpoint', endpoint);
+      Sentry.captureException(error);
+    });
+  }
 
   return createErrorResponse({
     status: 500,

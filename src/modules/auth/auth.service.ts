@@ -18,6 +18,7 @@ import { isPostgresUniqueViolation } from '@/core/db';
 import type { UserGender, UserRow, UserStatus } from '@/core/db/schema';
 import {
   EmailDeliveryError,
+  buildAccountLockedAlertEmail,
   buildPasswordChangeOtpEmail,
   buildPasswordChangedAlertEmail,
   buildPasswordResetAlertEmail,
@@ -27,7 +28,13 @@ import {
   type EmailProvider,
 } from '@/core/email';
 import { logger } from '@/core/logger';
-import { AUTH_RATE_LIMITS, getRateLimiter, type RateLimiter } from '@/core/redis';
+import {
+  AUTH_RATE_LIMITS,
+  getLoginBruteForceGuard,
+  getRateLimiter,
+  type LoginBruteForceStore,
+  type RateLimiter,
+} from '@/core/redis';
 import { getAuditLogService, type AuditLogService } from '@/core/security/audit-log.service';
 import type { RequestClientContext } from '@/core/security/client-context';
 import { formatZodErrorDetails } from '@/core/security/http-response';
@@ -68,6 +75,8 @@ export const PASSWORD_CHANGE_OTP_TTL_MS = PASSWORD_CHANGE_OTP_TTL_MINUTES * 60 *
 export const PASSWORD_CHANGE_OTP_MAX_ATTEMPTS = 5;
 export const CHANGE_PASSWORD_OTP_COOLDOWN_SECONDS =
   AUTH_RATE_LIMITS.changePasswordOtpCooldown.windowSeconds;
+// Ngưỡng tổng số lần đăng nhập sai liên tiếp trên 1 tài khoản (cộng dồn mọi IP) kích hoạt tự khóa `locked` (Mục 4.2).
+export const ACCOUNT_LOCK_FAILED_ATTEMPTS_THRESHOLD = 50;
 // Sau 24 giờ không xác minh, tài khoản pending_verification được phép đăng ký đè theo Mục 4.1.
 export const PENDING_VERIFICATION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 // Sàn thời gian tối thiểu + jitter cho `/resend-verification` nhằm triệt tiêu timing oracle
@@ -123,6 +132,7 @@ export interface AuthServiceDependencies {
   readonly repository?: AuthRepository;
   readonly sessionService?: SessionService;
   readonly rateLimiter?: RateLimiter;
+  readonly loginProtection?: LoginBruteForceStore;
   readonly emailProvider?: EmailProvider;
   readonly captchaProvider?: CaptchaProvider;
   readonly auditLogService?: AuditLogService;
@@ -188,6 +198,7 @@ export class AuthService {
   private readonly repository: AuthRepository;
   private readonly sessionService: SessionService;
   private readonly rateLimiter: RateLimiter;
+  private readonly loginProtection: LoginBruteForceStore;
   private readonly emailProvider: EmailProvider;
   private readonly captchaProvider: CaptchaProvider;
   private readonly auditLogService: AuditLogService;
@@ -199,6 +210,7 @@ export class AuthService {
   constructor(deps: AuthServiceDependencies = {}) {
     this.repository = deps.repository ?? new AuthRepository();
     this.rateLimiter = deps.rateLimiter ?? getRateLimiter();
+    this.loginProtection = deps.loginProtection ?? getLoginBruteForceGuard();
     this.emailProvider = deps.emailProvider ?? getEmailProvider();
     this.captchaProvider = deps.captchaProvider ?? getCaptchaProvider();
     this.auditLogService = deps.auditLogService ?? getAuditLogService();
@@ -668,12 +680,20 @@ export class AuthService {
   }
 
   /**
-   * Đăng nhập bằng Email + Mật khẩu và khởi tạo phiên thiết bị mới (Mục 4.2 & Mục 6.1–6.2):
+   * Đăng nhập bằng Email + Mật khẩu và khởi tạo phiên thiết bị mới (Mục 4.2 & Mục 6.1–6.4):
    * 1. Chạy Rate Limit IP (`10 lần / 15 phút`) TRƯỚC khi validate nặng, truy DB hoặc băm Argon2id.
-   * 2. Nếu không tìm thấy identity -> vẫn chạy `verifyDummyPassword()` chống Timing Attack.
-   * 3. Sai email và sai mật khẩu trả mã lỗi `401 INVALID_CREDENTIALS` & thông báo giống hệt nhau.
-   * 4. Chỉ kiểm tra trạng thái tài khoản SAU khi xác minh đúng mật khẩu (chống dò trạng thái tài khoản).
-   * 5. Nếu tài khoản `active` và cần rehash (Pepper/Argon2 cũ) -> tự động băm lại và lưu vào DB.
+   * 2. Kiểm tra bộ đếm Brute-Force thông minh theo cặp `(email + IP)` trên Redis TRƯỚC DB/Argon2id:
+   *    - Từ lần sai thứ 3: áp dụng Exponential Backoff (`1s -> 2s -> 4s -> 8s`, trả `429 Retry-After`).
+   *    - Từ lần sai thứ 5: bắt buộc vượt qua Cloudflare Turnstile (`requireCaptcha: true`).
+   *    - Cô lập theo `(email + IP)` để kẻ tấn công từ IP lạ không làm chậm chủ tài khoản từ IP/thiết bị quen.
+   * 3. Nếu không tìm thấy identity -> vẫn chạy `verifyDummyPassword()` và tăng bộ đếm `(email + IP)`
+   *    để hành vi & thời gian phản hồi đồng nhất tuyệt đối (chống User Enumeration).
+   * 4. Mật khẩu sai trên tài khoản `active`: tăng nguyên tử `failed_login_attempts` trong DB;
+   *    chạm mốc 50 lần sai liên tiếp -> chuyển `locked`, ghi `ACCOUNT_LOCKED` và gửi email cảnh báo
+   *    (vẫn trả `401 INVALID_CREDENTIALS` cho mật khẩu sai để không lộ trạng thái khóa).
+   * 5. Chỉ kiểm tra trạng thái tài khoản SAU khi xác minh đúng mật khẩu.
+   * 6. Đăng nhập thành công: rehash nếu Pepper/Argon2 cũ, đặt `failed_login_attempts = 0`,
+   *    cấp phiên mới và xóa bộ đếm sai `(email + IP)` trên Redis.
    */
   async login(rawInput: unknown, context: RequestClientContext): Promise<LoginResult> {
     // 1. Rate Limit theo IP chạy đầu tiên trước khi tiêu tốn CPU Argon2id hay truy DB.
@@ -702,11 +722,58 @@ export class AuthService {
     }
     const input = parsed.data;
 
-    // 3. Tra cứu danh tính theo email đã chuẩn hóa.
+    // 3. Chống Brute-Force thông minh theo cặp `(email + IP)` chạy TRƯỚC truy DB và Argon2id:
+    //    chặn sớm trong thời gian Exponential Backoff (1s->2s->4s->8s) và ép Turnstile từ lần sai thứ 5.
+    const pairState = await this.loginProtection.checkPair(input.email, context.rateLimitIpKey);
+    if (pairState.backoffRemainingMs > 0) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(pairState.retryAfterSeconds),
+        retryAfterSeconds: pairState.retryAfterSeconds,
+        requireCaptcha: pairState.requireCaptcha ? true : undefined,
+      });
+    }
+
+    if (pairState.requireCaptcha) {
+      const captchaToken = input.captchaToken?.trim() ?? '';
+      if (!captchaToken) {
+        throw new AuthDomainError({
+          status: 400,
+          code: 'CAPTCHA_REQUIRED',
+          message: AUTH_MESSAGES.captchaRequired,
+          details: [{ field: 'captchaToken', message: AUTH_MESSAGES.captchaRequired }],
+          requireCaptcha: true,
+        });
+      }
+
+      const captchaResult = await this.captchaProvider.verify({
+        token: captchaToken,
+        remoteIp: context.ipAddress,
+      });
+      if (!captchaResult.success) {
+        throw new AuthDomainError({
+          status: 400,
+          code: 'CAPTCHA_INVALID',
+          message: AUTH_MESSAGES.captchaInvalid,
+          details: [{ field: 'captchaToken', message: AUTH_MESSAGES.captchaInvalid }],
+          requireCaptcha: true,
+        });
+      }
+    }
+
+    // 4. Tra cứu danh tính theo email đã chuẩn hóa.
     const existing = await this.repository.findEmailIdentityWithUser(input.email);
     if (!existing || !existing.identity.passwordHash) {
       // Chạy Argon2id giả cùng chi phí để thời gian phản hồi đồng nhất dù email không tồn tại.
       await verifyDummyPassword();
+
+      // Ghi nhận thất bại theo `(email + IP)` giống hệt nhánh sai mật khẩu để triệt tiêu oracle dò email
+      // thông qua việc quan sát ngưỡng kích hoạt Backoff / `requireCaptcha: true`.
+      const pairFailure = await this.loginProtection.recordPairFailure(
+        input.email,
+        context.rateLimitIpKey,
+      );
 
       await this.auditLogService.record({
         userId: existing?.user.id ?? null,
@@ -716,6 +783,7 @@ export class AuthService {
         metadata: {
           provider: 'email_password',
           reason: 'identity_not_found',
+          pairFailureCount: pairFailure.failureCount,
         },
       });
 
@@ -723,10 +791,11 @@ export class AuthService {
         status: 401,
         code: 'INVALID_CREDENTIALS',
         message: AUTH_MESSAGES.invalidCredentials,
+        requireCaptcha: pairFailure.requireCaptcha ? true : undefined,
       });
     }
 
-    // 4. Đối chiếu mật khẩu qua Argon2id + Pepper đúng phiên bản.
+    // 5. Đối chiếu mật khẩu qua Argon2id + Pepper đúng phiên bản.
     const verification = await verifyPassword(
       input.password,
       existing.identity.passwordHash,
@@ -735,31 +804,91 @@ export class AuthService {
     );
 
     if (!verification.valid) {
-      await this.auditLogService.record({
-        userId: existing.user.id,
-        action: 'LOGIN_FAILED',
-        ipAddress: context.ipAddress,
-        userAgent: context.userAgent,
-        metadata: {
-          provider: 'email_password',
-          reason: 'invalid_password',
-        },
+      const pairFailure = await this.loginProtection.recordPairFailure(
+        input.email,
+        context.rateLimitIpKey,
+      );
+      const failedAt = this.now();
+      const deviceInfo = parseDeviceInfo(context.userAgent);
+
+      // Tăng nguyên tử `failed_login_attempts` và chuyển `active -> locked` khi chạm ngưỡng 50
+      // trong cùng DB transaction khóa `users FOR UPDATE` (chống race condition gửi lặp email khóa).
+      const lockOutcome = await this.repository.getDb().transaction(async (tx) => {
+        const incremented = await this.repository.incrementFailedLoginAttemptsAndMaybeLock(
+          {
+            identityId: existing.identity.id,
+            userId: existing.user.id,
+            lockThreshold: ACCOUNT_LOCK_FAILED_ATTEMPTS_THRESHOLD,
+            now: failedAt,
+          },
+          tx,
+        );
+
+        await this.auditLogService.record(
+          {
+            userId: existing.user.id,
+            action: 'LOGIN_FAILED',
+            ipAddress: context.ipAddress,
+            userAgent: context.userAgent,
+            metadata: {
+              provider: 'email_password',
+              reason: 'invalid_password',
+              pairFailureCount: pairFailure.failureCount,
+              failedLoginAttempts: incremented?.failedLoginAttempts ?? null,
+            },
+          },
+          tx,
+        );
+
+        if (incremented?.lockedNow) {
+          await this.auditLogService.record(
+            {
+              userId: existing.user.id,
+              action: 'ACCOUNT_LOCKED',
+              ipAddress: context.ipAddress,
+              userAgent: context.userAgent,
+              metadata: {
+                provider: 'email_password',
+                reason: 'brute_force_threshold_reached',
+                failedLoginAttempts: incremented.failedLoginAttempts,
+                deviceInfo,
+              },
+            },
+            tx,
+          );
+        }
+
+        return incremented;
       });
 
+      if (lockOutcome?.lockedNow) {
+        await this.sendAccountLockedAlertEmailSafe({
+          toEmail: existing.identity.identifierNormalized,
+          displayName: existing.user.fullName,
+          occurredAt: failedAt,
+          ipAddress: context.ipAddress,
+          deviceInfo,
+          failedAttempts: lockOutcome.failedLoginAttempts,
+        });
+      }
+
+      // Ngay cả khi vừa chạm mốc 50 lần sai, vẫn trả `401 INVALID_CREDENTIALS` cho mật khẩu sai
+      // để kẻ tấn công không biết email tồn tại hay tài khoản vừa bị khóa (chống User Enumeration).
       throw new AuthDomainError({
         status: 401,
         code: 'INVALID_CREDENTIALS',
         message: AUTH_MESSAGES.invalidCredentials,
+        requireCaptcha: pairFailure.requireCaptcha ? true : undefined,
       });
     }
 
-    // 5. Chỉ tiết lộ trạng thái tài khoản sau khi người gọi đã chứng minh biết đúng mật khẩu.
+    // 6. Chỉ tiết lộ trạng thái tài khoản sau khi người gọi đã chứng minh biết đúng mật khẩu.
     if (existing.user.status !== 'active') {
       await this.recordFailedLoginForStatus(existing.user.id, existing.user.status, context);
       this.throwForNonActiveLoginStatus(existing.user.status);
     }
 
-    // 6. Nếu Pepper version hoặc tham số Argon2id đã cũ -> tính toán bản băm mới ngoài DB transaction.
+    // 7. Nếu Pepper version hoặc tham số Argon2id đã cũ -> tính toán bản băm mới ngoài DB transaction.
     const rehashed = verification.needsRehash
       ? await hashPassword(input.password, this.pepperProvider)
       : null;
@@ -798,14 +927,13 @@ export class AuthService {
           );
         }
 
-        if (existing.identity.failedLoginAttempts > 0) {
-          await this.repository.resetFailedLoginAttempts(
-            existing.identity.id,
-            existing.user.id,
-            currentTime,
-            tx,
-          );
-        }
+        // Luôn đặt lại `failed_login_attempts = 0` (kể cả khi một request sai song song vừa tăng trước đó).
+        await this.repository.resetFailedLoginAttempts(
+          existing.identity.id,
+          existing.user.id,
+          currentTime,
+          tx,
+        );
 
         const issued = await this.sessionService.createSessionForUser(freshUser, context, tx);
 
@@ -831,6 +959,11 @@ export class AuthService {
     if (loginOutcome.kind === 'status_changed') {
       this.throwForNonActiveLoginStatus(loginOutcome.status);
     }
+
+    // Đăng nhập thành công -> dọn sạch bộ đếm sai & backoff `(email + IP)` trên Redis (fail-safe).
+    await this.loginProtection
+      .clearPair(input.email, context.rateLimitIpKey)
+      .catch(() => undefined);
 
     return {
       user: toPublicUserProfile(loginOutcome.user),
@@ -1223,6 +1356,11 @@ export class AuthService {
       case 'reset':
         break;
     }
+
+    // Xóa bộ đếm sai `(email + IP)` của IP hiện tại sau khi mở khóa/đặt lại mật khẩu thành công.
+    await this.loginProtection
+      .clearPair(outcome.email, context.rateLimitIpKey)
+      .catch(() => undefined);
 
     await this.sendPasswordAlertEmailSafe('reset', {
       toEmail: outcome.email,
@@ -2188,6 +2326,47 @@ export class AuthService {
           errorName: error instanceof Error ? error.name : 'Error',
         },
         'Không thể gửi email cảnh báo thay đổi mật khẩu sau khi giao dịch đã hoàn tất',
+      );
+    }
+  }
+
+  /**
+   * Gửi email cảnh báo bảo mật khi tài khoản chạm mốc 50 lần sai liên tiếp và tự khóa `locked`.
+   * Chạy sau khi DB transaction ĐÃ COMMIT theo cơ chế fail-safe để sự cố SMTP không làm hỏng phản hồi `401`
+   * hay tạo kênh phân biệt trạng thái tài khoản cho kẻ tấn công.
+   */
+  private async sendAccountLockedAlertEmailSafe(data: {
+    readonly toEmail: string;
+    readonly displayName: string;
+    readonly occurredAt: Date;
+    readonly ipAddress: string | null;
+    readonly deviceInfo: string;
+    readonly failedAttempts: number;
+  }): Promise<void> {
+    const template = buildAccountLockedAlertEmail({
+      displayName: data.displayName,
+      occurredAt: data.occurredAt,
+      ipAddress: data.ipAddress,
+      deviceInfo: data.deviceInfo,
+      failedAttempts: data.failedAttempts,
+      appUrl: this.resolveAppUrl(),
+    });
+
+    try {
+      await this.emailProvider.send({
+        to: data.toEmail,
+        subject: template.subject,
+        html: template.html,
+        text: template.text,
+      });
+    } catch (error) {
+      logger.warn(
+        {
+          component: 'auth-service',
+          event: 'account_locked_alert_email_failed',
+          errorName: error instanceof Error ? error.name : 'Error',
+        },
+        'Không thể gửi email cảnh báo khóa tài khoản sau khi đã khóa thành công',
       );
     }
   }

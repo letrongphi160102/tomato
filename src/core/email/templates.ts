@@ -35,6 +35,15 @@ export interface PasswordChangeOtpEmailData {
   readonly expiresInMinutes: number;
 }
 
+export interface AccountLockedAlertEmailData {
+  readonly displayName: string;
+  readonly occurredAt: Date;
+  readonly ipAddress: string | null;
+  readonly deviceInfo: string;
+  readonly failedAttempts: number;
+  readonly appUrl: string;
+}
+
 const HTML_ESCAPE_MAP: Readonly<Record<string, string>> = Object.freeze({
   '&': '&amp;',
   '<': '&lt;',
@@ -455,6 +464,80 @@ export function buildPasswordChangedAlertEmail(
       : [
           'Nếu bạn không thực hiện thay đổi này, hãy sử dụng tính năng Quên mật khẩu ngay lập tức.',
         ]),
+    '',
+    '-- Đội ngũ bảo mật TOMATO',
+  ].join('\n');
+
+  return {
+    subject,
+    html: wrapEmailLayout(subject, bodyHtml),
+    text,
+  };
+}
+
+/**
+ * Mẫu email cảnh báo bảo mật khi tài khoản bị tự động tạm khóa do chạm ngưỡng 50 lần
+ * đăng nhập sai liên tiếp (Mục 4.2), kèm thời gian, IP, thiết bị và hướng dẫn mở khóa qua Quên mật khẩu.
+ */
+export function buildAccountLockedAlertEmail(
+  data: AccountLockedAlertEmailData,
+): RenderedEmailTemplate {
+  const safeName = escapeHtml(data.displayName);
+  const formattedTime = formatSecurityTimestamp(data.occurredAt);
+  const safeTime = escapeHtml(formattedTime);
+  const displayIp = data.ipAddress ?? 'Không xác định';
+  const safeIp = escapeHtml(displayIp);
+  const safeDevice = escapeHtml(data.deviceInfo);
+  const recoveryUrl = buildSafeAppSubpathUrl(data.appUrl, '/forgot-password');
+  const escapedRecoveryUrl = escapeHtml(recoveryUrl);
+  const subject = '[TOMATO] Cảnh báo bảo mật: Tài khoản của bạn đã được tạm khóa';
+
+  const unlockBlock = escapedRecoveryUrl
+    ? `<div style="margin:0 0 20px;text-align:center;">
+         <a href="${escapedRecoveryUrl}" rel="noreferrer" style="display:inline-block;padding:12px 24px;background-color:#dc2626;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">Mở khóa tài khoản qua Quên mật khẩu</a>
+       </div>
+       <p style="margin:0 0 16px;font-size:13px;line-height:1.6;color:#525252;word-break:break-all;">
+         Hoặc mở liên kết sau trên trình duyệt để đặt lại mật khẩu và mở khóa tài khoản:<br />
+         <a href="${escapedRecoveryUrl}" rel="noreferrer" style="color:#dc2626;text-decoration:underline;">${escapedRecoveryUrl}</a>
+       </p>`
+    : `<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#404040;">
+         Để mở khóa tài khoản, vui lòng truy cập trang <strong>Quên mật khẩu</strong> trên TOMATO và đặt lại mật khẩu mới qua email.
+       </p>`;
+
+  const bodyHtml = `
+    <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;color:#171717;">Tài khoản của bạn vừa được tạm khóa bảo vệ</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#404040;">
+      Xin chào <strong>${safeName}</strong>,
+    </p>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#404040;">
+      Hệ thống bảo mật TOMATO phát hiện <strong>${data.failedAttempts} lần đăng nhập sai mật khẩu liên tiếp</strong> vào tài khoản của bạn. Để ngăn chặn nguy cơ bị chiếm đoạt, tài khoản đã được tự động chuyển sang trạng thái <strong>tạm khóa</strong>.
+    </p>
+    <div style="margin:0 0 18px;padding:14px 16px;background-color:#fef2f2;border:1px solid #fecaca;border-radius:8px;font-size:14px;line-height:1.7;color:#262626;">
+      <div><strong>Thời gian khóa:</strong> ${safeTime}</div>
+      <div><strong>Địa chỉ IP gần nhất:</strong> ${safeIp}</div>
+      <div><strong>Thiết bị:</strong> ${safeDevice}</div>
+    </div>
+    ${unlockBlock}
+    <p style="margin:0;font-size:13px;line-height:1.6;color:#737373;">
+      <strong>Lưu ý bảo mật:</strong> Sau khi đặt lại mật khẩu mới, toàn bộ phiên đăng nhập cũ trên mọi thiết bị sẽ tự động bị đăng xuất. Hãy sử dụng cụm mật khẩu mạnh (12–128 ký tự) không trùng với bất kỳ dịch vụ nào khác.
+    </p>
+  `;
+
+  const text = [
+    `Xin chào ${data.displayName},`,
+    '',
+    `Hệ thống bảo mật TOMATO phát hiện ${data.failedAttempts} lần đăng nhập sai mật khẩu liên tiếp vào tài khoản của bạn.`,
+    'Để bảo vệ an toàn, tài khoản đã được tự động chuyển sang trạng thái tạm khóa.',
+    '',
+    `Thời gian khóa: ${formattedTime}`,
+    `Địa chỉ IP gần nhất: ${displayIp}`,
+    `Thiết bị: ${data.deviceInfo}`,
+    '',
+    ...(recoveryUrl
+      ? [`Để mở khóa tài khoản, vui lòng đặt lại mật khẩu tại: ${recoveryUrl}`]
+      : ['Để mở khóa tài khoản, vui lòng sử dụng tính năng Quên mật khẩu trên TOMATO.']),
+    '',
+    'Lưu ý: Khi đặt lại mật khẩu thành công, toàn bộ phiên đăng nhập cũ sẽ bị đăng xuất tự động.',
     '',
     '-- Đội ngũ bảo mật TOMATO',
   ].join('\n');

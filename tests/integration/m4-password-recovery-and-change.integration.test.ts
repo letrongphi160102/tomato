@@ -24,7 +24,13 @@ import {
   type UserStatus,
 } from '@/core/db/schema';
 import { type EmailMessage, type EmailProvider } from '@/core/email';
-import { AUTH_RATE_LIMITS, RateLimiter, closeRedisClient, getRedisClient } from '@/core/redis';
+import {
+  AUTH_RATE_LIMITS,
+  LoginBruteForceGuard,
+  RateLimiter,
+  closeRedisClient,
+  getRedisClient,
+} from '@/core/redis';
 import { AuditLogService } from '@/core/security/audit-log.service';
 import { CSRF_HEADER_NAME } from '@/core/security/csrf';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
@@ -267,8 +273,13 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
     currentClock = new Date();
     emailCapture = new MemoryCaptureEmailProvider();
 
+    const runSuffix = `${Date.now()}:${Math.random().toString(36).slice(2, 6)}`;
     testRateLimiter = new RateLimiter(getRedisClient(), {
-      keyPrefix: `tomato:rl:m4test:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`,
+      keyPrefix: `tomato:rl:m4test:${runSuffix}`,
+      now: () => currentClock.getTime(),
+    });
+    const testLoginProtection = new LoginBruteForceGuard(getRedisClient(), {
+      keyPrefix: `tomato:bf:m4test:${runSuffix}`,
       now: () => currentClock.getTime(),
     });
     const repository = new AuthRepository();
@@ -283,6 +294,7 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
       repository,
       sessionService,
       rateLimiter: testRateLimiter,
+      loginProtection: testLoginProtection,
       emailProvider: emailCapture,
       auditLogService,
       appUrl: getTestOrigin(),

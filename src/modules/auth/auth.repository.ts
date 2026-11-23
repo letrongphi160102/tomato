@@ -13,6 +13,7 @@ import {
   type SessionRow,
   type UserGender,
   type UserRow,
+  type UserStatus,
   type VerificationTokenPurpose,
   type VerificationTokenRow,
 } from '@/core/db/schema';
@@ -109,6 +110,19 @@ export interface RevokeAllUserSessionsParams {
   readonly excludeSessionId?: string;
   readonly revokedAt: Date;
   readonly reason: string;
+}
+
+export interface IncrementFailedLoginParams {
+  readonly identityId: string;
+  readonly userId: string;
+  readonly lockThreshold: number;
+  readonly now: Date;
+}
+
+export interface IncrementFailedLoginResult {
+  readonly failedLoginAttempts: number;
+  readonly lockedNow: boolean;
+  readonly userStatus: UserStatus;
 }
 
 /**
@@ -601,6 +615,71 @@ export class AuthRepository {
         updatedAt: now,
       })
       .where(and(eq(authIdentities.id, identityId), eq(authIdentities.userId, userId)));
+  }
+
+  /**
+   * Tăng nguyên tử `auth_identities.failed_login_attempts` trong DB Transaction đã khóa `users FOR UPDATE`
+   * để chống race condition khi nhiều request sai mật khẩu chạy song song từ nhiều IP (Mục 4.2):
+   * - Chỉ chuyển trạng thái `active -> locked` đúng 1 lần duy nhất khi chạm ngưỡng (`>= lockThreshold`).
+   * - Tuyệt đối không ghi đè các trạng thái `pending_verification`, `suspended`, `deleted` sang `locked`.
+   */
+  async incrementFailedLoginAttemptsAndMaybeLock(
+    params: IncrementFailedLoginParams,
+    tx: DatabaseTransaction,
+  ): Promise<IncrementFailedLoginResult | null> {
+    const lockedUser = await this.lockUserById(params.userId, tx, 'update');
+    if (!lockedUser) {
+      return null;
+    }
+
+    if (lockedUser.status !== 'active') {
+      const identity = await this.findEmailIdentityByUserId(lockedUser.id, tx);
+      return {
+        failedLoginAttempts: identity?.failedLoginAttempts ?? 0,
+        lockedNow: false,
+        userStatus: lockedUser.status,
+      };
+    }
+
+    const updatedIdentities = await tx
+      .update(authIdentities)
+      .set({
+        failedLoginAttempts: sql`${authIdentities.failedLoginAttempts} + 1`,
+        updatedAt: params.now,
+      })
+      .where(
+        and(eq(authIdentities.id, params.identityId), eq(authIdentities.userId, params.userId)),
+      )
+      .returning({ failedLoginAttempts: authIdentities.failedLoginAttempts });
+
+    const nextAttempts = updatedIdentities[0]?.failedLoginAttempts;
+    if (nextAttempts === undefined) {
+      return null;
+    }
+
+    let lockedNow = false;
+    let nextStatus: UserStatus = lockedUser.status;
+    if (nextAttempts >= params.lockThreshold) {
+      const lockedRows = await tx
+        .update(users)
+        .set({
+          status: 'locked',
+          updatedAt: params.now,
+        })
+        .where(and(eq(users.id, params.userId), eq(users.status, 'active')))
+        .returning({ id: users.id });
+
+      if (lockedRows.length > 0) {
+        lockedNow = true;
+        nextStatus = 'locked';
+      }
+    }
+
+    return {
+      failedLoginAttempts: nextAttempts,
+      lockedNow,
+      userStatus: nextStatus,
+    };
   }
 
   async createSession(

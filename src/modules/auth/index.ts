@@ -15,6 +15,8 @@ export {
   type CreatePendingUserParams,
   type CreateSessionParams,
   type IdentityWithUser,
+  type IncrementFailedLoginParams,
+  type IncrementFailedLoginResult,
   type OverwriteExpiredPendingUserParams,
   type OverwritePendingUserOutcome,
   type ReissueEmailVerifyTokenParams,
@@ -65,6 +67,7 @@ export {
   type VerifyEmailInput,
 } from '@/modules/auth/auth.schemas';
 export {
+  ACCOUNT_LOCK_FAILED_ATTEMPTS_THRESHOLD,
   AuthService,
   CHANGE_PASSWORD_OTP_COOLDOWN_SECONDS,
   DEFAULT_MIN_RESEND_RESPONSE_MS,

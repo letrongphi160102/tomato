@@ -113,7 +113,10 @@ const rawEnvSchema = z
     ),
     PASSWORD_PEPPER_SECRETS: z.string().min(1, 'PASSWORD_PEPPER_SECRETS là bắt buộc'),
 
-    EMAIL_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['smtp', 'brevo']).default('smtp')),
+    EMAIL_PROVIDER: z.preprocess(
+      emptyToUndefined,
+      z.enum(['mailpit', 'gmail', 'brevo', 'smtp']).default('mailpit'),
+    ),
     EMAIL_FROM: z.string().trim().min(3, 'EMAIL_FROM là bắt buộc'),
     SMTP_HOST: optionalString(),
     SMTP_PORT: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(65535).optional()),
@@ -228,8 +231,33 @@ const rawEnvSchema = z
       }
     }
 
-    // Kiểm tra cấu hình Email Provider.
-    if (data.EMAIL_PROVIDER === 'smtp') {
+    // Kiểm tra cấu hình Email Provider (`mailpit` | `gmail` | `brevo`, giữ `smtp` để tương thích ngược).
+    if (data.EMAIL_PROVIDER === 'mailpit') {
+      // Chặn tuyệt đối việc dùng Mailpit cục bộ trong môi trường production.
+      if (isProduction) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['EMAIL_PROVIDER'],
+          message:
+            'Không được sử dụng EMAIL_PROVIDER=mailpit trong production (hãy chọn gmail hoặc brevo)',
+        });
+      }
+    } else if (data.EMAIL_PROVIDER === 'gmail') {
+      if (!data.SMTP_USER) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SMTP_USER'],
+          message: 'SMTP_USER (địa chỉ Gmail) là bắt buộc khi EMAIL_PROVIDER=gmail',
+        });
+      }
+      if (!data.SMTP_PASS) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SMTP_PASS'],
+          message: 'SMTP_PASS (Gmail App Password) là bắt buộc khi EMAIL_PROVIDER=gmail',
+        });
+      }
+    } else if (data.EMAIL_PROVIDER === 'smtp') {
       if (!data.SMTP_HOST) {
         ctx.addIssue({
           code: 'custom',
@@ -293,7 +321,7 @@ export interface Env {
   readonly OTP_SECRET: string;
   readonly CURRENT_PEPPER_VERSION: number;
   readonly PASSWORD_PEPPER_SECRETS: Readonly<Record<number, string>>;
-  readonly EMAIL_PROVIDER: 'smtp' | 'brevo';
+  readonly EMAIL_PROVIDER: 'mailpit' | 'gmail' | 'brevo' | 'smtp';
   readonly EMAIL_FROM: string;
   readonly SMTP_HOST?: string;
   readonly SMTP_PORT?: number;

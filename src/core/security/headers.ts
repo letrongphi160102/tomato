@@ -2,6 +2,7 @@ import 'server-only';
 
 import { randomBytes } from 'node:crypto';
 
+import { extractSentryIngestOrigin } from '@/core/monitoring/sentry-scrub';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
 
 export const HSTS_HEADER_VALUE = 'max-age=31536000; includeSubDomains';
@@ -20,6 +21,8 @@ export interface SecurityHeadersContext {
   readonly isAuthApiRoute: boolean;
   /** Bật `Referrer-Policy: no-referrer` + `Cache-Control: no-store` cho trang mang token nhạy cảm trên URL (ví dụ `/reset-password`). */
   readonly isSensitiveTokenPage?: boolean;
+  /** Origin HTTPS duy nhất của Sentry ingest (trích từ `NEXT_PUBLIC_SENTRY_DSN`) để cho phép trong CSP `connect-src`. */
+  readonly sentryDsnOrigin?: string | null;
 }
 
 /**
@@ -33,10 +36,14 @@ export function generateCspNonce(): string {
  * Xây dựng Content-Security-Policy chặt chẽ theo Mục 6.3:
  * - Production: dùng nonce + strict-dynamic, tuyệt đối KHÔNG có `'unsafe-eval'` hay `'unsafe-inline'` trong script-src.
  * - Cho phép `https://challenges.cloudflare.com` cho widget Cloudflare Turnstile.
+ * - Chỉ thêm đúng 1 origin HTTPS của Sentry ingest (nếu cấu hình `NEXT_PUBLIC_SENTRY_DSN`).
  * - Chỉ bật `upgrade-insecure-requests` khi chạy Production HTTPS (tránh phá vỡ Local HTTP).
  */
 export function buildContentSecurityPolicy(
-  context: Pick<SecurityHeadersContext, 'nonce' | 'isProduction' | 'isHttps' | 'isApiRoute'>,
+  context: Pick<
+    SecurityHeadersContext,
+    'nonce' | 'isProduction' | 'isHttps' | 'isApiRoute' | 'sentryDsnOrigin'
+  >,
 ): string {
   if (context.isApiRoute) {
     return API_CSP_VALUE;
@@ -58,6 +65,10 @@ export function buildContentSecurityPolicy(
     : ["'self'", "'unsafe-inline'", TURNSTILE_ORIGIN];
 
   const connectSources = ["'self'", TURNSTILE_ORIGIN];
+  const safeSentryOrigin = extractSentryIngestOrigin(context.sentryDsnOrigin);
+  if (safeSentryOrigin) {
+    connectSources.push(safeSentryOrigin);
+  }
   if (!context.isProduction) {
     // Cho phép WebSocket HMR của Next.js khi phát triển cục bộ.
     connectSources.push('ws:', 'wss:');

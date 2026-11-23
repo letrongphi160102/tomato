@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import { extractSentryIngestOrigin } from '@/core/monitoring/sentry-scrub';
 import { getCookieNames } from '@/core/security/cookies';
 import { buildSecurityHeaders, generateCspNonce } from '@/core/security/headers';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
@@ -50,6 +51,7 @@ export function proxy(request: NextRequest): NextResponse {
     isApiRoute,
     isAuthApiRoute,
     isSensitiveTokenPage,
+    sentryDsnOrigin: extractSentryIngestOrigin(process.env.NEXT_PUBLIC_SENTRY_DSN),
   });
 
   if (isProtectedRoute) {

@@ -416,6 +416,20 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
 
     const service = new AuthService({
       rateLimiter: makeAllowRateLimiter(),
+      loginProtection: {
+        checkPair: vi.fn().mockResolvedValue({
+          failureCount: 0,
+          backoffRemainingMs: 0,
+          retryAfterSeconds: 0,
+          requireCaptcha: false,
+        }),
+        recordPairFailure: vi.fn().mockResolvedValue({
+          failureCount: 1,
+          backoffSeconds: 0,
+          requireCaptcha: false,
+        }),
+        clearPair: vi.fn().mockResolvedValue(undefined),
+      },
       repository: {
         getDb: () => ({ transaction: txSpy }),
         findEmailIdentityByUserId: vi.fn().mockResolvedValue({
@@ -544,6 +558,20 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
 
     const service = new AuthService({
       rateLimiter: makeAllowRateLimiter(),
+      loginProtection: {
+        checkPair: vi.fn().mockResolvedValue({
+          failureCount: 0,
+          backoffRemainingMs: 0,
+          retryAfterSeconds: 0,
+          requireCaptcha: false,
+        }),
+        recordPairFailure: vi.fn().mockResolvedValue({
+          failureCount: 1,
+          backoffSeconds: 0,
+          requireCaptcha: false,
+        }),
+        clearPair: vi.fn().mockResolvedValue(undefined),
+      },
       repository: {
         getDb: () => ({
           transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn({}),
@@ -589,6 +617,20 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
 
     const service = new AuthService({
       rateLimiter: makeAllowRateLimiter(),
+      loginProtection: {
+        checkPair: vi.fn().mockResolvedValue({
+          failureCount: 0,
+          backoffRemainingMs: 0,
+          retryAfterSeconds: 0,
+          requireCaptcha: false,
+        }),
+        recordPairFailure: vi.fn().mockResolvedValue({
+          failureCount: 1,
+          backoffSeconds: 0,
+          requireCaptcha: false,
+        }),
+        clearPair: vi.fn().mockResolvedValue(undefined),
+      },
       repository: {
         getDb: () => ({
           transaction: async <T>(fn: (tx: unknown) => Promise<T>) => {

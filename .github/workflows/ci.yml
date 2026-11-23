@@ -67,7 +67,7 @@ jobs:
       OTP_SECRET: ci-only-synthetic-otp-secret-value-at-least-32-chars
       CURRENT_PEPPER_VERSION: '1'
       PASSWORD_PEPPER_SECRETS: '{"1":"ci-only-synthetic-pepper-secret-v1-at-least-32-chars"}'
-      EMAIL_PROVIDER: smtp
+      EMAIL_PROVIDER: mailpit
       EMAIL_FROM: Tomato CI <no-reply@tomato.local>
       SMTP_HOST: 127.0.0.1
       SMTP_PORT: '1025'
@@ -111,8 +111,9 @@ jobs:
           NODE_ENV: production
           APP_URL: https://ci.tomato.invalid
           ALLOWED_ORIGINS: https://ci.tomato.invalid
-          SMTP_USER: ci-smtp-user
-          SMTP_PASS: ci-smtp-pass
+          EMAIL_PROVIDER: gmail
+          SMTP_USER: ci-smtp-user@gmail.com
+          SMTP_PASS: ci-smtp-app-pass
           NEXT_PUBLIC_TURNSTILE_SITE_KEY: ci-synthetic-site-key-non-dummy
           TURNSTILE_SECRET_KEY: ci-synthetic-secret-key-non-dummy
         run: npm run build

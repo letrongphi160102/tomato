@@ -19,6 +19,7 @@ import { signAccessToken } from '@/core/crypto/jwt';
 import { hashPassword } from '@/core/crypto/password';
 import { generateSecureToken, hashTokenSha256 } from '@/core/crypto/token';
 import type { SessionRow, UserRow } from '@/core/db/schema';
+import type { LoginBruteForceStore } from '@/core/redis/login-brute-force';
 import type { RateLimiter } from '@/core/redis/rate-limiter';
 import type { AuditLogService } from '@/core/security/audit-log.service';
 import { CSRF_HEADER_NAME } from '@/core/security/csrf';
@@ -63,6 +64,23 @@ function makeAllowRateLimiter(): RateLimiter {
       retryAfterSeconds: 0,
     }),
   } as unknown as RateLimiter;
+}
+
+function makeCleanLoginProtection(): LoginBruteForceStore {
+  return {
+    checkPair: vi.fn().mockResolvedValue({
+      failureCount: 0,
+      backoffRemainingMs: 0,
+      retryAfterSeconds: 0,
+      requireCaptcha: false,
+    }),
+    recordPairFailure: vi.fn().mockResolvedValue({
+      failureCount: 1,
+      backoffSeconds: 0,
+      requireCaptcha: false,
+    }),
+    clearPair: vi.fn().mockResolvedValue(undefined),
+  };
 }
 
 describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Detection & Rate-Limit-First', () => {
@@ -110,7 +128,11 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
       deletedAt: null,
     };
 
+    const fakeTx = {};
     const repository = {
+      getDb: () => ({
+        transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn(fakeTx),
+      }),
       findEmailIdentityWithUser: vi.fn(async (email: string) => {
         if (email === 'exists@tomato.test') {
           return {
@@ -131,12 +153,18 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
         }
         return null;
       }),
+      incrementFailedLoginAttemptsAndMaybeLock: vi.fn().mockResolvedValue({
+        failedLoginAttempts: 1,
+        lockedNow: false,
+        userStatus: 'active',
+      }),
     } as unknown as AuthRepository;
 
     setAuthServiceForTesting(
       new AuthService({
         repository,
         rateLimiter: makeAllowRateLimiter(),
+        loginProtection: makeCleanLoginProtection(),
         auditLogService: { record: auditRecord } as unknown as AuditLogService,
       }),
     );
@@ -563,6 +591,7 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
         },
       }),
       lockUserById: vi.fn().mockResolvedValue(userRow),
+      resetFailedLoginAttempts: vi.fn().mockResolvedValue(undefined),
       createSession: vi.fn().mockResolvedValue(sessionRow),
       findSessionWithUserByPublicId: vi
         .fn()
@@ -581,6 +610,7 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
       repository,
       sessionService,
       rateLimiter: makeAllowRateLimiter(),
+      loginProtection: makeCleanLoginProtection(),
       auditLogService: {
         record: vi.fn().mockResolvedValue({ id: 'a2' }),
       } as unknown as AuditLogService,
@@ -690,6 +720,7 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
       new AuthService({
         repository,
         rateLimiter: makeAllowRateLimiter(),
+        loginProtection: makeCleanLoginProtection(),
         auditLogService: {
           record: vi.fn().mockResolvedValue({ id: 'a3' }),
         } as unknown as AuditLogService,
