@@ -29,6 +29,13 @@
       "when": 1795427330306,
       "tag": "0003_add_phase2_profile_and_handle_history",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795432130752,
+      "tag": "0004_add_social_follows_and_blocks",
+      "breakpoints": true
     }
   ]
 }

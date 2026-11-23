@@ -5,16 +5,20 @@ import { and, desc, eq, gt, isNull, ne, or, sql } from 'drizzle-orm';
 import { generateUuidV7 } from '@/core/crypto/id';
 import { getDb, type Database, type DatabaseTransaction, type DbExecutor } from '@/core/db';
 import {
+  blocks,
+  follows,
   userHandleHistory,
   users,
   type UserHandleHistoryRow,
   type UserRow,
 } from '@/core/db/schema';
 import { escapeSqlLikePattern } from '@/modules/profile/handle';
+import type { SocialFollowStatus } from '@/modules/social/social.policy';
 
 export interface SearchUsersParams {
   readonly query: string;
   readonly limit: number;
+  readonly viewerUserId: string;
 }
 
 export interface SearchUserRecord {
@@ -23,6 +27,8 @@ export interface SearchUserRecord {
   readonly fullName: string;
   readonly avatarUrl: string | null;
   readonly isPrivate: boolean;
+  readonly followStatus?: SocialFollowStatus;
+  readonly isOwnProfile?: boolean;
 }
 
 export interface UpdateProfileDbParams {
@@ -205,7 +211,8 @@ export class ProfileRepository {
 
   /**
    * Tìm kiếm người dùng tối ưu chỉ trên bảng `users` (tuyệt đối KHÔNG join email `auth_identities`):
-   * - Chỉ trả các tài khoản đang `active` và chưa bị xóa (`deleted_at IS NULL`).
+   * - Chỉ trả các tài khoản đang `active`, chưa bị xóa (`deleted_at IS NULL`),
+   *   và KHÔNG có quan hệ chặn hai chiều với `viewerUserId`.
    * - Xếp hạng ưu tiên:
    *   0: Khớp chính xác `@handle`
    *   1: Khớp tiền tố `@handle` (`LIKE prefix%` — dùng B-Tree `varchar_pattern_ops`)
@@ -230,19 +237,31 @@ export class ProfileRepository {
       similarity(${users.handleNormalized}, ${queryLower})
     )`;
 
-    return executor
+    const rows = await executor
       .select({
+        userId: users.id,
         publicId: users.publicId,
         handle: users.handle,
         fullName: users.fullName,
         avatarUrl: users.avatarUrl,
         isPrivate: users.isPrivate,
+        followStatusRaw: sql<string | null>`(
+          SELECT f.status::text FROM ${follows} f
+          WHERE f.follower_id = ${params.viewerUserId}
+            AND f.followee_id = ${users.id}
+          LIMIT 1
+        )`,
       })
       .from(users)
       .where(
         and(
           eq(users.status, 'active'),
           isNull(users.deletedAt),
+          sql`NOT EXISTS (
+            SELECT 1 FROM ${blocks} b
+            WHERE (b.blocker_id = ${params.viewerUserId} AND b.blocked_id = ${users.id})
+               OR (b.blocker_id = ${users.id} AND b.blocked_id = ${params.viewerUserId})
+          )`,
           or(
             eq(users.handleNormalized, queryLower),
             sql`${users.handleNormalized} LIKE ${escapedPrefix} ESCAPE '\\'`,
@@ -253,5 +272,23 @@ export class ProfileRepository {
       )
       .orderBy(rankExpr, desc(similarityExpr), users.handleNormalized)
       .limit(params.limit);
+
+    return rows.map((row) => {
+      const isOwnProfile = row.userId === params.viewerUserId;
+      const followStatus: SocialFollowStatus =
+        !isOwnProfile &&
+        (row.followStatusRaw === 'following' || row.followStatusRaw === 'requested')
+          ? row.followStatusRaw
+          : 'none';
+      return {
+        publicId: row.publicId,
+        handle: row.handle,
+        fullName: row.fullName,
+        avatarUrl: row.avatarUrl,
+        isPrivate: row.isPrivate,
+        followStatus,
+        isOwnProfile,
+      };
+    });
   }
 }

@@ -231,9 +231,20 @@ export function UserSearchBar({ className }: UserSearchBarProps) {
                     >
                       <UserAvatar fullName={item.fullName} avatarUrl={item.avatarUrl} size="sm" />
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-semibold text-foreground">
-                          @{item.handle}
-                        </p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="truncate text-sm font-semibold text-foreground">
+                            @{item.handle}
+                          </p>
+                          {item.followStatus === 'following' ? (
+                            <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                              · Đang theo dõi
+                            </span>
+                          ) : item.followStatus === 'requested' ? (
+                            <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                              · Đã gửi yêu cầu
+                            </span>
+                          ) : null}
+                        </div>
                         <p className="truncate text-xs text-muted-foreground">{item.fullName}</p>
                       </div>
                     </Link>

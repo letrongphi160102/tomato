@@ -23,6 +23,13 @@ import {
   searchUsersQuerySchema,
   updateOwnProfileInputSchema,
 } from '@/modules/profile/profile.schemas';
+import {
+  EMPTY_SOCIAL_RELATIONSHIP,
+  canViewTargetConnections,
+  type SocialFollowStatus,
+  type SocialRelationshipSnapshot,
+} from '@/modules/social/social.policy';
+import { SocialRepository } from '@/modules/social/social.repository';
 
 export const HANDLE_CHANGE_MAX_PER_WINDOW = 2;
 export const HANDLE_CHANGE_WINDOW_DAYS = 14;
@@ -33,6 +40,7 @@ export const HANDLE_RESERVATION_MS = HANDLE_RESERVATION_DAYS * 24 * 60 * 60 * 10
 /**
  * DTO allowlist cho hồ sơ người dùng hiển thị công khai (tuyệt đối không chứa `id` UUIDv7,
  * `avatarStorageKey`, email hay trường nội bộ).
+ * Đối với tài khoản Riêng tư khi người lạ chưa được duyệt xem: chỉ trả khung tối thiểu (`canViewConnections: false`).
  */
 export interface UserProfileDto {
   readonly public_id: string;
@@ -44,6 +52,10 @@ export interface UserProfileDto {
   readonly followersCount: number;
   readonly followingCount: number;
   readonly isOwnProfile: boolean;
+  readonly followStatus: SocialFollowStatus;
+  /** Chỉ `true` khi đối phương đang có `status = 'following'` với người xem. */
+  readonly followedBy: boolean;
+  readonly canViewConnections: boolean;
 }
 
 export interface OwnProfileDto extends UserProfileDto {
@@ -58,6 +70,8 @@ export interface UserSearchItemDto {
   readonly fullName: string;
   readonly avatarUrl: string | null;
   readonly isPrivate: boolean;
+  readonly followStatus: SocialFollowStatus;
+  readonly isOwnProfile: boolean;
 }
 
 export interface SearchUsersResult {
@@ -84,6 +98,7 @@ export interface AvatarMutationResult {
 
 export interface ProfileServiceDependencies {
   readonly repository?: ProfileRepository;
+  readonly socialRepository?: SocialRepository;
   readonly rateLimiter?: RateLimiter;
   readonly storageProvider?: MediaStorageProvider;
   readonly auditLogService?: AuditLogService;
@@ -96,7 +111,17 @@ type UpdateProfileTxOutcome =
   | { readonly kind: 'handle_unavailable' }
   | { readonly kind: 'handle_limit_reached'; readonly retryAfterSeconds: number };
 
-export function toUserProfileDto(user: UserRow, viewerUserId?: string): UserProfileDto {
+export function toUserProfileDto(
+  user: UserRow,
+  viewerUserId?: string,
+  relationship: SocialRelationshipSnapshot = EMPTY_SOCIAL_RELATIONSHIP,
+): UserProfileDto {
+  const isOwnProfile = viewerUserId !== undefined && viewerUserId === user.id;
+  const canViewConnections =
+    viewerUserId !== undefined
+      ? canViewTargetConnections(viewerUserId, user, relationship)
+      : !user.isPrivate;
+
   return {
     public_id: user.publicId,
     handle: user.handle,
@@ -106,7 +131,10 @@ export function toUserProfileDto(user: UserRow, viewerUserId?: string): UserProf
     isPrivate: user.isPrivate,
     followersCount: user.followersCount,
     followingCount: user.followingCount,
-    isOwnProfile: viewerUserId !== undefined && viewerUserId === user.id,
+    isOwnProfile,
+    followStatus: isOwnProfile ? 'none' : relationship.actorFollowStatus,
+    followedBy: isOwnProfile ? false : relationship.targetFollowStatus === 'following',
+    canViewConnections,
   };
 }
 
@@ -156,6 +184,7 @@ export function toOwnProfileDto(
 
 export class ProfileService {
   private readonly repository: ProfileRepository;
+  private readonly socialRepository: SocialRepository;
   private readonly rateLimiter: RateLimiter;
   private readonly storageProvider: MediaStorageProvider;
   private readonly auditLogService: AuditLogService;
@@ -163,6 +192,7 @@ export class ProfileService {
 
   constructor(deps: ProfileServiceDependencies = {}) {
     this.repository = deps.repository ?? new ProfileRepository();
+    this.socialRepository = deps.socialRepository ?? new SocialRepository();
     this.rateLimiter = deps.rateLimiter ?? getRateLimiter();
     this.storageProvider = deps.storageProvider ?? getMediaStorageProvider();
     this.auditLogService = deps.auditLogService ?? getAuditLogService();
@@ -201,6 +231,7 @@ export class ProfileService {
     const rows = await this.repository.searchActiveUsers({
       query: parsed.data.q,
       limit: parsed.data.limit,
+      viewerUserId: actor.user.id,
     });
 
     return {
@@ -210,6 +241,8 @@ export class ProfileService {
         fullName: row.fullName,
         avatarUrl: row.avatarUrl,
         isPrivate: row.isPrivate,
+        followStatus: row.followStatus ?? 'none',
+        isOwnProfile: row.isOwnProfile ?? row.publicId === actor.user.publicId,
       })),
     };
   }
@@ -246,10 +279,23 @@ export class ProfileService {
     }
 
     const targetUser = await this.repository.findUserByHandleNormalized(parsed.data);
-    assertCanReadProfile(actor, targetUser);
+    if (!targetUser) {
+      throw new ProfileDomainError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: PROFILE_MESSAGES.profileNotFound,
+      });
+    }
+
+    const relationship: SocialRelationshipSnapshot =
+      targetUser.id === actor.user.id
+        ? EMPTY_SOCIAL_RELATIONSHIP
+        : await this.socialRepository.getRelationshipSnapshot(actor.user.id, targetUser.id);
+
+    assertCanReadProfile(actor, targetUser, relationship);
 
     return {
-      profile: toUserProfileDto(targetUser, actor.user.id),
+      profile: toUserProfileDto(targetUser, actor.user.id, relationship),
     };
   }
 

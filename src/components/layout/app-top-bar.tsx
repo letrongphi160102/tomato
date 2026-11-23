@@ -8,6 +8,7 @@ import {
   Home,
   KeyRound,
   Loader2,
+  Lock,
   LogOut,
   MonitorSmartphone,
   Pencil,
@@ -241,6 +242,16 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
                   >
                     <Pencil className="size-4 text-muted-foreground" aria-hidden="true" />
                     <span>Chỉnh sửa hồ sơ</span>
+                  </Link>
+
+                  <Link
+                    href="/settings/privacy"
+                    role="menuitem"
+                    onClick={() => setMenuOpen(false)}
+                    className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
+                  >
+                    <Lock className="size-4 text-muted-foreground" aria-hidden="true" />
+                    <span>Quyền riêng tư</span>
                   </Link>
 
                   <Link

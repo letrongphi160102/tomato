@@ -20,6 +20,9 @@ export const AUDIT_ACTIONS = [
   'PROFILE_HANDLE_CHANGED',
   'AVATAR_UPDATED',
   'AVATAR_REMOVED',
+  'PRIVACY_UPDATED',
+  'USER_BLOCKED',
+  'USER_UNBLOCKED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

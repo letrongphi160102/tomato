@@ -2,6 +2,7 @@ import Link from 'next/link';
 import {
   ArrowRight,
   KeyRound,
+  Lock,
   MonitorSmartphone,
   Pencil,
   Sparkles,
@@ -113,6 +114,17 @@ export function AuthenticatedHome({ user, profile }: AuthenticatedHomeProps) {
               <span className="flex items-center gap-2.5 font-medium text-foreground">
                 <Pencil className="size-4 text-primary" aria-hidden="true" />
                 Chỉnh sửa hồ sơ
+              </span>
+              <ArrowRight className="size-4 text-muted-foreground" aria-hidden="true" />
+            </Link>
+
+            <Link
+              href="/settings/privacy"
+              className="flex items-center justify-between rounded-lg border px-3 py-2.5 text-sm transition-colors hover:bg-muted/60"
+            >
+              <span className="flex items-center gap-2.5 font-medium text-foreground">
+                <Lock className="size-4 text-primary" aria-hidden="true" />
+                Quyền riêng tư
               </span>
               <ArrowRight className="size-4 text-muted-foreground" aria-hidden="true" />
             </Link>

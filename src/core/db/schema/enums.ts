@@ -37,3 +37,9 @@ export const verificationTokenPurposeEnum = pgEnum(
   'verification_token_purpose',
   VERIFICATION_TOKEN_PURPOSES,
 );
+
+export const FOLLOW_STATUSES = ['requested', 'following'] as const;
+
+export type FollowStatus = (typeof FOLLOW_STATUSES)[number];
+
+export const followStatusEnum = pgEnum('follow_status', FOLLOW_STATUSES);
