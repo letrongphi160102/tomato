@@ -8,6 +8,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { authFetch } from '@/lib/auth-client';
 import {
+  markE2eeDeviceFingerprintRegistered,
+  setCachedServerKeyBackupInSession,
+} from '@/lib/e2ee/client-bootstrap';
+import {
   createPinProtectedKeyBackup,
   restorePinProtectedKeyBackup,
   type EncryptedKeyBackupBundleDto,
@@ -93,6 +97,7 @@ export function PinBackupModal({
           }),
         });
 
+        markE2eeDeviceFingerprintRegistered(currentUserPublicId, restored.keyFingerprint);
         setSuccessMessage('Đã đồng bộ tin nhắn thành công trên thiết bị này.');
         onBackupSynced();
         setTimeout(() => onClose(), 900);
@@ -123,6 +128,17 @@ export function PinBackupModal({
         } | null;
         throw new Error(errBody?.error?.message ?? 'Không thể lưu mã PIN lúc này.');
       }
+
+      const savedBackupBody = (await backupRes.json().catch(() => null)) as {
+        readonly backup?: E2eeKeyBackupDto;
+      } | null;
+      if (savedBackupBody?.backup) {
+        setCachedServerKeyBackupInSession(currentUserPublicId, savedBackupBody.backup);
+      }
+      markE2eeDeviceFingerprintRegistered(
+        currentUserPublicId,
+        created.publicRegistration.keyFingerprint,
+      );
 
       setSuccessMessage('Đã thiết lập mã PIN đồng bộ tin nhắn thành công.');
       onBackupSynced();

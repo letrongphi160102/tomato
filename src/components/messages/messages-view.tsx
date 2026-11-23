@@ -15,37 +15,35 @@ import {
   MessageCircle,
   Mic,
   PenSquare,
+  RotateCcw,
   Send,
   Trash2,
 } from 'lucide-react';
 
 import { ChatInfoDrawer } from '@/components/messages/chat-info-drawer';
+import { useChatStore } from '@/components/messages/chat-store-context';
 import { EmojiPickerPopover } from '@/components/messages/emoji-picker-popover';
+import {
+  buildClusteredMessageEntries,
+  formatConversationShortTimeVi,
+  formatExactMessageTooltipTimeVi,
+  isConversationUnread,
+  type MessageBubbleClusterPosition,
+} from '@/components/messages/message-grouping';
 import { NewMessageModal } from '@/components/messages/new-message-modal';
 import { PinBackupModal } from '@/components/messages/pin-backup-modal';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { authFetch } from '@/lib/auth-client';
-import { decryptDirectMessage, encryptDirectMessage } from '@/lib/e2ee/cipher';
-import {
-  getBackupDeviceKeyMaterial,
-  getOrCreatePrimaryDeviceKeyMaterial,
-  listLocalDeviceKeyMaterials,
-} from '@/lib/e2ee/keystore';
-import type { E2eeTargetDevicePublicKey } from '@/lib/e2ee/types';
 import { cn } from '@/lib/utils';
-import type {
-  ChatMessageDto,
-  ConversationListResult,
-  ConversationSummaryDto,
-  E2eeKeyBackupDto,
-  MessageListResult,
-  SendMessageResult,
-  UserE2eeKeyBundleDto,
-} from '@/modules/chat';
-import type { PresenceStatusDto } from '@/modules/presence/presence.service';
+import type { ConversationSummaryDto } from '@/modules/chat';
+import type { DecryptedMessageViewItem } from '@/components/messages/chat-store-context';
+
+const EMPTY_CONVERSATIONS: readonly ConversationSummaryDto[] = [];
+const EMPTY_MESSAGES: readonly DecryptedMessageViewItem[] = [];
 
 export interface MessagesViewProps {
   readonly currentUserPublicId: string;
@@ -53,482 +51,253 @@ export interface MessagesViewProps {
   readonly currentUserFullName: string;
 }
 
-interface DecryptedMessageViewItem {
-  readonly dto: ChatMessageDto;
-  readonly plaintext: string;
-  readonly decryptionFailed: boolean;
-  readonly sending?: boolean;
-}
+function getBubbleRadiusClasses(isMine: boolean, position: MessageBubbleClusterPosition): string {
+  if (isMine) {
+    switch (position) {
+      case 'single':
+        return 'rounded-2xl';
+      case 'first':
+        return 'rounded-2xl rounded-br-md';
+      case 'middle':
+        return 'rounded-2xl rounded-tr-md rounded-br-md';
+      case 'last':
+        return 'rounded-2xl rounded-tr-md';
+    }
+  }
 
-function formatShortTimeVi(isoTimestamp: string | null): string {
-  if (!isoTimestamp) {
-    return '';
+  switch (position) {
+    case 'single':
+      return 'rounded-2xl';
+    case 'first':
+      return 'rounded-2xl rounded-bl-md';
+    case 'middle':
+      return 'rounded-2xl rounded-tl-md rounded-bl-md';
+    case 'last':
+      return 'rounded-2xl rounded-tl-md';
   }
-  const parsed = Date.parse(isoTimestamp);
-  if (Number.isNaN(parsed)) {
-    return '';
-  }
-  const diffSec = Math.max(0, Math.floor((Date.now() - parsed) / 1000));
-  if (diffSec < 60) {
-    return 'Vừa xong';
-  }
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) {
-    return `${diffMin} phút`;
-  }
-  const diffHours = Math.floor(diffMin / 60);
-  if (diffHours < 24) {
-    return `${diffHours} giờ`;
-  }
-  const date = new Date(parsed);
-  return date.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' });
 }
 
 export function MessagesView({ currentUserPublicId, currentUserHandle }: MessagesViewProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const realtime = useRealtimePresence();
+  const chatStore = useChatStore();
 
-  const initialTabParam = searchParams.get('tab') === 'pending' ? 'pending' : 'primary';
+  const tabQueryParam = searchParams.get('tab');
   const targetToPublicIdParam = searchParams.get('to');
   const targetConversationParam = searchParams.get('conversation');
 
-  const [activeTab, setActiveTab] = React.useState<'primary' | 'pending'>(initialTabParam);
-  const [conversations, setConversations] = React.useState<readonly ConversationSummaryDto[]>([]);
-  const [pendingCount, setPendingCount] = React.useState(0);
-  const [loadingConversations, setLoadingConversations] = React.useState(true);
-  const [selectedConversation, setSelectedConversation] =
-    React.useState<ConversationSummaryDto | null>(null);
-
-  const [messages, setMessages] = React.useState<readonly DecryptedMessageViewItem[]>([]);
-  const [loadingMessages, setLoadingMessages] = React.useState(false);
   const [draftText, setDraftText] = React.useState('');
-  const [sendingMessage, setSendingMessage] = React.useState(false);
   const [chatError, setChatError] = React.useState<string | null>(null);
-
-  const [presences, setPresences] = React.useState<
-    Readonly<Record<string, PresenceStatusDto | null>>
-  >({});
-  const [previewsByConvId, setPreviewsByConvId] = React.useState<Readonly<Record<string, string>>>(
-    {},
-  );
-
-  const [ownKeyBundle, setOwnKeyBundle] = React.useState<UserE2eeKeyBundleDto | null>(null);
-  const [peerKeyBundle, setPeerKeyBundle] = React.useState<UserE2eeKeyBundleDto | null>(null);
-  const [loadingPeerKeys, setLoadingPeerKeys] = React.useState(false);
-
-  const [serverKeyBackup, setServerKeyBackup] = React.useState<E2eeKeyBackupDto | null>(null);
-  const [hasLocalRestoredBackup, setHasLocalRestoredBackup] = React.useState(false);
-
   const [infoDrawerOpen, setInfoDrawerOpen] = React.useState(false);
   const [newMessageModalOpen, setNewMessageModalOpen] = React.useState(false);
   const [pinModalOpen, setPinModalOpen] = React.useState(false);
   const [confirmBlockOpen, setConfirmBlockOpen] = React.useState(false);
   const [actionBusy, setActionBusy] = React.useState(false);
 
-  const messagesEndRef = React.useRef<HTMLDivElement | null>(null);
-  const selectedConvRef = React.useRef<ConversationSummaryDto | null>(selectedConversation);
-  const maxSeqByConvRef = React.useRef<Map<string, number>>(new Map());
+  const messagesContainerRef = React.useRef<HTMLDivElement | null>(null);
   const handledToParamRef = React.useRef<string | null>(null);
+  const handledConvParamRef = React.useRef<string | null>(null);
+  const isNearBottomRef = React.useRef(true);
+  const lastScrolledConvIdRef = React.useRef<string | null>(null);
+  const lastBottomItemKeyRef = React.useRef<string | null>(null);
+  const scrollAnchorRef = React.useRef<{
+    readonly convId: string;
+    readonly prevScrollHeight: number;
+    readonly prevScrollTop: number;
+    readonly prevCount: number;
+  } | null>(null);
 
+  const activeTab = chatStore?.activeTab ?? 'primary';
+  const conversations =
+    activeTab === 'primary'
+      ? (chatStore?.primaryConversations ?? EMPTY_CONVERSATIONS)
+      : (chatStore?.pendingConversations ?? EMPTY_CONVERSATIONS);
+  const hasLoadedCurrentTab =
+    activeTab === 'primary'
+      ? (chatStore?.hasLoadedPrimary ?? false)
+      : (chatStore?.hasLoadedPending ?? false);
+  const loadingConversations = (chatStore?.loadingConversations ?? false) && !hasLoadedCurrentTab;
+  const pendingCount = chatStore?.pendingCount ?? 0;
+  const selectedConversation = chatStore?.selectedConversation ?? null;
+  const previewsByConvId = chatStore?.previewsByConvId ?? {};
+  const presences = chatStore?.presences ?? {};
+  const ownKeyBundle = chatStore?.ownKeyBundle ?? null;
+  const serverKeyBackup = chatStore?.serverKeyBackup ?? null;
+  const hasLocalRestoredBackup = chatStore?.hasLocalRestoredBackup ?? false;
+
+  const activeThread =
+    selectedConversation && chatStore
+      ? chatStore.getThreadState(selectedConversation.public_id)
+      : null;
+  const messages = activeThread?.items ?? EMPTY_MESSAGES;
+  const loadingInitialMessages =
+    Boolean(selectedConversation) &&
+    (!activeThread || (activeThread.loadingInitial && !activeThread.hasInitialized));
+  const loadingOlderMessages = activeThread?.loadingOlder ?? false;
+  const hasOlderMessages = (activeThread?.nextBeforeSeq ?? null) !== null;
+
+  const peerKeyBundle =
+    selectedConversation && chatStore
+      ? chatStore.getCachedPeerKeyBundle(selectedConversation.peer.public_id)
+      : null;
+
+  const refreshOwnE2eeStatus = chatStore?.refreshOwnE2eeStatus;
+  const loadConversations = chatStore?.loadConversations;
+  const openConversationThread = chatStore?.openConversationThread;
+  const openOrCreateDirectConversation = chatStore?.openOrCreateDirectConversation;
+  const setActiveTab = chatStore?.setActiveTab;
+
+  // Khởi tạo trạng thái khóa E2EE cá nhân (Singleton — chỉ chạy nếu chưa có trong RAM).
   React.useEffect(() => {
-    selectedConvRef.current = selectedConversation;
-  }, [selectedConversation]);
-
-  const scrollToBottom = React.useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, []);
-
-  // Giải mã 1 tin nhắn dựa trên khóa thiết bị hiện tại trong IndexedDB + xác minh chữ ký ECDSA của người gửi.
-  const decryptSingleMessage = React.useCallback(
-    async (
-      dto: ChatMessageDto,
-      senderDevices?: readonly E2eeTargetDevicePublicKey[],
-    ): Promise<DecryptedMessageViewItem> => {
-      if (!dto.ciphertext || !dto.cryptoHeader) {
-        return {
-          dto,
-          plaintext: 'Tin nhắn không còn khả dụng',
-          decryptionFailed: false,
-        };
-      }
-      try {
-        await getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId);
-        const localMaterials = await listLocalDeviceKeyMaterials(currentUserPublicId);
-        const decrypted = await decryptDirectMessage({
-          conversationPublicId: dto.conversationPublicId,
-          senderPublicId: dto.senderPublicId,
-          clientMsgId: dto.clientMsgId,
-          ciphertext: dto.ciphertext,
-          cryptoHeader: dto.cryptoHeader,
-          receiverKeyMaterials: localMaterials,
-          expectedSenderDevices: senderDevices,
-        });
-        return {
-          dto,
-          plaintext: decrypted.text,
-          decryptionFailed: false,
-        };
-      } catch {
-        return {
-          dto,
-          plaintext: 'Đồng bộ mã PIN để xem tin nhắn từ thiết bị trước',
-          decryptionFailed: true,
-        };
-      }
-    },
-    [currentUserPublicId],
-  );
-
-  // Nạp thông tin khóa công khai của bản thân và trạng thái bản sao lưu PIN.
-  const refreshOwnE2eeStatus = React.useCallback(async () => {
-    await realtime?.ensureE2eeDeviceRegistered();
-    try {
-      const [keysRes, backupRes, localBackup] = await Promise.all([
-        authFetch(`/api/v1/e2ee/users/${encodeURIComponent(currentUserPublicId)}/keys`),
-        authFetch('/api/v1/e2ee/backup'),
-        getBackupDeviceKeyMaterial(currentUserPublicId),
-      ]);
-
-      if (keysRes.ok) {
-        const bundle = (await keysRes.json()) as UserE2eeKeyBundleDto;
-        setOwnKeyBundle(bundle);
-      }
-      if (backupRes.ok) {
-        const backupData = (await backupRes.json()) as { readonly backup: E2eeKeyBackupDto | null };
-        setServerKeyBackup(backupData.backup);
-        setHasLocalRestoredBackup(
-          Boolean(
-            localBackup &&
-            backupData.backup &&
-            localBackup.keyFingerprint === backupData.backup.keyFingerprint,
-          ),
-        );
-      }
-    } catch {
-      // Bỏ qua lỗi mạng tạm thời.
+    if (!refreshOwnE2eeStatus) {
+      return;
     }
-  }, [currentUserPublicId, realtime]);
-
-  // Nạp danh sách hội thoại theo tab (`primary` | `pending`).
-  const loadConversations = React.useCallback(
-    async (tabToLoad: 'primary' | 'pending') => {
-      try {
-        const response = await authFetch(`/api/v1/conversations?tab=${tabToLoad}&limit=30`);
-        if (!response.ok) {
-          return;
-        }
-        const data = (await response.json()) as ConversationListResult;
-        setConversations(data.items);
-        setPendingCount(data.pendingCount);
-
-        if (targetConversationParam && !selectedConvRef.current) {
-          const found = data.items.find((c) => c.public_id === targetConversationParam);
-          if (found) {
-            setSelectedConversation(found);
-          }
-        }
-
-        // Giải mã dòng xem trước cho từng hội thoại.
-        const previewEntries = await Promise.all(
-          data.items.map(async (conv) => {
-            if (!conv.lastMessage) {
-              return [conv.public_id, 'Bắt đầu cuộc trò chuyện'] as const;
-            }
-            const dec = await decryptSingleMessage(conv.lastMessage);
-            return [
-              conv.public_id,
-              dec.decryptionFailed
-                ? 'Tin nhắn riêng tư'
-                : `${conv.lastMessage.isOwnMessage ? 'Bạn: ' : ''}${dec.plaintext}`,
-            ] as const;
-          }),
-        );
-        setPreviewsByConvId((prev) => {
-          const next = { ...prev };
-          for (const [cid, text] of previewEntries) {
-            next[cid] = text;
-          }
-          return next;
-        });
-
-        // Chỉ truy vấn trạng thái hoạt động cho các hội thoại thuộc Hộp thư chính (`primary`).
-        if (
-          tabToLoad === 'primary' &&
-          data.items.length > 0 &&
-          (realtime?.activeStatusEnabled ?? true)
-        ) {
-          const peerIds = data.items
-            .filter(
-              (item) => !item.isAwaitingPeerAcceptance && item.myState.inboxState === 'primary',
-            )
-            .map((item) => item.peer.public_id);
-
-          if (peerIds.length > 0) {
-            const presRes = await authFetch('/api/v1/presence/query', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ userPublicIds: peerIds }),
-            });
-            if (presRes.ok) {
-              const presData = (await presRes.json()) as {
-                readonly presences?: Record<string, PresenceStatusDto | null>;
-              };
-              if (presData.presences) {
-                setPresences(presData.presences);
-              }
-            }
-          }
-        }
-      } finally {
-        setLoadingConversations(false);
-      }
-    },
-    [decryptSingleMessage, realtime?.activeStatusEnabled, targetConversationParam],
-  );
-
-  // Mở hoặc khởi tạo hội thoại trực tiếp với 1 userPublicId.
-  const openOrCreateDirectConversation = React.useCallback(
-    async (recipientPublicId: string) => {
-      setChatError(null);
-      const response = await authFetch('/api/v1/conversations/direct', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ recipientPublicId }),
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          readonly error?: { readonly message?: string };
-        } | null;
-        throw new Error(body?.error?.message ?? 'Không thể mở cuộc trò chuyện với tài khoản này.');
-      }
-
-      const data = (await response.json()) as { readonly conversation: ConversationSummaryDto };
-      setActiveTab('primary');
-      setSelectedConversation(data.conversation);
-      void loadConversations('primary');
-    },
-    [loadConversations],
-  );
-
-  // Tải lịch sử tin nhắn và khóa công khai của đối phương khi chọn 1 cuộc hội thoại.
-  const loadSelectedConversationThread = React.useCallback(
-    async (conv: ConversationSummaryDto) => {
-      setLoadingMessages(true);
-      setLoadingPeerKeys(true);
-      setChatError(null);
-
-      try {
-        const [msgRes, peerKeysRes] = await Promise.all([
-          authFetch(
-            `/api/v1/conversations/${encodeURIComponent(conv.public_id)}/messages?limit=40`,
-          ),
-          authFetch(`/api/v1/e2ee/users/${encodeURIComponent(conv.peer.public_id)}/keys`),
-        ]);
-
-        let currentPeerBundle: UserE2eeKeyBundleDto | null = null;
-        if (peerKeysRes.ok) {
-          currentPeerBundle = (await peerKeysRes.json()) as UserE2eeKeyBundleDto;
-          setPeerKeyBundle(currentPeerBundle);
-        } else {
-          setPeerKeyBundle(null);
-        }
-        setLoadingPeerKeys(false);
-
-        if (!msgRes.ok) {
-          setMessages([]);
-          return;
-        }
-
-        const msgData = (await msgRes.json()) as MessageListResult;
-        const decryptedItems = await Promise.all(
-          msgData.items.map((item) => {
-            const expectedDevices = item.isOwnMessage
-              ? ownKeyBundle?.devices
-              : currentPeerBundle?.devices;
-            return decryptSingleMessage(item, expectedDevices);
-          }),
-        );
-
-        let highestSeq = 0;
-        for (const item of msgData.items) {
-          if (item.seq > highestSeq) {
-            highestSeq = item.seq;
-          }
-        }
-        maxSeqByConvRef.current.set(conv.public_id, highestSeq);
-        setMessages(decryptedItems);
-        setTimeout(() => scrollToBottom(), 40);
-      } finally {
-        setLoadingMessages(false);
-        setLoadingPeerKeys(false);
-      }
-    },
-    [decryptSingleMessage, ownKeyBundle?.devices, scrollToBottom],
-  );
-
-  // Delta-sync khi nhận sự kiện Realtime `chat.message.created` (chỉ chứa metadata, tải bản mã qua ?afterSeq=...).
-  const deltaSyncConversationMessages = React.useCallback(
-    async (conversationPublicId: string) => {
-      const currentConv = selectedConvRef.current;
-      if (!currentConv || currentConv.public_id !== conversationPublicId) {
-        void loadConversations(activeTab);
-        return;
-      }
-
-      const lastKnownSeq = maxSeqByConvRef.current.get(conversationPublicId) ?? 0;
-      try {
-        const res = await authFetch(
-          `/api/v1/conversations/${encodeURIComponent(conversationPublicId)}/messages?afterSeq=${lastKnownSeq}&limit=50`,
-        );
-        if (!res.ok) {
-          return;
-        }
-        const data = (await res.json()) as MessageListResult;
-        if (data.items.length === 0) {
-          return;
-        }
-
-        const decryptedNew = await Promise.all(
-          data.items.map((item) => {
-            const expectedDevices = item.isOwnMessage
-              ? ownKeyBundle?.devices
-              : peerKeyBundle?.devices;
-            return decryptSingleMessage(item, expectedDevices);
-          }),
-        );
-
-        let highestSeq = lastKnownSeq;
-        for (const item of data.items) {
-          if (item.seq > highestSeq) {
-            highestSeq = item.seq;
-          }
-        }
-        maxSeqByConvRef.current.set(conversationPublicId, highestSeq);
-
-        setMessages((prev) => {
-          const byClientMsgId = new Map(prev.map((m) => [m.dto.clientMsgId, m]));
-          for (const incoming of decryptedNew) {
-            byClientMsgId.set(incoming.dto.clientMsgId, incoming);
-          }
-          return Array.from(byClientMsgId.values()).sort((a, b) => a.dto.seq - b.dto.seq);
-        });
-
-        const latest = decryptedNew[decryptedNew.length - 1];
-        if (latest) {
-          setPreviewsByConvId((prev) => ({
-            ...prev,
-            [conversationPublicId]: `${latest.dto.isOwnMessage ? 'Bạn: ' : ''}${latest.plaintext}`,
-          }));
-        }
-        setTimeout(() => scrollToBottom(), 40);
-        void loadConversations(activeTab);
-      } catch {
-        // Bỏ qua lỗi mạng tạm thời.
-      }
-    },
-    [
-      activeTab,
-      decryptSingleMessage,
-      loadConversations,
-      ownKeyBundle?.devices,
-      peerKeyBundle?.devices,
-      scrollToBottom,
-    ],
-  );
-
-  React.useEffect(() => {
-    const timer = setTimeout(() => {
-      void refreshOwnE2eeStatus();
-    }, 0);
-    return () => clearTimeout(timer);
+    void refreshOwnE2eeStatus();
   }, [refreshOwnE2eeStatus]);
 
+  // Đồng bộ tab từ URL query param `?tab=pending` nếu có.
   React.useEffect(() => {
-    const timer = setTimeout(() => {
-      void loadConversations(activeTab);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [activeTab, loadConversations]);
+    if (!setActiveTab) {
+      return;
+    }
+    if (tabQueryParam === 'pending' && activeTab !== 'pending') {
+      setActiveTab('pending');
+    }
+  }, [activeTab, setActiveTab, tabQueryParam]);
+
+  // Tải danh sách hội thoại: nếu đã có sẵn trong RAM cache thì chạy đồng bộ ngầm (background: true),
+  // hiển thị danh sách ngay lập tức mà không nháy "Đang tải hộp thư...".
+  React.useEffect(() => {
+    if (!loadConversations) {
+      return;
+    }
+    void loadConversations(activeTab, { background: hasLoadedCurrentTab });
+  }, [activeTab, hasLoadedCurrentTab, loadConversations]);
+
+  // Xử lý query `?conversation=<convPublicId>` từ thông báo.
+  React.useEffect(() => {
+    if (
+      !targetConversationParam ||
+      handledConvParamRef.current === targetConversationParam ||
+      !openConversationThread
+    ) {
+      return;
+    }
+    const found = conversations.find((c) => c.public_id === targetConversationParam);
+    if (found) {
+      handledConvParamRef.current = targetConversationParam;
+      void openConversationThread(found);
+    }
+  }, [conversations, openConversationThread, targetConversationParam]);
 
   // Xử lý query `?to=<userPublicId>` từ nút "Nhắn tin" trên trang cá nhân `/u/[handle]`.
   React.useEffect(() => {
     if (
       !targetToPublicIdParam ||
       handledToParamRef.current === targetToPublicIdParam ||
-      targetToPublicIdParam.toLowerCase() === currentUserPublicId.toLowerCase()
+      targetToPublicIdParam.toLowerCase() === currentUserPublicId.toLowerCase() ||
+      !openOrCreateDirectConversation
     ) {
       return;
     }
     handledToParamRef.current = targetToPublicIdParam;
-    const timer = setTimeout(() => {
-      void openOrCreateDirectConversation(targetToPublicIdParam)
-        .then(() => {
-          // Xóa tham số `?to=` trên thanh địa chỉ sau khi đã mở khung soạn thảo để nếu người dùng
-          // rời đi mà chưa gửi tin nhắn nào, quay lại `/messages` sẽ không tạo đoạn chat trống.
-          router.replace('/messages', { scroll: false });
-        })
-        .catch((err) => {
-          setChatError(err instanceof Error ? err.message : 'Không thể mở cuộc trò chuyện.');
-        });
-    }, 0);
-    return () => clearTimeout(timer);
+    void openOrCreateDirectConversation(targetToPublicIdParam)
+      .then(() => {
+        router.replace('/messages', { scroll: false });
+      })
+      .catch((err) => {
+        setChatError(err instanceof Error ? err.message : 'Không thể mở cuộc trò chuyện.');
+      });
   }, [currentUserPublicId, openOrCreateDirectConversation, router, targetToPublicIdParam]);
 
+  // Khi đang có `selectedConversation` từ RAM cache, đảm bảo luồng tin nhắn của hội thoại đó đã được mở/đồng bộ ngầm.
+  const selectedConvPublicId = selectedConversation?.public_id ?? null;
   React.useEffect(() => {
-    if (!selectedConversation) {
+    if (!selectedConversation || !openConversationThread) {
       return;
     }
-    const timer = setTimeout(() => {
-      void loadSelectedConversationThread(selectedConversation);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [loadSelectedConversationThread, selectedConversation]);
+    void openConversationThread(selectedConversation);
+    // Chỉ kích hoạt khi đổi ID cuộc hội thoại đang chọn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedConvPublicId, openConversationThread]);
 
-  // Lắng nghe sự kiện Realtime từ RealtimePresenceProvider.
-  React.useEffect(() => {
-    if (!realtime?.subscribeChatEvents) {
+  // Giữ nguyên vị trí cuộn (Scroll Anchoring) khi nạp tin nhắn cũ lên đầu + Cuộn thông minh khi có tin mới.
+  React.useLayoutEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container || !selectedConversation) {
       return;
     }
-    return realtime.subscribeChatEvents((event) => {
-      if (event.event === 'chat.message.created') {
-        const convId =
-          typeof event.data.conversationPublicId === 'string'
-            ? event.data.conversationPublicId
-            : null;
-        if (convId) {
-          void deltaSyncConversationMessages(convId);
-        }
-        return;
-      }
 
-      if (event.event === 'chat.conversation.updated') {
-        void loadConversations(activeTab);
-        const current = selectedConvRef.current;
-        if (
-          current &&
-          typeof event.data.conversationPublicId === 'string' &&
-          event.data.conversationPublicId === current.public_id
-        ) {
-          void authFetch(`/api/v1/conversations/${encodeURIComponent(current.public_id)}`).then(
-            async (res) => {
-              if (res.ok) {
-                const body = (await res.json()) as {
-                  readonly conversation: ConversationSummaryDto;
-                };
-                setSelectedConversation(body.conversation);
-              }
-            },
-          );
-        }
+    const convId = selectedConversation.public_id;
+    const anchor = scrollAnchorRef.current;
+
+    // 1. Scroll Anchoring khi chèn thêm trang tin nhắn cũ hơn (`beforeSeq`) lên đầu danh sách.
+    if (anchor && anchor.convId === convId && messages.length > anchor.prevCount) {
+      const heightDiff = container.scrollHeight - anchor.prevScrollHeight;
+      container.scrollTop = anchor.prevScrollTop + heightDiff;
+      scrollAnchorRef.current = null;
+      return;
+    }
+
+    const latestItem = messages[messages.length - 1];
+    const latestKey = latestItem ? `${convId}:${latestItem.dto.clientMsgId}` : `${convId}:empty`;
+
+    // 2. Khi vừa mở cuộc trò chuyện: đặt ngay ở vị trí cuối cùng của cuộc trò chuyện.
+    if (lastScrolledConvIdRef.current !== convId) {
+      if (activeThread?.hasInitialized) {
+        container.scrollTop = container.scrollHeight;
+        isNearBottomRef.current = true;
+        lastScrolledConvIdRef.current = convId;
+        lastBottomItemKeyRef.current = latestKey;
       }
-    });
-  }, [activeTab, deltaSyncConversationMessages, loadConversations, realtime]);
+      return;
+    }
+
+    // 3. Khi có tin nhắn mới thêm vào đáy: chỉ tự cuộn xuống đáy nếu người dùng tự gửi tin
+    //    HOẶC người dùng đang đứng ở gần đáy (`<= 120px`). Tuyệt đối không kéo xuống đáy khi đang đọc tin cũ ở trên.
+    if (lastBottomItemKeyRef.current !== latestKey) {
+      lastBottomItemKeyRef.current = latestKey;
+      if (latestItem?.dto.isOwnMessage || isNearBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+        isNearBottomRef.current = true;
+      }
+    }
+  }, [activeThread?.hasInitialized, messages, selectedConversation]);
+
+  const handleMessagesScroll = React.useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container || !selectedConversation || !chatStore) {
+      return;
+    }
+
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    isNearBottomRef.current = distanceFromBottom <= 120;
+
+    if (
+      container.scrollTop <= 64 &&
+      hasOlderMessages &&
+      !loadingOlderMessages &&
+      !scrollAnchorRef.current
+    ) {
+      scrollAnchorRef.current = {
+        convId: selectedConversation.public_id,
+        prevScrollHeight: container.scrollHeight,
+        prevScrollTop: container.scrollTop,
+        prevCount: messages.length,
+      };
+      void chatStore.loadOlderMessages(selectedConversation.public_id).then((added) => {
+        if (!added) {
+          scrollAnchorRef.current = null;
+        }
+      });
+    }
+  }, [chatStore, hasOlderMessages, loadingOlderMessages, messages.length, selectedConversation]);
 
   async function handleSendMessage(event?: React.FormEvent) {
     event?.preventDefault();
-    if (!selectedConversation || sendingMessage) {
+    if (!selectedConversation || !chatStore) {
       return;
     }
 
@@ -544,146 +313,51 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       return;
     }
 
-    // Chặn gửi nếu người nhận chưa có khóa thiết bị nào được đăng ký.
-    if (!peerKeyBundle || peerKeyBundle.devices.length === 0) {
+    if (peerKeyBundle && peerKeyBundle.devices.length === 0) {
       setChatError(
         `@${selectedConversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị nào. Bạn có thể nhắn tin khi họ trực tuyến.`,
       );
       return;
     }
 
-    setSendingMessage(true);
     setChatError(null);
-    const clientMsgId = `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    const nowIso = new Date().toISOString();
-    const optimisticSeq = (maxSeqByConvRef.current.get(selectedConversation.public_id) ?? 0) + 1;
-
-    const optimisticItem: DecryptedMessageViewItem = {
-      dto: {
-        public_id: clientMsgId,
-        conversationPublicId: selectedConversation.public_id,
-        senderPublicId: currentUserPublicId,
-        isOwnMessage: true,
-        seq: optimisticSeq,
-        clientMsgId,
-        messageType: 'text',
-        ciphertext: null,
-        cryptoHeader: null,
-        editCount: 0,
-        editedAt: null,
-        recalledAt: null,
-        createdAt: nowIso,
-      },
-      plaintext: trimmed,
-      decryptionFailed: false,
-      sending: true,
-    };
-
     setDraftText('');
-    setMessages((prev) => [...prev, optimisticItem]);
-    setTimeout(() => scrollToBottom(), 20);
+    isNearBottomRef.current = true;
 
     try {
-      await realtime?.ensureE2eeDeviceRegistered();
-      const senderDevice = await getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId);
-
-      const envelope = await encryptDirectMessage({
-        conversationPublicId: selectedConversation.public_id,
-        senderPublicId: currentUserPublicId,
-        clientMsgId,
+      await chatStore.sendOptimisticTextMessage({
+        conversation: selectedConversation,
         plaintext: trimmed,
-        senderDevice,
-        recipientDevices: peerKeyBundle.devices,
-        senderOtherDevices: ownKeyBundle?.devices ?? [],
-        sentAt: nowIso,
       });
-
-      const response = await authFetch(
-        `/api/v1/conversations/${encodeURIComponent(selectedConversation.public_id)}/messages`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clientMsgId,
-            messageType: 'text',
-            ciphertext: envelope.ciphertext,
-            cryptoHeader: envelope.cryptoHeader,
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        const errBody = (await response.json().catch(() => null)) as {
-          readonly error?: { readonly message?: string };
-        } | null;
-        throw new Error(errBody?.error?.message ?? 'Không thể gửi tin nhắn lúc này.');
-      }
-
-      const data = (await response.json()) as SendMessageResult;
-      maxSeqByConvRef.current.set(
-        selectedConversation.public_id,
-        Math.max(
-          maxSeqByConvRef.current.get(selectedConversation.public_id) ?? 0,
-          data.message.seq,
-        ),
-      );
-
-      setMessages((prev) =>
-        prev.map((item) =>
-          item.dto.clientMsgId === clientMsgId
-            ? {
-                dto: data.message,
-                plaintext: trimmed,
-                decryptionFailed: false,
-                sending: false,
-              }
-            : item,
-        ),
-      );
-      setSelectedConversation(data.conversation);
-      setPreviewsByConvId((prev) => ({
-        ...prev,
-        [selectedConversation.public_id]: `Bạn: ${trimmed}`,
-      }));
-      void loadConversations(activeTab);
     } catch (error) {
-      setMessages((prev) => prev.filter((item) => item.dto.clientMsgId !== clientMsgId));
-      setDraftText(trimmed);
       setChatError(error instanceof Error ? error.message : 'Không thể gửi tin nhắn lúc này.');
-    } finally {
-      setSendingMessage(false);
+    }
+  }
+
+  async function handleRetryFailedMessage(clientMsgId: string, plaintext: string) {
+    if (!selectedConversation || !chatStore) {
+      return;
+    }
+    setChatError(null);
+    try {
+      await chatStore.sendOptimisticTextMessage({
+        conversation: selectedConversation,
+        plaintext,
+        retryClientMsgId: clientMsgId,
+      });
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : 'Không thể gửi tin nhắn lúc này.');
     }
   }
 
   async function handleAcceptRequest() {
-    if (!selectedConversation || actionBusy) {
+    if (!selectedConversation || !chatStore || actionBusy) {
       return;
     }
     setActionBusy(true);
     setChatError(null);
     try {
-      const response = await authFetch(
-        `/api/v1/conversations/${encodeURIComponent(selectedConversation.public_id)}/accept`,
-        { method: 'POST' },
-      );
-      if (!response.ok) {
-        const errBody = (await response.json().catch(() => null)) as {
-          readonly error?: { readonly message?: string };
-        } | null;
-        throw new Error(errBody?.error?.message ?? 'Không thể chấp nhận cuộc trò chuyện.');
-      }
-
-      setActiveTab('primary');
-      const convRes = await authFetch(
-        `/api/v1/conversations/${encodeURIComponent(selectedConversation.public_id)}`,
-      );
-      if (convRes.ok) {
-        const convData = (await convRes.json()) as {
-          readonly conversation: ConversationSummaryDto;
-        };
-        setSelectedConversation(convData.conversation);
-      }
-      await loadConversations('primary');
+      await chatStore.acceptSelectedPendingConversation(selectedConversation.public_id);
     } catch (error) {
       setChatError(error instanceof Error ? error.message : 'Không thể thực hiện thao tác.');
     } finally {
@@ -692,23 +366,13 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   }
 
   async function handleDeclineRequest() {
-    if (!selectedConversation || actionBusy) {
+    if (!selectedConversation || !chatStore || actionBusy) {
       return;
     }
     setActionBusy(true);
     setChatError(null);
     try {
-      const targetId = selectedConversation.public_id;
-      const response = await authFetch(
-        `/api/v1/conversations/${encodeURIComponent(targetId)}/decline`,
-        { method: 'POST' },
-      );
-      if (!response.ok) {
-        throw new Error('Không thể xóa yêu cầu tin nhắn lúc này.');
-      }
-      setSelectedConversation(null);
-      setConversations((prev) => prev.filter((c) => c.public_id !== targetId));
-      setPendingCount((c) => Math.max(0, c - 1));
+      await chatStore.declineSelectedPendingConversation(selectedConversation.public_id);
     } catch (error) {
       setChatError(error instanceof Error ? error.message : 'Không thể xóa cuộc trò chuyện.');
     } finally {
@@ -717,7 +381,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   }
 
   async function handleConfirmBlockPeer() {
-    if (!selectedConversation || actionBusy) {
+    if (!selectedConversation || !chatStore || actionBusy) {
       return;
     }
     setActionBusy(true);
@@ -731,9 +395,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       if (response.ok) {
         setConfirmBlockOpen(false);
         setInfoDrawerOpen(false);
-        setSelectedConversation(null);
-        setConversations((prev) => prev.filter((c) => c.public_id !== targetConvId));
-        void loadConversations(activeTab);
+        chatStore.removeBlockedPeerConversationLocally(targetConvId);
         router.refresh();
       }
     } finally {
@@ -750,11 +412,22 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       : null;
 
   const isViewingPendingRequest = selectedConversation?.myState.inboxState === 'pending';
-  const recipientHasZeroKeys =
-    !loadingPeerKeys && peerKeyBundle !== null && peerKeyBundle.devices.length === 0;
+  const recipientHasZeroKeys = peerKeyBundle !== null && peerKeyBundle.devices.length === 0;
+
+  const effectivePeerLastReadSeq =
+    (realtime?.readReceiptsEnabled ?? true) &&
+    selectedConversation?.myState.inboxState === 'primary' &&
+    !selectedConversation.isAwaitingPeerAcceptance
+      ? (selectedConversation?.peerLastReadSeq ?? null)
+      : null;
+
+  const clusteredMessages = React.useMemo(
+    () => buildClusteredMessageEntries(messages, effectivePeerLastReadSeq),
+    [effectivePeerLastReadSeq, messages],
+  );
 
   return (
-    <>
+    <TooltipProvider delayDuration={180}>
       <div className="flex h-[calc(100vh-7.5rem)] min-h-[540px] overflow-hidden rounded-2xl border bg-background shadow-sm">
         {/* Cột trái: Danh sách hội thoại & 2 Tab Chính / Tin nhắn đang chờ */}
         <section
@@ -810,7 +483,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
               type="button"
               role="tab"
               aria-selected={activeTab === 'primary'}
-              onClick={() => setActiveTab('primary')}
+              onClick={() => chatStore?.setActiveTab('primary')}
               className={cn(
                 'border-b-2 py-2.5 text-xs font-semibold transition-colors',
                 activeTab === 'primary'
@@ -825,7 +498,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
               type="button"
               role="tab"
               aria-selected={activeTab === 'pending'}
-              onClick={() => setActiveTab('pending')}
+              onClick={() => chatStore?.setActiveTab('pending')}
               className={cn(
                 'inline-flex items-center justify-center gap-1.5 border-b-2 py-2.5 text-xs font-semibold transition-colors',
                 activeTab === 'pending'
@@ -895,6 +568,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
               <ul className="divide-y">
                 {conversations.map((conv) => {
                   const isSelected = selectedConversation?.public_id === conv.public_id;
+                  const isUnread = isConversationUnread(conv);
                   const canShowDot =
                     activeTab === 'primary' &&
                     !conv.isAwaitingPeerAcceptance &&
@@ -908,7 +582,10 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                     <li key={conv.public_id}>
                       <button
                         type="button"
-                        onClick={() => setSelectedConversation(conv)}
+                        onClick={() => {
+                          setChatError(null);
+                          void chatStore?.openConversationThread(conv);
+                        }}
                         className={cn(
                           'flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50',
                           isSelected ? 'bg-muted/80' : null,
@@ -930,15 +607,43 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
 
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
-                            <p className="truncate text-sm font-semibold text-foreground">
+                            <p
+                              className={cn(
+                                'truncate text-sm text-foreground',
+                                isUnread ? 'font-bold' : 'font-medium',
+                              )}
+                            >
                               {conv.peer.fullName}
                             </p>
-                            <span className="shrink-0 text-[11px] text-muted-foreground">
-                              {formatShortTimeVi(conv.lastMessageAt ?? conv.createdAt)}
+                            <span
+                              className={cn(
+                                'shrink-0 text-[11px]',
+                                isUnread
+                                  ? 'font-semibold text-foreground'
+                                  : 'text-muted-foreground',
+                              )}
+                            >
+                              {formatConversationShortTimeVi(conv.lastMessageAt ?? conv.createdAt)}
                             </span>
                           </div>
-                          <p className="truncate text-xs text-muted-foreground">{previewText}</p>
+                          <p
+                            className={cn(
+                              'truncate text-xs',
+                              isUnread
+                                ? 'font-semibold text-foreground'
+                                : 'font-normal text-muted-foreground',
+                            )}
+                          >
+                            {previewText}
+                          </p>
                         </div>
+
+                        {isUnread ? (
+                          <span
+                            aria-label="Tin nhắn chưa đọc"
+                            className="size-2.5 shrink-0 rounded-full bg-primary"
+                          />
+                        ) : null}
                       </button>
                     </li>
                   );
@@ -985,7 +690,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                       variant="ghost"
                       size="icon"
                       aria-label="Quay lại danh sách"
-                      onClick={() => setSelectedConversation(null)}
+                      onClick={() => chatStore?.selectConversation(null)}
                       className="size-8 rounded-full sm:hidden"
                     >
                       <ArrowLeft className="size-4" aria-hidden="true" />
@@ -1038,59 +743,177 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                   </Button>
                 </header>
 
-                {/* Lịch sử tin nhắn */}
-                <div className="flex-1 space-y-4 overflow-y-auto px-4 py-5">
-                  <div className="mx-auto max-w-sm text-center">
-                    <UserAvatar
-                      fullName={selectedConversation.peer.fullName}
-                      avatarUrl={selectedConversation.peer.avatarUrl}
-                      size="lg"
-                      className="mx-auto"
-                    />
-                    <p className="mt-2.5 text-sm font-semibold text-foreground">
-                      {selectedConversation.peer.fullName}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      @{selectedConversation.peer.handle}
-                    </p>
-                    <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-3 py-1 text-[11px] text-muted-foreground">
-                      <Lock className="size-3" aria-hidden="true" />
-                      <span>Tin nhắn được bảo vệ riêng tư</span>
+                {/* Lịch sử tin nhắn (Cuộn lên để tải thêm + Gom cụm bong bóng + Tooltip giờ) */}
+                <div
+                  ref={messagesContainerRef}
+                  onScroll={handleMessagesScroll}
+                  className="flex-1 overflow-y-auto px-4 py-5"
+                >
+                  {loadingOlderMessages ? (
+                    <div className="mb-3 flex items-center justify-center py-1">
+                      <Loader2
+                        aria-label="Đang tải tin nhắn cũ hơn"
+                        className="size-4 animate-spin text-muted-foreground"
+                      />
                     </div>
-                  </div>
+                  ) : null}
 
-                  {loadingMessages ? (
-                    <div className="flex items-center justify-center gap-2 py-8 text-xs text-muted-foreground">
-                      <Loader2 className="size-4 animate-spin text-primary" aria-hidden="true" />
-                      <span>Đang tải cuộc trò chuyện...</span>
+                  {!hasOlderMessages ? (
+                    <div className="mx-auto mb-5 max-w-sm text-center">
+                      <UserAvatar
+                        fullName={selectedConversation.peer.fullName}
+                        avatarUrl={selectedConversation.peer.avatarUrl}
+                        size="lg"
+                        className="mx-auto"
+                      />
+                      <p className="mt-2.5 text-sm font-semibold text-foreground">
+                        {selectedConversation.peer.fullName}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        @{selectedConversation.peer.handle}
+                      </p>
+                      <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-3 py-1 text-[11px] text-muted-foreground">
+                        <Lock className="size-3" aria-hidden="true" />
+                        <span>Tin nhắn được bảo vệ riêng tư</span>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {loadingInitialMessages ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2
+                        aria-label="Đang đồng bộ tin nhắn"
+                        className="size-4 animate-spin text-muted-foreground"
+                      />
                     </div>
                   ) : (
-                    <div className="space-y-2.5">
-                      {messages.map((item) => {
+                    <div className="flex flex-col">
+                      {clusteredMessages.map((entry, idx) => {
+                        const {
+                          item,
+                          clusterPosition,
+                          showPeerAvatar,
+                          timeDividerLabel,
+                          isLastReadByPeer,
+                        } = entry;
                         const isMine = item.dto.isOwnMessage;
+                        const isNewCluster =
+                          clusterPosition === 'single' || clusterPosition === 'first';
+                        const exactTooltipTime = formatExactMessageTooltipTimeVi(
+                          item.dto.createdAt,
+                        );
+
                         return (
-                          <div
-                            key={item.dto.clientMsgId}
-                            className={cn('flex flex-col', isMine ? 'items-end' : 'items-start')}
-                          >
+                          <React.Fragment key={item.dto.clientMsgId}>
+                            {timeDividerLabel ? (
+                              <div className="my-3.5 flex justify-center">
+                                <span className="rounded-full bg-muted/50 px-3 py-0.5 text-[11px] font-medium text-muted-foreground">
+                                  {timeDividerLabel}
+                                </span>
+                              </div>
+                            ) : null}
+
                             <div
                               className={cn(
-                                'max-w-[78%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed break-words whitespace-pre-wrap shadow-2xs',
-                                isMine
-                                  ? 'rounded-br-xs bg-primary text-primary-foreground'
-                                  : 'rounded-bl-xs border bg-muted/60 text-foreground',
-                                item.decryptionFailed ? 'italic opacity-80' : null,
+                                'flex flex-col',
+                                isMine ? 'items-end' : 'items-start',
+                                idx === 0 || timeDividerLabel
+                                  ? 'mt-0.5'
+                                  : isNewCluster
+                                    ? 'mt-3'
+                                    : 'mt-0.5',
                               )}
                             >
-                              {item.plaintext}
+                              <div
+                                className={cn(
+                                  'flex max-w-[82%] items-end gap-2',
+                                  isMine ? 'flex-row-reverse' : 'flex-row',
+                                )}
+                              >
+                                {!isMine ? (
+                                  showPeerAvatar ? (
+                                    <UserAvatar
+                                      fullName={selectedConversation.peer.fullName}
+                                      avatarUrl={selectedConversation.peer.avatarUrl}
+                                      size="xs"
+                                      className="size-7 shrink-0"
+                                    />
+                                  ) : (
+                                    <span aria-hidden="true" className="w-7 shrink-0" />
+                                  )
+                                ) : null}
+
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <div
+                                      tabIndex={0}
+                                      className={cn(
+                                        'px-3.5 py-2 text-sm leading-relaxed break-words whitespace-pre-wrap shadow-2xs transition-opacity focus:outline-none',
+                                        getBubbleRadiusClasses(isMine, clusterPosition),
+                                        isMine
+                                          ? 'bg-primary text-primary-foreground'
+                                          : 'border bg-muted/60 text-foreground',
+                                        item.decryptionFailed ? 'italic opacity-80' : null,
+                                        item.sending ? 'opacity-85' : null,
+                                        item.sendError
+                                          ? 'ring-1 ring-destructive/60 opacity-90'
+                                          : null,
+                                      )}
+                                    >
+                                      {item.plaintext}
+                                    </div>
+                                  </TooltipTrigger>
+                                  {exactTooltipTime ? (
+                                    <TooltipContent side={isMine ? 'left' : 'right'}>
+                                      {exactTooltipTime}
+                                    </TooltipContent>
+                                  ) : null}
+                                </Tooltip>
+                              </div>
+
+                              {item.sending ? (
+                                <span className="mt-0.5 px-1 text-[10px] text-muted-foreground">
+                                  Đang gửi...
+                                </span>
+                              ) : null}
+
+                              {item.sendError ? (
+                                <div className="mt-1 flex items-center gap-1.5 px-1 text-[11px] text-destructive">
+                                  <span>Không gửi được</span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void handleRetryFailedMessage(
+                                        item.dto.clientMsgId,
+                                        item.plaintext,
+                                      )
+                                    }
+                                    className="inline-flex items-center gap-1 font-semibold underline hover:opacity-80"
+                                  >
+                                    <RotateCcw className="size-3" aria-hidden="true" />
+                                    <span>Thử lại</span>
+                                  </button>
+                                </div>
+                              ) : null}
+
+                              {isLastReadByPeer ? (
+                                <div
+                                  aria-label="Đã xem"
+                                  className="mt-1 flex items-center gap-1 px-1 text-[11px] font-medium text-muted-foreground"
+                                >
+                                  <UserAvatar
+                                    fullName={selectedConversation.peer.fullName}
+                                    avatarUrl={selectedConversation.peer.avatarUrl}
+                                    size="xs"
+                                    className="size-3.5"
+                                  />
+                                  <span>Đã xem</span>
+                                </div>
+                              ) : null}
                             </div>
-                            <span className="mt-1 px-1 text-[10px] text-muted-foreground">
-                              {item.sending ? 'Đang gửi...' : formatShortTimeVi(item.dto.createdAt)}
-                            </span>
-                          </div>
+                          </React.Fragment>
                         );
                       })}
-                      <div ref={messagesEndRef} />
                     </div>
                   )}
                 </div>
@@ -1176,7 +999,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         className="flex items-end gap-1.5 rounded-2xl border bg-muted/30 px-2.5 py-1.5 focus-within:border-primary/60 focus-within:bg-background"
                       >
                         <EmojiPickerPopover
-                          disabled={sendingMessage || !selectedConversation.canSendMoreMessages}
+                          disabled={!selectedConversation.canSendMoreMessages}
                           onSelectEmoji={(emoji) => setDraftText((prev) => `${prev}${emoji}`)}
                         />
 
@@ -1210,7 +1033,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         <textarea
                           rows={1}
                           value={draftText}
-                          disabled={sendingMessage || !selectedConversation.canSendMoreMessages}
+                          disabled={!selectedConversation.canSendMoreMessages}
                           placeholder={
                             selectedConversation.canSendMoreMessages
                               ? 'Nhắn tin...'
@@ -1229,21 +1052,11 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         <Button
                           type="submit"
                           size="sm"
-                          disabled={
-                            sendingMessage ||
-                            !draftText.trim() ||
-                            !selectedConversation.canSendMoreMessages
-                          }
+                          disabled={!draftText.trim() || !selectedConversation.canSendMoreMessages}
                           className="h-8 rounded-xl px-3 text-xs"
                         >
-                          {sendingMessage ? (
-                            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                          ) : (
-                            <>
-                              <Send className="size-3.5" aria-hidden="true" />
-                              <span>Gửi</span>
-                            </>
-                          )}
+                          <Send className="size-3.5" aria-hidden="true" />
+                          <span>Gửi</span>
                         </Button>
                       </form>
                     )}
@@ -1271,7 +1084,11 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
         key={newMessageModalOpen ? 'new-msg-open' : 'new-msg-closed'}
         open={newMessageModalOpen}
         onClose={() => setNewMessageModalOpen(false)}
-        onSelectRecipient={openOrCreateDirectConversation}
+        onSelectRecipient={async (recipientId) => {
+          if (chatStore) {
+            await chatStore.openOrCreateDirectConversation(recipientId);
+          }
+        }}
       />
 
       <PinBackupModal
@@ -1282,11 +1099,11 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
         hasLocalRestoredBackup={hasLocalRestoredBackup}
         onClose={() => setPinModalOpen(false)}
         onBackupSynced={() => {
-          void refreshOwnE2eeStatus();
+          void chatStore?.refreshOwnE2eeStatus({ forceBackupFetch: true });
           if (selectedConversation) {
-            void loadSelectedConversationThread(selectedConversation);
+            void chatStore?.openConversationThread(selectedConversation, { forceReload: true });
           }
-          void loadConversations(activeTab);
+          void chatStore?.loadConversations(activeTab, { background: true });
         }}
       />
 
@@ -1306,6 +1123,6 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
           onConfirm={() => void handleConfirmBlockPeer()}
         />
       ) : null}
-    </>
+    </TooltipProvider>
   );
 }

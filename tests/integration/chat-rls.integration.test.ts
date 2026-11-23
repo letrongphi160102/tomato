@@ -7,6 +7,7 @@ import {
   GET as messagesGet,
   POST as messagesPost,
 } from '@/app/api/v1/conversations/[conversationPublicId]/messages/route';
+import { POST as readConversationPost } from '@/app/api/v1/conversations/[conversationPublicId]/read/route';
 import { POST as directConversationPost } from '@/app/api/v1/conversations/direct/route';
 import { GET as conversationsListGet } from '@/app/api/v1/conversations/route';
 import { POST as e2eeDevicesPost } from '@/app/api/v1/e2ee/devices/route';
@@ -663,6 +664,50 @@ describe('Integration M9: PostgreSQL RLS (Non-BYPASSRLS Role), Non-Recursive Pol
       bucket: 'active_now',
       label: 'Đang hoạt động',
     });
+
+    // 2b. Kiểm tra unreadConversationsCount trên PostgreSQL thật & POST /api/v1/conversations/:id/read:
+    //     Trước khi Bob gọi /read, Bob có 1 hội thoại chính chưa đọc từ Alice (unreadConversationsCount = 1),
+    //     còn Alice là người gửi tin cuối nên unreadConversationsCount của Alice = 0.
+    const [bobListBeforeReadRes, aliceListAfterOwnSendRes] = await Promise.all([
+      conversationsListGet(
+        new Request(`${origin}/api/v1/conversations?tab=primary`, {
+          headers: createHeaders(bob.jar, bob.ip),
+        }),
+      ),
+      conversationsListGet(
+        new Request(`${origin}/api/v1/conversations?tab=primary`, {
+          headers: createHeaders(alice.jar, alice.ip),
+        }),
+      ),
+    ]);
+    expect(
+      ((await bobListBeforeReadRes.json()) as { unreadConversationsCount: number })
+        .unreadConversationsCount,
+    ).toBe(1);
+    expect(
+      ((await aliceListAfterOwnSendRes.json()) as { unreadConversationsCount: number })
+        .unreadConversationsCount,
+    ).toBe(0);
+
+    // Bob gọi POST /api/v1/conversations/:id/read -> lastReadSeq tiến lên 1, unreadConversationsCount về 0,
+    // và Alice nhìn thấy peerLastReadSeq = 1.
+    const bobMarkReadRes = await readConversationPost(
+      new Request(`${origin}/api/v1/conversations/${convPublicId}/read`, {
+        method: 'POST',
+        headers: createHeaders(bob.jar, bob.ip, { includeCsrf: true, json: true }),
+        body: JSON.stringify({ lastReadSeq: 1 }),
+      }),
+      { params: Promise.resolve({ conversationPublicId: convPublicId }) },
+    );
+    expect(bobMarkReadRes.status).toBe(200);
+    const bobMarkReadBody = (await bobMarkReadRes.json()) as {
+      lastReadSeq: number;
+      peerLastReadSeq: number | null;
+      unreadConversationsCount: number;
+    };
+    expect(bobMarkReadBody.lastReadSeq).toBe(1);
+    expect(bobMarkReadBody.peerLastReadSeq).toBe(1);
+    expect(bobMarkReadBody.unreadConversationsCount).toBe(0);
 
     // 3. Bob chặn Alice -> đọc tin nhắn trả 404 Not Found.
     const blockRes = await blockPost(

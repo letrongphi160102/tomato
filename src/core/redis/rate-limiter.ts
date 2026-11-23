@@ -228,8 +228,8 @@ export const PRESENCE_RATE_LIMITS = Object.freeze({
  */
 export const CHAT_RATE_LIMITS = Object.freeze({
   registerDeviceByUser: Object.freeze({
-    limit: 20,
-    windowSeconds: 60 * 60,
+    limit: 30,
+    windowSeconds: 15 * 60,
     strategy: 'sliding_window',
   }),
   readKeysByUser: Object.freeze({
@@ -238,12 +238,12 @@ export const CHAT_RATE_LIMITS = Object.freeze({
     strategy: 'sliding_window',
   }),
   writeKeyBackupByUser: Object.freeze({
-    limit: 5,
+    limit: 10,
     windowSeconds: 15 * 60,
     strategy: 'sliding_window',
   }),
   readKeyBackupByUser: Object.freeze({
-    limit: 10,
+    limit: 30,
     windowSeconds: 15 * 60,
     strategy: 'sliding_window',
   }),
@@ -266,6 +266,11 @@ export const CHAT_RATE_LIMITS = Object.freeze({
   conversationActionByUser: Object.freeze({
     limit: 30,
     windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  markReadByUser: Object.freeze({
+    limit: 120,
+    windowSeconds: 60,
     strategy: 'sliding_window',
   }),
   listMessagesByUser: Object.freeze({

@@ -56,7 +56,15 @@ export interface ConversationListRowRecord {
   readonly peerParticipant: ConversationParticipantRow;
   readonly peerUser: Pick<
     UserRow,
-    'id' | 'publicId' | 'handle' | 'fullName' | 'avatarUrl' | 'isPrivate' | 'status' | 'deletedAt'
+    | 'id'
+    | 'publicId'
+    | 'handle'
+    | 'fullName'
+    | 'avatarUrl'
+    | 'isPrivate'
+    | 'showReadReceipts'
+    | 'status'
+    | 'deletedAt'
   >;
   readonly lastMessage: {
     readonly row: MessageRow;
@@ -497,6 +505,86 @@ export class ChatRepository {
       .where(eq(conversationParticipants.conversationId, conversationId));
   }
 
+  async advanceParticipantLastReadSeq(
+    params: {
+      readonly conversationId: string;
+      readonly userId: string;
+      readonly targetSeq: number;
+      readonly conversationLastSeq: number;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<ConversationParticipantRow | null> {
+    const safeClampedSeq = Math.max(0, Math.min(params.targetSeq, params.conversationLastSeq));
+    const rows = await tx
+      .update(conversationParticipants)
+      .set({
+        lastReadSeq: sql`GREATEST(${conversationParticipants.lastReadSeq}, ${safeClampedSeq})`,
+      })
+      .where(
+        and(
+          eq(conversationParticipants.conversationId, params.conversationId),
+          eq(conversationParticipants.userId, params.userId),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async countUnreadPrimaryConversationsForUser(
+    userId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<number> {
+    const rows = await executor
+      .select({
+        count: sql<number>`CAST(COUNT(*) AS INTEGER)`,
+      })
+      .from(conversationParticipants)
+      .innerJoin(conversations, eq(conversationParticipants.conversationId, conversations.id))
+      .where(
+        and(
+          eq(conversationParticipants.userId, userId),
+          eq(conversationParticipants.inboxState, 'primary'),
+          isNull(conversationParticipants.hiddenAt),
+          gt(conversations.lastSeq, 0),
+          sql`EXISTS (
+            SELECT 1
+            FROM ${conversationParticipants} peer_cp
+            INNER JOIN ${users} peer_u ON peer_u.id = peer_cp.user_id
+            WHERE peer_cp.conversation_id = ${conversations.id}
+              AND peer_cp.user_id <> ${userId}
+              AND peer_u.status = 'active'
+              AND peer_u.deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM ${blocks} b
+                WHERE (b.blocker_id = ${userId} AND b.blocked_id = peer_u.id)
+                   OR (b.blocker_id = peer_u.id AND b.blocked_id = ${userId})
+              )
+          )`,
+          sql`EXISTS (
+            SELECT 1
+            FROM ${messages} m
+            WHERE m.conversation_id = ${conversations.id}
+              AND m.sender_id <> ${userId}
+              AND m.seq > GREATEST(
+                ${conversationParticipants.lastReadSeq},
+                ${conversationParticipants.clearedBeforeSeq},
+                COALESCE(
+                  (
+                    SELECT MAX(own_m.seq)
+                    FROM ${messages} own_m
+                    WHERE own_m.conversation_id = ${conversations.id}
+                      AND own_m.sender_id = ${userId}
+                  ),
+                  0
+                )
+              )
+          )`,
+        ),
+      );
+
+    return Number(rows[0]?.count ?? 0);
+  }
+
   async countPendingConversationsForUser(
     userId: string,
     executor: DbExecutor = this.getDefaultDb(),
@@ -578,6 +666,7 @@ export class ChatRepository {
           fullName: users.fullName,
           avatarUrl: users.avatarUrl,
           isPrivate: users.isPrivate,
+          showReadReceipts: users.showReadReceipts,
           status: users.status,
           deletedAt: users.deletedAt,
         },

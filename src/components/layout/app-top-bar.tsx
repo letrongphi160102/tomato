@@ -23,6 +23,7 @@ import {
 import { TomatoLogo } from '@/components/brand/tomato-logo';
 import { NotificationBell } from '@/components/layout/notification-bell';
 import { UserSearchBar } from '@/components/layout/user-search-bar';
+import { useChatStore } from '@/components/messages/chat-store-context';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { Button } from '@/components/ui/button';
@@ -41,6 +42,7 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const realtime = useRealtimePresence();
+  const chatStore = useChatStore();
 
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = React.useState(false);
@@ -49,6 +51,8 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
 
   const effectiveHandle = handle ?? user.username;
   const profilePath = `/u/${encodeURIComponent(effectiveHandle)}`;
+  const unreadMessagesCount = Math.max(0, chatStore?.unreadConversationsCount ?? 0);
+  const unreadMessagesBadgeText = unreadMessagesCount > 99 ? '99+' : String(unreadMessagesCount);
 
   React.useEffect(() => {
     if (!menuOpen) {
@@ -84,8 +88,9 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
       return;
     }
     setLoggingOut(true);
-    // Đóng kết nối Realtime (Ably/EventSource), xóa mốc Access Token và dừng heartbeat ngay lập tức khi đăng xuất.
+    // Đóng kết nối Realtime (Ably/EventSource), xóa RAM cache tin nhắn, xóa mốc Access Token và dừng heartbeat ngay lập tức khi đăng xuất.
     clearAccessTokenFreshness();
+    chatStore?.clearAllChatCache();
     realtime?.disconnectAll();
     disconnectAllRealtimeConnections();
     try {
@@ -131,8 +136,13 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
 
             <Link
               href="/messages"
+              aria-label={
+                unreadMessagesCount > 0
+                  ? `Tin nhắn (${unreadMessagesCount} cuộc trò chuyện chưa đọc)`
+                  : 'Tin nhắn'
+              }
               className={cn(
-                'inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
+                'relative inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
                 isMessagesActive
                   ? 'bg-primary/10 text-primary'
                   : 'text-muted-foreground hover:bg-muted hover:text-foreground',
@@ -140,6 +150,14 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
             >
               <MessageCircle className="size-4" aria-hidden="true" />
               <span>Tin nhắn</span>
+              {unreadMessagesCount > 0 ? (
+                <span
+                  aria-hidden="true"
+                  className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-destructive px-1.5 text-[10px] font-bold leading-none text-destructive-foreground shadow-xs"
+                >
+                  {unreadMessagesBadgeText}
+                </span>
+              ) : null}
             </Link>
 
             <Link
@@ -253,10 +271,20 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
                     href="/messages"
                     role="menuitem"
                     onClick={() => setMenuOpen(false)}
-                    className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
+                    className="flex items-center justify-between gap-2.5 rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
                   >
-                    <MessageCircle className="size-4 text-muted-foreground" aria-hidden="true" />
-                    <span>Tin nhắn</span>
+                    <span className="flex items-center gap-2.5">
+                      <MessageCircle className="size-4 text-muted-foreground" aria-hidden="true" />
+                      <span>Tin nhắn</span>
+                    </span>
+                    {unreadMessagesCount > 0 ? (
+                      <span
+                        aria-hidden="true"
+                        className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-destructive px-1.5 text-[10px] font-bold leading-none text-destructive-foreground"
+                      >
+                        {unreadMessagesBadgeText}
+                      </span>
+                    ) : null}
                   </Link>
 
                   <Link

@@ -21,10 +21,38 @@ export type ChatAction =
   | 'chat:conversation:list'
   | 'chat:conversation:create_or_get'
   | 'chat:conversation:view'
+  | 'chat:conversation:read'
   | 'chat:conversation:accept'
   | 'chat:conversation:decline'
   | 'chat:message:list'
   | 'chat:message:send';
+
+export interface SymmetricReadReceiptContext {
+  readonly actorShowReadReceipts: boolean;
+  readonly peerShowReadReceipts: boolean;
+  readonly actorInboxState: ConversationParticipantRow['inboxState'];
+  readonly peerInboxState: ConversationParticipantRow['inboxState'];
+  readonly relationship: SocialRelationshipSnapshot | null | undefined;
+}
+
+/**
+ * Cưỡng chế đối xứng tuyệt đối cho Trạng thái "Đã xem" (Read Receipts):
+ * Chỉ được phép trả `peerLastReadSeq` hoặc phát sự kiện `chat.conversation.read` cho đối phương
+ * khi CẢ HAI người đều bật `show_read_receipts = true`, hội thoại thuộc `primary` ở cả 2 phía
+ * và không có quan hệ chặn 2 chiều.
+ */
+export function canExposeSymmetricReadReceipt(ctx: SymmetricReadReceiptContext): boolean {
+  if (!ctx.actorShowReadReceipts || !ctx.peerShowReadReceipts) {
+    return false;
+  }
+  if (ctx.actorInboxState !== 'primary' || ctx.peerInboxState !== 'primary') {
+    return false;
+  }
+  if (!ctx.relationship || isBidirectionallyBlocked(ctx.relationship)) {
+    return false;
+  }
+  return true;
+}
 
 export interface ChatPolicyResource {
   readonly targetUser?: ChatPolicyUser | null;
@@ -84,6 +112,7 @@ export function authorizeChatAction(
     }
 
     case 'chat:conversation:view':
+    case 'chat:conversation:read':
     case 'chat:conversation:accept':
     case 'chat:conversation:decline':
     case 'chat:message:list':

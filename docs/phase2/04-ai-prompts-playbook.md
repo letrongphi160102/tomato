@@ -153,7 +153,7 @@ Tài liệu này dùng để điều khiển Antigravity (hoặc Cursor/Claude C
 
 ---
 
-### CỘT MỐC M10 — Sửa/Thu hồi trong 5 phút, Xóa 1 phía, Xóa hội thoại & Trạng thái Đã xem
+### CỘT MỐC M10 — Sửa/Thu hồi trong 5 phút, Xóa 1 phía, Xóa hội thoại & Trạng thái Đã xem 
 
 > **Nhiệm vụ: Thực hiện Cột mốc M10 (Thao tác Tin nhắn Nâng cao & Trạng thái Đã xem)**
 > Đọc kỹ `docs/phase2/01-functional-spec.md` (Mục 3.6.B, 3.7) và `docs/phase2/03-design-security-roadmap.md` (Mục 1.4, 3.2).
@@ -166,7 +166,7 @@ Tài liệu này dùng để điều khiển Antigravity (hoặc Cursor/Claude C
 > 3. **Xóa 1 dòng tin nhắn phía mình & Xóa đoạn hội thoại:**
 >    - `DELETE /api/v1/messages/:publicId/for-me`: Ghi vào `message_user_deletions` cho đúng `actor.id`. Tin nhắn biến mất hoàn toàn khi `actor` tải lại, nhưng **không ảnh hưởng gì đến phía đối phương**.
 >    - `DELETE /api/v1/conversations/:publicId`: Cập nhật `cleared_before_seq = conversation.last_seq` và `hidden_at = NOW()` trên dòng `conversation_participants` của riêng `actor`. Khi có tin nhắn mới đến sau đó, tự mở lại hội thoại (`hidden_at = NULL`) và chỉ hiện các tin có `seq > cleared_before_seq`.
-> 4. **Trạng thái "Đã xem" Đối xứng:**
+> 4. **Trạng thái "Đã xem" Đối xứng:** (đã làm, nếu cần thì cập nhật, không cần thì bỏ qua)
 >    - `POST /api/v1/conversations/:publicId/read`: Cập nhật `last_read_seq` của `actor`.
 >    - **Cưỡng chế đối xứng ở Server:** Chỉ phát sự kiện `read_receipt` và trả `otherLastReadSeq` khi hội thoại ở trạng thái `primary`, không bị chặn, VÀ **cả hai người đều đang bật `show_read_receipts = true`**.
 > 5. **Tối ưu UX trên `/messages`:** Menu thao tác gọn gàng khi di chuột/chạm vào tin nhắn (Chỉnh sửa / Thu hồi chỉ hiện khi còn trong 5 phút; Xóa ở phía bạn luôn hiện), nút Xóa đoạn chat trong phần Thông tin đoạn chat, Optimistic UI và Delta Sync theo `seq`.

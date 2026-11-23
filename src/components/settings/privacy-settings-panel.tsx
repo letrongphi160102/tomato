@@ -135,9 +135,11 @@ export function PrivacySettingsPanel({
 
     if (patch.showActiveStatus !== undefined) {
       setShowActiveStatus(patch.showActiveStatus);
+      realtime?.setActiveStatusEnabled(patch.showActiveStatus);
     }
     if (patch.showReadReceipts !== undefined) {
       setShowReadReceipts(patch.showReadReceipts);
+      realtime?.setReadReceiptsEnabled(patch.showReadReceipts);
     }
 
     setSavingActivity(true);
@@ -154,6 +156,8 @@ export function PrivacySettingsPanel({
       if (!response.ok) {
         setShowActiveStatus(prevActive);
         setShowReadReceipts(prevReadReceipts);
+        realtime?.setActiveStatusEnabled(prevActive);
+        realtime?.setReadReceiptsEnabled(prevReadReceipts);
         const body = (await response.json().catch(() => null)) as {
           readonly error?: { readonly message?: string };
         } | null;
@@ -169,10 +173,13 @@ export function PrivacySettingsPanel({
       setShowActiveStatus(data.privacy.showActiveStatus);
       setShowReadReceipts(data.privacy.showReadReceipts);
       realtime?.setActiveStatusEnabled(data.privacy.showActiveStatus);
+      realtime?.setReadReceiptsEnabled(data.privacy.showReadReceipts);
       setActivityMessage(data.message);
     } catch {
       setShowActiveStatus(prevActive);
       setShowReadReceipts(prevReadReceipts);
+      realtime?.setActiveStatusEnabled(prevActive);
+      realtime?.setReadReceiptsEnabled(prevReadReceipts);
       setActivityError('Không thể kết nối. Vui lòng thử lại.');
     } finally {
       setSavingActivity(false);

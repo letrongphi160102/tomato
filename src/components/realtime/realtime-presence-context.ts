@@ -19,8 +19,10 @@ export interface RealtimePresenceContextValue {
   readonly errorMessage: string | null;
   readonly deletingIds: ReadonlySet<string>;
   readonly activeStatusEnabled: boolean;
+  readonly readReceiptsEnabled: boolean;
   readonly e2eeReady: boolean;
   readonly setActiveStatusEnabled: (enabled: boolean) => void;
+  readonly setReadReceiptsEnabled: (enabled: boolean) => void;
   readonly refreshNotifications: () => Promise<void>;
   readonly loadMoreNotifications: () => Promise<void>;
   readonly markAsRead: (notificationPublicIds: readonly string[]) => Promise<void>;

@@ -18,6 +18,7 @@ const SUPPORTED_EVENT_NAMES: ReadonlySet<string> = new Set<RealtimeEventName>([
   'notification.removed',
   'notification.deleted',
   'chat.message.created',
+  'chat.conversation.read',
   'chat.conversation.updated',
 ]);
 
@@ -138,6 +139,7 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
         'notification.removed',
         'notification.deleted',
         'chat.message.created',
+        'chat.conversation.read',
         'chat.conversation.updated',
       ];
 

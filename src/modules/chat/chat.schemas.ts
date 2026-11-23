@@ -98,9 +98,27 @@ export const listConversationsQuerySchema = z
 
 export const listMessagesQuerySchema = z
   .object({
-    limit: z.coerce.number().int().min(1).max(100).default(30),
+    limit: z.coerce.number().int().min(1).max(100).default(25),
     cursor: z.coerce.number().int().min(1).optional(),
+    beforeSeq: z.coerce.number().int().min(1).optional(),
     afterSeq: z.coerce.number().int().min(0).optional(),
+  })
+  .strict()
+  .refine(
+    (query) =>
+      !(
+        (query.beforeSeq !== undefined || query.cursor !== undefined) &&
+        query.afterSeq !== undefined
+      ),
+    {
+      message: 'Không được truyền đồng thời cả beforeSeq và afterSeq.',
+      path: ['beforeSeq'],
+    },
+  );
+
+export const markConversationReadInputSchema = z
+  .object({
+    lastReadSeq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   })
   .strict();
 

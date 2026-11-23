@@ -7,6 +7,7 @@ import {
   GET as messagesGet,
   POST as messagesPost,
 } from '@/app/api/v1/conversations/[conversationPublicId]/messages/route';
+import { POST as readConversationPost } from '@/app/api/v1/conversations/[conversationPublicId]/read/route';
 import { GET as conversationDetailGet } from '@/app/api/v1/conversations/[conversationPublicId]/route';
 import { POST as directConversationPost } from '@/app/api/v1/conversations/direct/route';
 import { GET as conversationsListGet } from '@/app/api/v1/conversations/route';
@@ -440,6 +441,67 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
           list.map((p) => ({ ...p, pendingMessagesSent: 0 })),
         );
       }),
+      advanceParticipantLastReadSeq: vi.fn(async (params) => {
+        const list = participantsByConv.get(params.conversationId) ?? [];
+        const safeClamped = Math.max(0, Math.min(params.targetSeq, params.conversationLastSeq));
+        let updated: ConversationParticipantRow | null = null;
+        const nextList = list.map((p) => {
+          if (p.userId === params.userId) {
+            const merged: ConversationParticipantRow = {
+              ...p,
+              lastReadSeq: Math.max(Number(p.lastReadSeq), safeClamped),
+            };
+            updated = merged;
+            return merged;
+          }
+          return p;
+        });
+        participantsByConv.set(params.conversationId, nextList);
+        return updated;
+      }),
+      countUnreadPrimaryConversationsForUser: vi.fn(async (uid: string) => {
+        let count = 0;
+        for (const [cid, parts] of participantsByConv.entries()) {
+          const conv = conversationsById.get(cid);
+          const myPart = parts.find((p) => p.userId === uid);
+          const peerPart = parts.find((p) => p.userId !== uid);
+          if (
+            !conv ||
+            conv.lastSeq <= 0 ||
+            !myPart ||
+            !peerPart ||
+            myPart.inboxState !== 'primary' ||
+            myPart.hiddenAt !== null
+          ) {
+            continue;
+          }
+          const isBlocked =
+            (uid === userA.id && peerPart.userId === userC.id) ||
+            (uid === userC.id && peerPart.userId === userA.id);
+          if (isBlocked) {
+            continue;
+          }
+          const msgs = messagesByConv.get(cid) ?? [];
+          let maxOwnSentSeq = 0;
+          for (const m of msgs) {
+            if (m.senderId === uid && m.seq > maxOwnSentSeq) {
+              maxOwnSentSeq = m.seq;
+            }
+          }
+          const effectiveReadFloor = Math.max(
+            Number(myPart.lastReadSeq),
+            Number(myPart.clearedBeforeSeq),
+            maxOwnSentSeq,
+          );
+          const hasUnreadFromPeer = msgs.some(
+            (m) => m.senderId !== uid && m.seq > effectiveReadFloor,
+          );
+          if (hasUnreadFromPeer) {
+            count += 1;
+          }
+        }
+        return count;
+      }),
       countPendingConversationsForUser: vi.fn(async (uid: string) => {
         let count = 0;
         for (const [cid, parts] of participantsByConv.entries()) {
@@ -555,6 +617,23 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
       setBobFollowsAlice: (val: boolean) => {
         bobFollowsAlice = val;
       },
+      setUserShowReadReceipts: (uid: string, enabled: boolean) => {
+        const u = usersById.get(uid);
+        if (u) {
+          usersById.set(uid, { ...u, showReadReceipts: enabled });
+        }
+      },
+      forceSetParticipantLastReadSeq: (convPublicId: string, uid: string, seq: number) => {
+        for (const [cid, conv] of conversationsById.entries()) {
+          if (conv.publicId === convPublicId) {
+            const list = participantsByConv.get(cid) ?? [];
+            participantsByConv.set(
+              cid,
+              list.map((p) => (p.userId === uid ? { ...p, lastReadSeq: seq } : p)),
+            );
+          }
+        }
+      },
       getParticipantState: (
         convPublicId: string,
         userId: string,
@@ -637,6 +716,14 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
         }),
         { params: Promise.resolve({ conversationPublicId: convId }) },
       ),
+      readConversationPost(
+        new Request(`${origin}/api/v1/conversations/${convId}/read`, {
+          method: 'POST',
+          headers: validCsrfNoAuth,
+          body: '{}',
+        }),
+        { params: Promise.resolve({ conversationPublicId: convId }) },
+      ),
     ]);
 
     for (const res of responses) {
@@ -693,6 +780,14 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
       ),
       messagesPost(
         new Request(`${origin}/api/v1/conversations/${convId}/messages`, {
+          method: 'POST',
+          headers: noCsrfHeaders,
+          body: '{}',
+        }),
+        { params: Promise.resolve({ conversationPublicId: convId }) },
+      ),
+      readConversationPost(
+        new Request(`${origin}/api/v1/conversations/${convId}/read`, {
           method: 'POST',
           headers: noCsrfHeaders,
           body: '{}',
@@ -1129,5 +1224,376 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
       }),
     );
     expect(sixthStrangerRes.status).toBe(429);
+  });
+
+  it('kiểm chứng unreadConversationsCount (1 người gửi 5 tin = 1; 2 người = 2; bỏ qua pending & M9 cũ đã trả lời), Ma trận Đã xem Đối xứng & Phân trang beforeSeq/afterSeq', async () => {
+    const origin = getTestOrigin();
+    let currentUserA = makeUserRow({
+      id: userA.id,
+      publicId: userA.publicId,
+      handle: userA.handle,
+      handleNormalized: userA.handleNormalized,
+      fullName: userA.fullName,
+      showReadReceipts: true,
+    });
+    let currentUserB = makeUserRow({
+      id: userB.id,
+      publicId: userB.publicId,
+      handle: userB.handle,
+      handleNormalized: userB.handleNormalized,
+      fullName: userB.fullName,
+      showReadReceipts: true,
+    });
+
+    setSessionServiceForTesting({
+      authenticateAccessToken: vi.fn(async (token?: string | null) => {
+        if (token === 'tok-a') return makePrincipal(currentUserA);
+        if (token === 'tok-b') return makePrincipal(currentUserB);
+        if (token === 'tok-c') return makePrincipal(userC);
+        if (token === 'tok-d') return makePrincipal(userD);
+        const { AuthDomainError } = await import('@/modules/auth/auth.errors');
+        throw new AuthDomainError({
+          status: 401,
+          code: 'UNAUTHORIZED',
+          message: 'Phiên đăng nhập không hợp lệ.',
+        });
+      }),
+    } as unknown as SessionService);
+
+    const env = createInMemoryChatEnvironment({ bobFollowsAlice: true });
+
+    const aliceDevice = await getOrCreatePrimaryDeviceKeyMaterial(userA.publicId);
+    const bobDevice = await getOrCreatePrimaryDeviceKeyMaterial(userB.publicId);
+    const davidDevice = await getOrCreatePrimaryDeviceKeyMaterial(userD.publicId);
+
+    async function sendDummyMessage(
+      senderToken: string,
+      senderPublicId: string,
+      senderDevice: typeof aliceDevice,
+      recipientDevice: typeof bobDevice,
+      convId: string,
+      clientMsgId: string,
+      text: string,
+    ) {
+      const envelope = await encryptDirectMessage({
+        conversationPublicId: convId,
+        senderPublicId,
+        clientMsgId,
+        plaintext: text,
+        senderDevice,
+        recipientDevices: [
+          {
+            devicePublicId: recipientDevice.devicePublicId,
+            keyFingerprint: recipientDevice.keyFingerprint,
+            identityPublicKeyJwk: recipientDevice.identityPublicKeyJwk,
+            signingPublicKeyJwk: recipientDevice.signingPublicKeyJwk,
+          },
+        ],
+      });
+      return messagesPost(
+        new Request(`${origin}/api/v1/conversations/${convId}/messages`, {
+          method: 'POST',
+          headers: createAuthHeaders(origin, senderToken),
+          body: JSON.stringify({
+            clientMsgId,
+            messageType: 'text',
+            ciphertext: envelope.ciphertext,
+            cryptoHeader: envelope.cryptoHeader,
+          }),
+        }),
+        { params: Promise.resolve({ conversationPublicId: convId }) },
+      );
+    }
+
+    // 1. Alice tạo hội thoại với Bob (Bob đang follow Alice -> cả 2 ở `primary`).
+    const convABRes = await directConversationPost(
+      new Request(`${origin}/api/v1/conversations/direct`, {
+        method: 'POST',
+        headers: createAuthHeaders(origin, 'tok-a'),
+        body: JSON.stringify({ recipientPublicId: userB.publicId }),
+      }),
+    );
+    expect(convABRes.status).toBe(201);
+    const convABId = ((await convABRes.json()) as { conversation: { public_id: string } })
+      .conversation.public_id;
+
+    // 2. Alice gửi 5 tin nhắn liên tiếp cho Bob -> Bob chưa đọc -> unreadConversationsCount của Bob = 1 (không phải 5!).
+    for (let i = 1; i <= 5; i += 1) {
+      const res = await sendDummyMessage(
+        'tok-a',
+        userA.publicId,
+        aliceDevice,
+        bobDevice,
+        convABId,
+        `ab_msg_${i}`,
+        `Tin nhắn thứ ${i}`,
+      );
+      expect(res.status).toBe(201);
+    }
+
+    const bobList1Res = await conversationsListGet(
+      new Request(`${origin}/api/v1/conversations?tab=primary`, {
+        headers: { cookie: 'tomato_at=tok-b' },
+      }),
+    );
+    const bobList1 = (await bobList1Res.json()) as {
+      unreadConversationsCount: number;
+      items: Array<{ public_id: string; lastSeq: number; myState: { lastReadSeq: number } }>;
+    };
+    expect(bobList1.unreadConversationsCount).toBe(1);
+
+    // 3. David (User D - người lạ chưa được Bob follow) nhắn tin cho Bob -> vào `pending` của Bob ->
+    //    KHÔNG được tính vào unreadConversationsCount của hộp thư Chính (`primary`).
+    const convDBRes = await directConversationPost(
+      new Request(`${origin}/api/v1/conversations/direct`, {
+        method: 'POST',
+        headers: createAuthHeaders(origin, 'tok-d'),
+        body: JSON.stringify({ recipientPublicId: userB.publicId }),
+      }),
+    );
+    const convDBId = ((await convDBRes.json()) as { conversation: { public_id: string } })
+      .conversation.public_id;
+
+    await sendDummyMessage(
+      'tok-d',
+      userD.publicId,
+      davidDevice,
+      bobDevice,
+      convDBId,
+      'db_pending_1',
+      'Tin nhắn chờ từ David',
+    );
+
+    const bobListAfterPendingRes = await conversationsListGet(
+      new Request(`${origin}/api/v1/conversations?tab=primary`, {
+        headers: { cookie: 'tomato_at=tok-b' },
+      }),
+    );
+    const bobListAfterPending = (await bobListAfterPendingRes.json()) as {
+      unreadConversationsCount: number;
+      pendingCount: number;
+    };
+    expect(bobListAfterPending.unreadConversationsCount).toBe(1);
+    expect(bobListAfterPending.pendingCount).toBe(1);
+
+    // Khi Bob chấp nhận hội thoại của David sang `primary` (mà chưa đọc tin `db_pending_1`) -> lúc này Bob có 2 người gửi chưa đọc = 2!
+    await acceptConversationPost(
+      new Request(`${origin}/api/v1/conversations/${convDBId}/accept`, {
+        method: 'POST',
+        headers: createAuthHeaders(origin, 'tok-b'),
+      }),
+      { params: Promise.resolve({ conversationPublicId: convDBId }) },
+    );
+
+    const bobListTwoSendersRes = await conversationsListGet(
+      new Request(`${origin}/api/v1/conversations?tab=primary`, {
+        headers: { cookie: 'tomato_at=tok-b' },
+      }),
+    );
+    expect(
+      ((await bobListTwoSendersRes.json()) as { unreadConversationsCount: number })
+        .unreadConversationsCount,
+    ).toBe(2);
+
+    // 4. BOLA trên POST /api/v1/conversations/[id]/read:
+    //    - User D (ngoài cuộc hội thoại A-B) và User C (bị Alice chặn) gọi /read trên convABId -> 404 Not Found.
+    const [outsiderReadRes, blockedReadRes] = await Promise.all([
+      readConversationPost(
+        new Request(`${origin}/api/v1/conversations/${convABId}/read`, {
+          method: 'POST',
+          headers: createAuthHeaders(origin, 'tok-d'),
+          body: JSON.stringify({ lastReadSeq: 5 }),
+        }),
+        { params: Promise.resolve({ conversationPublicId: convABId }) },
+      ),
+      readConversationPost(
+        new Request(`${origin}/api/v1/conversations/${convABId}/read`, {
+          method: 'POST',
+          headers: createAuthHeaders(origin, 'tok-c'),
+          body: JSON.stringify({ lastReadSeq: 5 }),
+        }),
+        { params: Promise.resolve({ conversationPublicId: convABId }) },
+      ),
+    ]);
+    expect(outsiderReadRes.status).toBe(404);
+    expect(blockedReadRes.status).toBe(404);
+
+    // 5. Khi cả Alice và Bob đều bật `show_read_receipts = true` và hội thoại ở `primary`:
+    //    Bob gọi POST /read với lastReadSeq = 999 (vượt quá last_seq = 5) -> tự động kẹp về 5,
+    //    phát sự kiện `chat.conversation.read` cho Alice và giảm unreadConversationsCount của Bob từ 2 xuống 1!
+    env.realtime.clearPublishedEvents();
+    const bobReadRes = await readConversationPost(
+      new Request(`${origin}/api/v1/conversations/${convABId}/read`, {
+        method: 'POST',
+        headers: createAuthHeaders(origin, 'tok-b'),
+        body: JSON.stringify({ lastReadSeq: 999 }),
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(bobReadRes.status).toBe(200);
+    const bobReadBody = (await bobReadRes.json()) as {
+      lastReadSeq: number;
+      peerLastReadSeq: number | null;
+      unreadConversationsCount: number;
+    };
+    expect(bobReadBody.lastReadSeq).toBe(5);
+    expect(bobReadBody.peerLastReadSeq).toBe(5);
+    expect(bobReadBody.unreadConversationsCount).toBe(1);
+
+    const readEventsToAlice = env.realtime
+      .getPublishedEvents()
+      .filter(
+        (e) => e.event === 'chat.conversation.read' && e.channel === `user:${userA.publicId}`,
+      );
+    expect(readEventsToAlice).toHaveLength(1);
+    expect(readEventsToAlice[0]?.data).toMatchObject({
+      conversationPublicId: convABId,
+      readerPublicId: userB.publicId,
+      lastReadSeq: 5,
+    });
+
+    // Tính đơn điệu (monotonic): Bob gửi tiếp lastReadSeq = 2 (< 5) -> lastReadSeq vẫn giữ nguyên là 5!
+    const bobReadLowerRes = await readConversationPost(
+      new Request(`${origin}/api/v1/conversations/${convABId}/read`, {
+        method: 'POST',
+        headers: createAuthHeaders(origin, 'tok-b'),
+        body: JSON.stringify({ lastReadSeq: 2 }),
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(((await bobReadLowerRes.json()) as { lastReadSeq: number }).lastReadSeq).toBe(5);
+
+    // 6. Cưỡng chế Đối xứng tuyệt đối:
+    //    Alice gửi thêm tin thứ 6. Sau đó Bob tắt `show_read_receipts = false` rồi đọc tin thứ 6 ->
+    //    Server luôn trả `peerLastReadSeq: null` cho cả Bob lẫn Alice, và KHÔNG bắn `chat.conversation.read` cho Alice!
+    await sendDummyMessage(
+      'tok-a',
+      userA.publicId,
+      aliceDevice,
+      bobDevice,
+      convABId,
+      'ab_msg_6',
+      'Tin nhắn thứ 6',
+    );
+
+    currentUserB = { ...currentUserB, showReadReceipts: false };
+    env.setUserShowReadReceipts(userB.id, false);
+    env.realtime.clearPublishedEvents();
+
+    const bobReadWhileOffRes = await readConversationPost(
+      new Request(`${origin}/api/v1/conversations/${convABId}/read`, {
+        method: 'POST',
+        headers: createAuthHeaders(origin, 'tok-b'),
+        body: JSON.stringify({ lastReadSeq: 6 }),
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(bobReadWhileOffRes.status).toBe(200);
+    const bobReadWhileOffBody = (await bobReadWhileOffRes.json()) as {
+      lastReadSeq: number;
+      peerLastReadSeq: number | null;
+    };
+    expect(bobReadWhileOffBody.lastReadSeq).toBe(6);
+    expect(bobReadWhileOffBody.peerLastReadSeq).toBeNull();
+
+    // Không có sự kiện `chat.conversation.read` nào được phát sang kênh của Alice!
+    expect(
+      env.realtime
+        .getPublishedEvents()
+        .some(
+          (e) => e.event === 'chat.conversation.read' && e.channel === `user:${userA.publicId}`,
+        ),
+    ).toBe(false);
+
+    // Alice gọi GET /api/v1/conversations/[convABId] cũng chỉ nhận `peerLastReadSeq: null` vì Bob đang tắt.
+    const aliceDetailWhileBobOffRes = await conversationDetailGet(
+      new Request(`${origin}/api/v1/conversations/${convABId}`, {
+        headers: { cookie: 'tomato_at=tok-a' },
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(
+      (
+        (await aliceDetailWhileBobOffRes.json()) as {
+          conversation: { peerLastReadSeq: number | null };
+        }
+      ).conversation.peerLastReadSeq,
+    ).toBeNull();
+
+    // Ngược lại: Bob bật lại `showReadReceipts = true`, nhưng Alice tắt `showReadReceipts = false` ->
+    // Alice gọi GET cũng vẫn nhận `peerLastReadSeq: null` (đối xứng 2 chiều!).
+    currentUserB = { ...currentUserB, showReadReceipts: true };
+    env.setUserShowReadReceipts(userB.id, true);
+    currentUserA = { ...currentUserA, showReadReceipts: false };
+    env.setUserShowReadReceipts(userA.id, false);
+
+    const aliceDetailWhileAliceOffRes = await conversationDetailGet(
+      new Request(`${origin}/api/v1/conversations/${convABId}`, {
+        headers: { cookie: 'tomato_at=tok-a' },
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(
+      (
+        (await aliceDetailWhileAliceOffRes.json()) as {
+          conversation: { peerLastReadSeq: number | null };
+        }
+      ).conversation.peerLastReadSeq,
+    ).toBeNull();
+
+    // 7. Chống "chưa đọc ảo" trên dữ liệu M9 cũ:
+    //    Giả sử dữ liệu M9 cũ có `lastReadSeq = 0` cho Alice, nhưng tin nhắn cuối cùng (seq = 6) là do chính Alice gửi ->
+    //    unreadConversationsCount của Alice phải bằng 0!
+    env.forceSetParticipantLastReadSeq(convABId, userA.id, 0);
+    const aliceListLegacyM9Res = await conversationsListGet(
+      new Request(`${origin}/api/v1/conversations?tab=primary`, {
+        headers: { cookie: 'tomato_at=tok-a' },
+      }),
+    );
+    const aliceListLegacyM9 = (await aliceListLegacyM9Res.json()) as {
+      unreadConversationsCount: number;
+      items: Array<{ public_id: string; lastSeq: number; myState: { lastReadSeq: number } }>;
+    };
+    expect(aliceListLegacyM9.unreadConversationsCount).toBe(0);
+    expect(aliceListLegacyM9.items[0]?.myState.lastReadSeq).toBe(6);
+
+    // 8. Kiểm thử phân trang `beforeSeq` (Infinite Scroll Up) và chặn truyền đồng thời `beforeSeq` + `afterSeq` (400):
+    const bothCursorsRes = await messagesGet(
+      new Request(`${origin}/api/v1/conversations/${convABId}/messages?beforeSeq=5&afterSeq=1`, {
+        headers: { cookie: 'tomato_at=tok-a' },
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(bothCursorsRes.status).toBe(400);
+
+    // Tải trang đầu tiên với limit=3 -> trả tin seq [4, 5, 6] và nextCursor = 4.
+    const page1Res = await messagesGet(
+      new Request(`${origin}/api/v1/conversations/${convABId}/messages?limit=3`, {
+        headers: { cookie: 'tomato_at=tok-a' },
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(page1Res.status).toBe(200);
+    const page1Body = (await page1Res.json()) as {
+      items: Array<{ seq: number }>;
+      nextCursor: number | null;
+    };
+    expect(page1Body.items.map((m) => m.seq)).toEqual([4, 5, 6]);
+    expect(page1Body.nextCursor).toBe(4);
+
+    // Cuộn lên tải trang cũ hơn qua `beforeSeq=4&limit=3` -> trả tin seq [1, 2, 3] và nextCursor = null.
+    const page2Res = await messagesGet(
+      new Request(`${origin}/api/v1/conversations/${convABId}/messages?beforeSeq=4&limit=3`, {
+        headers: { cookie: 'tomato_at=tok-a' },
+      }),
+      { params: Promise.resolve({ conversationPublicId: convABId }) },
+    );
+    expect(page2Res.status).toBe(200);
+    const page2Body = (await page2Res.json()) as {
+      items: Array<{ seq: number }>;
+      nextCursor: number | null;
+    };
+    expect(page2Body.items.map((m) => m.seq)).toEqual([1, 2, 3]);
+    expect(page2Body.nextCursor).toBeNull();
   });
 });

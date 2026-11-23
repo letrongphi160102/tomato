@@ -19,6 +19,7 @@ export default async function DashboardLayout({ children }: Readonly<{ children:
         user={authState.user}
         profile={authState.profile}
         initialShowActiveStatus={authState.principal.user.showActiveStatus}
+        initialShowReadReceipts={authState.principal.user.showReadReceipts}
         initialAccessTokenRemainingMs={authState.accessTokenRemainingMs}
       >
         {children}

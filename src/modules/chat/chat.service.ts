@@ -17,7 +17,7 @@ import { computeDeviceKeyFingerprint } from '@/lib/e2ee/utils';
 import type { AuthenticatedPrincipal } from '@/modules/auth/auth.policy';
 import { ChatDomainError } from '@/modules/chat/chat.errors';
 import { CHAT_MESSAGES } from '@/modules/chat/chat.messages';
-import { assertChatAuthorized } from '@/modules/chat/chat.policy';
+import { assertChatAuthorized, canExposeSymmetricReadReceipt } from '@/modules/chat/chat.policy';
 import {
   ChatRepository,
   buildDirectPairKey,
@@ -34,6 +34,7 @@ import {
   createDirectConversationInputSchema,
   listConversationsQuerySchema,
   listMessagesQuerySchema,
+  markConversationReadInputSchema,
   registerE2eeDeviceInputSchema,
   sendMessageInputSchema,
   upsertE2eeBackupInputSchema,
@@ -43,7 +44,11 @@ import {
   type NotificationService,
   type PendingRealtimeDispatch,
 } from '@/modules/notifications';
-import { isActiveSocialTarget } from '@/modules/social/social.policy';
+import {
+  EMPTY_SOCIAL_RELATIONSHIP,
+  isActiveSocialTarget,
+  type SocialRelationshipSnapshot,
+} from '@/modules/social/social.policy';
 
 // ============================================================================
 // DTO Allowlists (Tuyệt đối không lộ khóa chính UUIDv7 `id`)
@@ -123,6 +128,12 @@ export interface ConversationSummaryDto {
   readonly isAwaitingPeerAcceptance: boolean;
   readonly canSendMedia: boolean;
   readonly canSendMoreMessages: boolean;
+  /**
+   * Cưỡng chế đối xứng tại Server: chỉ trả số `seq` đối phương đã đọc khi CẢ HAI người dùng
+   * đều bật `show_read_receipts = true` và hội thoại ở trạng thái `primary` ở cả 2 phía.
+   * Ngược lại luôn trả `null`.
+   */
+  readonly peerLastReadSeq: number | null;
   readonly lastMessage: ChatMessageDto | null;
 }
 
@@ -130,7 +141,15 @@ export interface ConversationListResult {
   readonly tab: 'primary' | 'pending';
   readonly items: readonly ConversationSummaryDto[];
   readonly pendingCount: number;
+  readonly unreadConversationsCount: number;
   readonly nextCursor: string | null;
+}
+
+export interface MarkConversationReadResult {
+  readonly conversationPublicId: string;
+  readonly lastReadSeq: number;
+  readonly peerLastReadSeq: number | null;
+  readonly unreadConversationsCount: number;
 }
 
 export interface MessageListResult {
@@ -201,6 +220,10 @@ function toMessageDto(
 function toConversationSummaryDto(
   record: ConversationListRowRecord,
   viewerPublicId: string,
+  options?: {
+    readonly viewerShowReadReceipts?: boolean;
+    readonly relationship?: SocialRelationshipSnapshot | null;
+  },
 ): ConversationSummaryDto {
   const isPeerNotAcceptedYet = record.peerParticipant.inboxState !== 'primary';
   const isMyInboxPending = record.actorParticipant.inboxState !== 'primary';
@@ -209,6 +232,31 @@ function toConversationSummaryDto(
   const remaining = isAwaitingPeerAcceptance
     ? Math.max(0, MAX_PENDING_MESSAGES_BEFORE_ACCEPT - sentCount)
     : MAX_PENDING_MESSAGES_BEFORE_ACCEPT;
+
+  const lastMessageDto = record.lastMessage
+    ? toMessageDto(
+        record.lastMessage.row,
+        record.conversation.publicId,
+        record.lastMessage.senderPublicId,
+        viewerPublicId,
+      )
+    : null;
+
+  // Nếu tin nhắn cuối cùng trong hội thoại là do chính mình gửi (kể cả dữ liệu cũ từ M9 có last_read_seq = 0),
+  // mốc đã đọc hiệu lực của bản thân luôn đạt ít nhất bằng seq của tin nhắn đó để tránh chấm đỏ chưa đọc ảo.
+  const rawMyLastReadSeq = Number(record.actorParticipant.lastReadSeq);
+  const effectiveMyLastReadSeq =
+    lastMessageDto && lastMessageDto.isOwnMessage
+      ? Math.max(rawMyLastReadSeq, lastMessageDto.seq)
+      : rawMyLastReadSeq;
+
+  const canShowPeerRead = canExposeSymmetricReadReceipt({
+    actorShowReadReceipts: options?.viewerShowReadReceipts ?? true,
+    peerShowReadReceipts: Boolean(record.peerUser.showReadReceipts ?? true),
+    actorInboxState: record.actorParticipant.inboxState,
+    peerInboxState: record.peerParticipant.inboxState,
+    relationship: options?.relationship ?? EMPTY_SOCIAL_RELATIONSHIP,
+  });
 
   return {
     public_id: record.conversation.publicId,
@@ -229,19 +277,13 @@ function toConversationSummaryDto(
       inboxState: record.actorParticipant.inboxState,
       pendingMessagesSent: sentCount,
       pendingMessagesRemaining: remaining,
-      lastReadSeq: Number(record.actorParticipant.lastReadSeq),
+      lastReadSeq: effectiveMyLastReadSeq,
     },
     isAwaitingPeerAcceptance,
     canSendMedia: !isAwaitingPeerAcceptance && !isMyInboxPending,
     canSendMoreMessages: !isAwaitingPeerAcceptance || remaining > 0,
-    lastMessage: record.lastMessage
-      ? toMessageDto(
-          record.lastMessage.row,
-          record.conversation.publicId,
-          record.lastMessage.senderPublicId,
-          viewerPublicId,
-        )
-      : null,
+    peerLastReadSeq: canShowPeerRead ? Number(record.peerParticipant.lastReadSeq) : null,
+    lastMessage: lastMessageDto,
   };
 }
 
@@ -527,20 +569,42 @@ export class ChatService {
       });
     }
 
-    const { rows, pendingCount } = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
-      const [listRows, countPending] = await Promise.all([
-        this.repository.listConversationsForUser(
-          {
-            userId: actor.user.id,
-            tab: parsed.data.tab,
-            limit: parsed.data.limit,
-          },
-          tx,
-        ),
-        this.repository.countPendingConversationsForUser(actor.user.id, tx),
-      ]);
-      return { rows: listRows, pendingCount: countPending };
-    });
+    const { rows, pendingCount, unreadConversationsCount } = await this.repository.runInRlsTx(
+      actor.user.id,
+      async (tx) => {
+        const [listRows, countPending, countUnread] = await Promise.all([
+          this.repository.listConversationsForUser(
+            {
+              userId: actor.user.id,
+              tab: parsed.data.tab,
+              limit: parsed.data.limit,
+            },
+            tx,
+          ),
+          this.repository.countPendingConversationsForUser(actor.user.id, tx),
+          typeof this.repository.countUnreadPrimaryConversationsForUser === 'function'
+            ? this.repository.countUnreadPrimaryConversationsForUser(actor.user.id, tx)
+            : Promise.resolve(null),
+        ]);
+
+        const fallbackUnreadCount =
+          countUnread !== null
+            ? countUnread
+            : listRows.filter(
+                (r) =>
+                  r.actorParticipant.inboxState === 'primary' &&
+                  Number(r.conversation.lastSeq) > Number(r.actorParticipant.lastReadSeq) &&
+                  r.lastMessage !== null &&
+                  r.lastMessage.senderPublicId !== actor.user.publicId,
+              ).length;
+
+        return {
+          rows: listRows,
+          pendingCount: countPending,
+          unreadConversationsCount: fallbackUnreadCount,
+        };
+      },
+    );
 
     const hasMore = rows.length > parsed.data.limit;
     const pageRows = hasMore ? rows.slice(0, parsed.data.limit) : rows;
@@ -548,8 +612,13 @@ export class ChatService {
 
     return {
       tab: parsed.data.tab,
-      items: pageRows.map((r) => toConversationSummaryDto(r, actor.user.publicId)),
+      items: pageRows.map((r) =>
+        toConversationSummaryDto(r, actor.user.publicId, {
+          viewerShowReadReceipts: actor.user.showReadReceipts,
+        }),
+      ),
       pendingCount,
+      unreadConversationsCount,
       nextCursor: hasMore && lastRow ? lastRow.conversation.publicId : null,
     };
   }
@@ -735,6 +804,10 @@ export class ChatService {
           lastMessage: null,
         },
         actor.user.publicId,
+        {
+          viewerShowReadReceipts: lockedActor.showReadReceipts,
+          relationship,
+        },
       );
 
       return {
@@ -795,10 +868,164 @@ export class ChatService {
           lastMessage: null,
         },
         actor.user.publicId,
+        {
+          viewerShowReadReceipts: actor.user.showReadReceipts,
+          relationship,
+        },
       );
     });
 
     return { conversation: summary };
+  }
+
+  async markConversationAsRead(
+    actor: AuthenticatedPrincipal,
+    rawConversationPublicId: string,
+    rawInput: unknown = {},
+  ): Promise<MarkConversationReadResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:conversations:read:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.markReadByUser,
+    );
+
+    const conversationPublicId = parsePublicIdOrThrowNotFound(rawConversationPublicId);
+    const parsedInput = markConversationReadInputSchema.safeParse(rawInput ?? {});
+    if (!parsedInput.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsedInput.error),
+      });
+    }
+
+    const currentTime = this.now();
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const conversation = await this.repository.findConversationByPublicId(
+        conversationPublicId,
+        tx,
+      );
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:conversation:read', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      const conversationLastSeq = Number(conversation.lastSeq);
+      const previousLastReadSeq = Number(actorParticipant!.lastReadSeq);
+      const requestedSeq =
+        parsedInput.data.lastReadSeq !== undefined
+          ? parsedInput.data.lastReadSeq
+          : conversationLastSeq;
+      const targetSeq = Math.max(previousLastReadSeq, Math.min(requestedSeq, conversationLastSeq));
+
+      let updatedParticipant = actorParticipant!;
+      if (targetSeq > previousLastReadSeq) {
+        if (typeof this.repository.advanceParticipantLastReadSeq === 'function') {
+          updatedParticipant = (await this.repository.advanceParticipantLastReadSeq(
+            {
+              conversationId: conversation.id,
+              userId: actor.user.id,
+              targetSeq: requestedSeq,
+              conversationLastSeq,
+            },
+            tx,
+          )) ?? {
+            ...actorParticipant!,
+            lastReadSeq: targetSeq,
+          };
+        } else {
+          updatedParticipant = (await this.repository.updateParticipantState(
+            conversation.id,
+            actor.user.id,
+            { lastReadSeq: targetSeq },
+            tx,
+          )) ?? {
+            ...actorParticipant!,
+            lastReadSeq: targetSeq,
+          };
+        }
+      }
+
+      const nextLastReadSeq = Number(updatedParticipant.lastReadSeq);
+
+      const unreadConversationsCount =
+        typeof this.repository.countUnreadPrimaryConversationsForUser === 'function'
+          ? await this.repository.countUnreadPrimaryConversationsForUser(actor.user.id, tx)
+          : 0;
+
+      const canExposeReadReceipt = canExposeSymmetricReadReceipt({
+        actorShowReadReceipts: actor.user.showReadReceipts,
+        peerShowReadReceipts: peerUser!.showReadReceipts,
+        actorInboxState: updatedParticipant.inboxState,
+        peerInboxState: peerParticipant!.inboxState,
+        relationship,
+      });
+
+      return {
+        conversationPublicId: conversation.publicId,
+        previousLastReadSeq,
+        lastReadSeq: nextLastReadSeq,
+        peerLastReadSeq: canExposeReadReceipt ? Number(peerParticipant!.lastReadSeq) : null,
+        unreadConversationsCount,
+        canExposeReadReceipt,
+        peerPublicId: peerUser!.publicId,
+        readAt: currentTime.toISOString(),
+      };
+    });
+
+    const publishTasks: Promise<void>[] = [
+      this.publishChatEventBestEffort(actor.user.publicId, 'chat.conversation.read', {
+        conversationPublicId: outcome.conversationPublicId,
+        readerPublicId: actor.user.publicId,
+        lastReadSeq: outcome.lastReadSeq,
+        unreadConversationsCount: outcome.unreadConversationsCount,
+        readAt: outcome.readAt,
+      }),
+    ];
+
+    // Cưỡng chế đối xứng tại Server: chỉ bắn sự kiện đã xem cho đối phương khi CẢ HAI người đều bật
+    // `show_read_receipts = true`, hội thoại ở trạng thái `primary` ở cả 2 phía và `lastReadSeq` thực sự tăng.
+    if (outcome.canExposeReadReceipt && outcome.lastReadSeq > outcome.previousLastReadSeq) {
+      publishTasks.push(
+        this.publishChatEventBestEffort(outcome.peerPublicId, 'chat.conversation.read', {
+          conversationPublicId: outcome.conversationPublicId,
+          readerPublicId: actor.user.publicId,
+          lastReadSeq: outcome.lastReadSeq,
+          readAt: outcome.readAt,
+        }),
+      );
+    }
+
+    await Promise.all(publishTasks);
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      lastReadSeq: outcome.lastReadSeq,
+      peerLastReadSeq: outcome.peerLastReadSeq,
+      unreadConversationsCount: outcome.unreadConversationsCount,
+    };
   }
 
   // =========================================================================
@@ -1041,12 +1268,14 @@ export class ChatService {
         relationship,
       });
 
+      const effectiveBeforeSeq = parsedQuery.data.beforeSeq ?? parsedQuery.data.cursor;
+
       const msgRows = await this.repository.listMessagesForConversation(
         {
           conversationId: conversation.id,
           clearedBeforeSeq: Number(actorParticipant!.clearedBeforeSeq),
           limit: parsedQuery.data.limit,
-          cursorSeq: parsedQuery.data.cursor,
+          cursorSeq: effectiveBeforeSeq,
           afterSeq: parsedQuery.data.afterSeq,
         },
         tx,
@@ -1054,8 +1283,7 @@ export class ChatService {
 
       return {
         rows: msgRows,
-        isForwardDelta:
-          parsedQuery.data.afterSeq !== undefined && parsedQuery.data.cursor === undefined,
+        isForwardDelta: parsedQuery.data.afterSeq !== undefined && effectiveBeforeSeq === undefined,
       };
     });
 
@@ -1155,6 +1383,10 @@ export class ChatService {
             },
           },
           actor.user.publicId,
+          {
+            viewerShowReadReceipts: actor.user.showReadReceipts,
+            relationship,
+          },
         );
         return {
           message: msgDto,
@@ -1272,6 +1504,22 @@ export class ChatService {
         tx,
       );
 
+      // Người gửi tin nhắn mới hiển nhiên đã đọc hội thoại tới `nextSeq`.
+      if (Number(actorParticipant!.lastReadSeq) < nextSeq) {
+        actorParticipant = (await this.repository.updateParticipantState(
+          conversation.id,
+          actor.user.id,
+          {
+            lastReadSeq: nextSeq,
+            hiddenAt: null,
+          },
+          tx,
+        )) ?? {
+          ...actorParticipant!,
+          lastReadSeq: nextSeq,
+        };
+      }
+
       // 5. Luật im lặng tuyệt đối sau khi `declined`:
       // Chỉ phát thông báo `message_request` khi đối phương đang ở trạng thái `'pending'` (KHÔNG phát khi đã `'declined'`).
       if (peerParticipant!.inboxState === 'pending' && this.notificationService) {
@@ -1310,6 +1558,10 @@ export class ChatService {
           },
         },
         actor.user.publicId,
+        {
+          viewerShowReadReceipts: actor.user.showReadReceipts,
+          relationship,
+        },
       );
 
       return {
@@ -1367,7 +1619,7 @@ export class ChatService {
 
   private async publishChatEventBestEffort(
     recipientPublicId: string,
-    eventName: 'chat.message.created' | 'chat.conversation.updated',
+    eventName: 'chat.message.created' | 'chat.conversation.read' | 'chat.conversation.updated',
     payload: Record<string, unknown>,
   ): Promise<void> {
     try {

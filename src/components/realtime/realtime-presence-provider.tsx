@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 
+import { clearChatRamMemorySingleton } from '@/components/messages/chat-store-context';
 import {
   RealtimePresenceContext,
   type ChatRealtimeListener,
@@ -10,11 +11,9 @@ import {
 } from '@/components/realtime/realtime-presence-context';
 import { authFetch, seedAccessTokenFreshness } from '@/lib/auth-client';
 import {
-  getOrCreatePrimaryDeviceKeyMaterial,
-  importAndStoreBootstrapKeyMaterial,
-  saveDeviceKeyMaterial,
-} from '@/lib/e2ee/keystore';
-import type { E2eePrivateJwk, E2eePublicJwk } from '@/lib/e2ee/types';
+  clearE2eeClientBootstrapState,
+  ensureE2eeDeviceRegisteredSingleton,
+} from '@/lib/e2ee/client-bootstrap';
 import {
   connectUserRealtime,
   disconnectAllRealtimeConnections,
@@ -29,6 +28,7 @@ export const PRESENCE_CLIENT_HEARTBEAT_INTERVAL_MS = 60_000;
 export interface RealtimePresenceProviderProps {
   readonly currentUserPublicId?: string;
   readonly initialShowActiveStatus: boolean;
+  readonly initialShowReadReceipts?: boolean;
   readonly initialAccessTokenRemainingMs?: number;
   readonly children: React.ReactNode;
 }
@@ -53,6 +53,7 @@ function isNotificationItemDto(value: unknown): value is NotificationItemDto {
 export function RealtimePresenceProvider({
   currentUserPublicId,
   initialShowActiveStatus,
+  initialShowReadReceipts = true,
   initialAccessTokenRemainingMs,
   children,
 }: RealtimePresenceProviderProps) {
@@ -64,6 +65,7 @@ export function RealtimePresenceProvider({
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [deletingIds, setDeletingIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [activeStatusEnabled, setActiveStatusEnabled] = React.useState(initialShowActiveStatus);
+  const [readReceiptsEnabled, setReadReceiptsEnabled] = React.useState(initialShowReadReceipts);
   const [e2eeReady, setE2eeReady] = React.useState(false);
 
   const notificationsRef = React.useRef<readonly NotificationItemDto[]>(notifications);
@@ -71,7 +73,6 @@ export function RealtimePresenceProvider({
   const inFlightUnreadDeleteIdsRef = React.useRef<Set<string>>(new Set());
   const exitTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const chatListenersRef = React.useRef<Set<ChatRealtimeListener>>(new Set());
-  const e2eeBootstrapPromiseRef = React.useRef<Promise<boolean> | null>(null);
   const connectionRef = React.useRef<RealtimeClientConnection | null>(null);
   const heartbeatIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const loggedOutRef = React.useRef(false);
@@ -491,6 +492,7 @@ export function RealtimePresenceProvider({
 
     if (
       incoming.event === 'chat.message.created' ||
+      incoming.event === 'chat.conversation.read' ||
       incoming.event === 'chat.conversation.updated'
     ) {
       for (const listener of Array.from(chatListenersRef.current)) {
@@ -514,69 +516,18 @@ export function RealtimePresenceProvider({
     if (!currentUserPublicId || loggedOutRef.current) {
       return false;
     }
-    if (e2eeBootstrapPromiseRef.current) {
-      return e2eeBootstrapPromiseRef.current;
+    const ok = await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+    if (ok && !loggedOutRef.current) {
+      setE2eeReady(true);
     }
-
-    const promise = (async () => {
-      try {
-        const material = await getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId);
-        const response = await authFetch('/api/v1/e2ee/devices', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            identityPublicKeyJwk: material.identityPublicKeyJwk,
-            signingPublicKeyJwk: material.signingPublicKeyJwk,
-            keyFingerprint: material.keyFingerprint,
-            deviceLabel: 'Trình duyệt web',
-          }),
-        });
-        if (!response.ok || loggedOutRef.current) {
-          return false;
-        }
-        const data = (await response.json()) as {
-          readonly device?: { readonly devicePublicId?: string };
-          readonly bootstrapKeyPair?: {
-            readonly keyFingerprint: string;
-            readonly identityPublicKeyJwk: E2eePublicJwk;
-            readonly identityPrivateJwk: E2eePrivateJwk;
-            readonly signingPublicKeyJwk: E2eePublicJwk;
-            readonly signingPrivateJwk: E2eePrivateJwk;
-          };
-        };
-        if (
-          typeof data.device?.devicePublicId === 'string' &&
-          data.device.devicePublicId !== material.devicePublicId
-        ) {
-          await saveDeviceKeyMaterial(
-            {
-              ...material,
-              devicePublicId: data.device.devicePublicId,
-            },
-            'primary',
-          );
-        }
-        if (data.bootstrapKeyPair) {
-          await importAndStoreBootstrapKeyMaterial(currentUserPublicId, data.bootstrapKeyPair);
-        }
-        if (!loggedOutRef.current) {
-          setE2eeReady(true);
-        }
-        return true;
-      } catch {
-        return false;
-      } finally {
-        e2eeBootstrapPromiseRef.current = null;
-      }
-    })();
-
-    e2eeBootstrapPromiseRef.current = promise;
-    return promise;
+    return ok;
   }, [currentUserPublicId]);
 
   const disconnectAll = React.useCallback(() => {
     loggedOutRef.current = true;
     stopHeartbeatTimer();
+    clearChatRamMemorySingleton();
+    clearE2eeClientBootstrapState();
     for (const timer of exitTimersRef.current.values()) {
       clearTimeout(timer);
     }
@@ -705,8 +656,10 @@ export function RealtimePresenceProvider({
       errorMessage,
       deletingIds,
       activeStatusEnabled,
+      readReceiptsEnabled,
       e2eeReady,
       setActiveStatusEnabled,
+      setReadReceiptsEnabled,
       refreshNotifications,
       loadMoreNotifications,
       markAsRead,
@@ -732,6 +685,7 @@ export function RealtimePresenceProvider({
       markAsRead,
       nextCursor,
       notifications,
+      readReceiptsEnabled,
       refreshNotifications,
       removeNotificationLocally,
       subscribeChatEvents,
