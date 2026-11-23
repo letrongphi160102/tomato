@@ -471,7 +471,7 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
           ) {
             continue;
           }
-          if (params.tab === 'pending' && conv.lastSeq === 0) {
+          if (conv.lastSeq === 0) {
             continue;
           }
           const peerUser = usersById.get(peerParticipant.userId)!;

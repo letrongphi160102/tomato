@@ -9,7 +9,12 @@ import {
   type RealtimePresenceContextValue,
 } from '@/components/realtime/realtime-presence-context';
 import { authFetch, seedAccessTokenFreshness } from '@/lib/auth-client';
-import { getOrCreatePrimaryDeviceKeyMaterial, saveDeviceKeyMaterial } from '@/lib/e2ee/keystore';
+import {
+  getOrCreatePrimaryDeviceKeyMaterial,
+  importAndStoreBootstrapKeyMaterial,
+  saveDeviceKeyMaterial,
+} from '@/lib/e2ee/keystore';
+import type { E2eePrivateJwk, E2eePublicJwk } from '@/lib/e2ee/types';
 import {
   connectUserRealtime,
   disconnectAllRealtimeConnections,
@@ -531,6 +536,13 @@ export function RealtimePresenceProvider({
         }
         const data = (await response.json()) as {
           readonly device?: { readonly devicePublicId?: string };
+          readonly bootstrapKeyPair?: {
+            readonly keyFingerprint: string;
+            readonly identityPublicKeyJwk: E2eePublicJwk;
+            readonly identityPrivateJwk: E2eePrivateJwk;
+            readonly signingPublicKeyJwk: E2eePublicJwk;
+            readonly signingPrivateJwk: E2eePrivateJwk;
+          };
         };
         if (
           typeof data.device?.devicePublicId === 'string' &&
@@ -543,6 +555,9 @@ export function RealtimePresenceProvider({
             },
             'primary',
           );
+        }
+        if (data.bootstrapKeyPair) {
+          await importAndStoreBootstrapKeyMaterial(currentUserPublicId, data.bootstrapKeyPair);
         }
         if (!loggedOutRef.current) {
           setE2eeReady(true);

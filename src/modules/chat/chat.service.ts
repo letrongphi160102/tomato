@@ -24,6 +24,10 @@ import {
   type ConversationListRowRecord,
 } from '@/modules/chat/chat.repository';
 import {
+  deriveUserBootstrapKeyPairBundle,
+  type UserBootstrapKeyPairBundle,
+} from '@/modules/chat/e2ee-bootstrap';
+import {
   MAX_ACTIVE_E2EE_DEVICES_PER_USER,
   MAX_PENDING_MESSAGES_BEFORE_ACCEPT,
   chatPublicIdParamSchema,
@@ -309,6 +313,7 @@ export class ChatService {
   ): Promise<{
     readonly device: E2eeDeviceKeyDto;
     readonly revokedDevicePublicIds: readonly string[];
+    readonly bootstrapKeyPair: UserBootstrapKeyPairBundle;
     readonly message: string;
   }> {
     assertChatAuthorized(actor, 'e2ee:device:register');
@@ -351,6 +356,8 @@ export class ChatService {
     }
 
     const currentTime = this.now();
+    const bootstrapKeyPair = await deriveUserBootstrapKeyPairBundle(actor.user.id);
+
     const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
       return this.repository.upsertUserE2eeDevice(
         {
@@ -370,6 +377,7 @@ export class ChatService {
     return {
       device: toDeviceDto(outcome.device),
       revokedDevicePublicIds: outcome.revokedDevicePublicIds,
+      bootstrapKeyPair,
       message: CHAT_MESSAGES.deviceRegistered,
     };
   }
@@ -385,6 +393,7 @@ export class ChatService {
     );
 
     const targetPublicId = parsePublicIdOrThrowNotFound(rawTargetUserPublicId);
+    const currentTime = this.now();
 
     return this.repository.runInRlsTx(actor.user.id, async (tx) => {
       const targetUser = await this.repository.findUserByPublicId(targetPublicId, tx);
@@ -397,7 +406,28 @@ export class ChatService {
         relationship,
       });
 
-      const devices = await this.repository.listActiveDevicesForUser(targetUser!.id, tx);
+      let devices = await this.repository.listActiveDevicesForUser(targetUser!.id, tx);
+
+      // Nếu tài khoản đích chưa kịp đăng nhập sau khi hệ thống cập nhật (0 thiết bị),
+      // tự động khởi tạo khóa công khai P-256 mặc định để người gửi vẫn nhắn tin được ngay lập tức.
+      if (devices.length === 0) {
+        const bootstrap = await deriveUserBootstrapKeyPairBundle(targetUser!.id);
+        const provisioned = await this.repository.upsertUserE2eeDevice(
+          {
+            userId: targetUser!.id,
+            sessionFamilyId: null,
+            deviceLabel: 'Hộp thư mặc định',
+            identityPublicKeyJwk: bootstrap.identityPublicKeyJwk,
+            signingPublicKeyJwk: bootstrap.signingPublicKeyJwk,
+            keyFingerprint: bootstrap.keyFingerprint,
+            maxActiveDevices: MAX_ACTIVE_E2EE_DEVICES_PER_USER,
+            now: currentTime,
+          },
+          tx,
+        );
+        devices = [provisioned.device];
+      }
+
       const ownBackup =
         targetUser!.id === actor.user.id
           ? await this.repository.findKeyBackupByUserId(actor.user.id, tx)

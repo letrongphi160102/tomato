@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   SENTRY_PRIVACY_DATA_COLLECTION,
   extractSentryIngestOrigin,
+  isThirdPartyBrowserNoiseEvent,
   scrubSensitiveString,
   scrubSentryBreadcrumb,
   scrubSentryEvent,
@@ -256,5 +257,33 @@ describe('Unit M5: Sentry beforeSend / beforeBreadcrumb PII & Secret Scrubber', 
       expect(serialized).not.toContain(secret);
     }
     expect(scrubbed.exception?.values?.[0]?.stacktrace?.frames?.[0]?.vars).toBeUndefined();
+  });
+
+  it('chặn thông báo lỗi giả từ script tiêm của Zalo In-App WebView (`zaloJSV2 is not defined`)', () => {
+    const zaloNoiseEvent: ErrorEvent = {
+      type: undefined,
+      exception: {
+        values: [
+          {
+            type: 'ReferenceError',
+            value: 'zaloJSV2 is not defined',
+          },
+        ],
+      },
+    };
+    const appRealEvent: ErrorEvent = {
+      type: undefined,
+      exception: {
+        values: [
+          {
+            type: 'TypeError',
+            value: 'Cannot read properties of undefined',
+          },
+        ],
+      },
+    };
+
+    expect(isThirdPartyBrowserNoiseEvent(zaloNoiseEvent)).toBe(true);
+    expect(isThirdPartyBrowserNoiseEvent(appRealEvent)).toBe(false);
   });
 });

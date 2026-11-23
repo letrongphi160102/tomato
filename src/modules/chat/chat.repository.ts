@@ -553,7 +553,8 @@ export class ChatRepository {
           eq(conversationParticipants.userId, params.userId),
           eq(conversationParticipants.inboxState, params.tab),
           isNull(conversationParticipants.hiddenAt),
-          params.tab === 'pending' ? gt(conversations.lastSeq, 0) : undefined,
+          // Chỉ hiển thị trong danh sách hộp thư những cuộc trò chuyện đã có ít nhất 1 tin nhắn được gửi.
+          gt(conversations.lastSeq, 0),
         ),
       )
       .orderBy(

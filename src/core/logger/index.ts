@@ -101,6 +101,7 @@ const SENSITIVE_KEYS = [
   'pin',
   'identityPrivateJwk',
   'signingPrivateJwk',
+  'bootstrapKeyPair',
   'cookie',
   'Cookie',
   'cookies',

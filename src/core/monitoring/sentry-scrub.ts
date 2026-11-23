@@ -21,7 +21,7 @@ const MAX_ARRAY_ITEMS = 50;
 
 // Danh sách mẫu tên khóa nhạy cảm bắt buộc loại bỏ/che hoàn toàn trước khi gửi sự kiện sang Sentry.
 const SENSITIVE_KEY_PATTERN =
-  /(password|passwd|pwd|pass|token|otp|ticket|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url|^mac$|ciphertext|crypto[_-]?header|wrapped[_-]?key|encrypted[_-]?key[_-]?blob|kdf[_-]?salt|recovery[_-]?pin|^pin$)/i;
+  /(password|passwd|pwd|pass|token|otp|ticket|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url|^mac$|ciphertext|crypto[_-]?header|wrapped[_-]?key|encrypted[_-]?key[_-]?blob|kdf[_-]?salt|recovery[_-]?pin|^pin$|bootstrap[_-]?key[_-]?pair|private[_-]?jwk)/i;
 
 const SENSITIVE_HEADER_KEYS = new Set([
   'authorization',
@@ -41,6 +41,27 @@ const SENSITIVE_HEADER_KEYS = new Set([
 // connection string DB/Redis, tham số truy vấn Drizzle (`params: ...`), xác thực SMTP,
 // JSON/header nhạy cảm, query param nhạy cảm (ví dụ `/reset-password?token=...`) và email PII.
 const BEARER_REGEX = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+const THIRD_PARTY_WEBVIEW_NOISE_REGEX =
+  /\b(?:zaloJSV2|WeixinJSBridge|__gCrWeb|fb_xd_fragment)\s+is\s+not\s+defined\b/i;
+
+/**
+ * Phát hiện các lỗi ReferenceError ngoại lai do In-App WebView của ứng dụng bên thứ ba
+ * (như Zalo WebView `zaloJSV2 is not defined`, WeChat `WeixinJSBridge`) tự tiêm script vào trang.
+ */
+export function isThirdPartyBrowserNoiseEvent(event: ErrorEvent): boolean {
+  if (typeof event.message === 'string' && THIRD_PARTY_WEBVIEW_NOISE_REGEX.test(event.message)) {
+    return true;
+  }
+  const values = event.exception?.values;
+  if (Array.isArray(values)) {
+    for (const ex of values) {
+      if (typeof ex.value === 'string' && THIRD_PARTY_WEBVIEW_NOISE_REGEX.test(ex.value)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 const JWT_REGEX = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const ARGON2_HASH_REGEX = /\$argon2(?:id|i|d)\$[^\s"'`]+/gi;
 const TOMATO_COOKIE_REGEX = /\b(?:__Host-)?tomato_(?:at|rt|csrf|pwd_ticket)=[^;\s"'`]+/gi;

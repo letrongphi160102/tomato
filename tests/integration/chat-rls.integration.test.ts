@@ -8,8 +8,10 @@ import {
   POST as messagesPost,
 } from '@/app/api/v1/conversations/[conversationPublicId]/messages/route';
 import { POST as directConversationPost } from '@/app/api/v1/conversations/direct/route';
+import { GET as conversationsListGet } from '@/app/api/v1/conversations/route';
 import { POST as e2eeDevicesPost } from '@/app/api/v1/e2ee/devices/route';
 import { PUT as e2eeBackupPut } from '@/app/api/v1/e2ee/backup/route';
+import { GET as e2eeUserKeysGet } from '@/app/api/v1/e2ee/users/[userPublicId]/keys/route';
 import { POST as presenceHeartbeatPost } from '@/app/api/v1/presence/heartbeat/route';
 import { POST as presenceQueryPost } from '@/app/api/v1/presence/query/route';
 import { POST as blockPost } from '@/app/api/v1/social/blocks/[userPublicId]/route';
@@ -36,8 +38,11 @@ import { AuditLogService } from '@/core/security/audit-log.service';
 import { CSRF_HEADER_NAME } from '@/core/security/csrf';
 import {
   clearMemoryKeystoreForTesting,
+  decryptDirectMessage,
   encryptDirectMessage,
   getOrCreatePrimaryDeviceKeyMaterial,
+  importAndStoreBootstrapKeyMaterial,
+  listLocalDeviceKeyMaterials,
 } from '@/lib/e2ee';
 import {
   AuthRepository,
@@ -522,6 +527,109 @@ describe('Integration M9: PostgreSQL RLS (Non-BYPASSRLS Role), Non-Recursive Pol
     expect(createRes.status).toBe(201);
     const convPublicId = ((await createRes.json()) as { conversation: { public_id: string } })
       .conversation.public_id;
+
+    // 0. Khi mới bấm "Nhắn tin" nhưng CHƯA gửi bất kỳ tin nhắn nào (last_seq = 0):
+    //    Danh sách hộp thư Chính (`tab=primary`) của Alice KHÔNG được hiển thị đoạn chat trống.
+    const emptyPrimaryListRes = await conversationsListGet(
+      new Request(`${origin}/api/v1/conversations?tab=primary`, {
+        headers: createHeaders(alice.jar, alice.ip),
+      }),
+    );
+    expect(emptyPrimaryListRes.status).toBe(200);
+    const emptyPrimaryList = (await emptyPrimaryListRes.json()) as {
+      items: Array<{ public_id: string }>;
+    };
+    expect(emptyPrimaryList.items.some((c) => c.public_id === convPublicId)).toBe(false);
+
+    // 0b. Ngay cả khi Bob CHƯA từng đăng nhập / đăng ký khóa thiết bị sau khi deploy M9,
+    //     Alice gọi GET /api/v1/e2ee/users/:bob/keys vẫn nhận được khóa P-256 hộp thư mặc định của Bob,
+    //     mã hóa & gửi tin nhắn được ngay, và khi Bob đăng nhập sau đó sẽ giải mã đọc được tin nhắn!
+    const bobKeysBeforeLoginRes = await e2eeUserKeysGet(
+      new Request(`${origin}/api/v1/e2ee/users/${bob.publicId}/keys`, {
+        headers: createHeaders(alice.jar, alice.ip),
+      }),
+      { params: Promise.resolve({ userPublicId: bob.publicId }) },
+    );
+    expect(bobKeysBeforeLoginRes.status).toBe(200);
+    const bobKeysBeforeLogin = (await bobKeysBeforeLoginRes.json()) as {
+      devices: Array<{
+        devicePublicId: string;
+        keyFingerprint: string;
+        identityPublicKeyJwk: { kty: 'EC'; crv: 'P-256'; x: string; y: string };
+        signingPublicKeyJwk: { kty: 'EC'; crv: 'P-256'; x: string; y: string };
+      }>;
+    };
+    expect(bobKeysBeforeLogin.devices).toHaveLength(1);
+
+    const aliceDevice = await getOrCreatePrimaryDeviceKeyMaterial(alice.publicId);
+    const offlineMsgEnvelope = await encryptDirectMessage({
+      conversationPublicId: convPublicId,
+      senderPublicId: alice.publicId,
+      clientMsgId: 'msg_offline_bob_01',
+      plaintext: 'Tin nhắn gửi khi Bob chưa mở web lần nào',
+      senderDevice: aliceDevice,
+      recipientDevices: bobKeysBeforeLogin.devices,
+    });
+
+    const sendToOfflineBobRes = await messagesPost(
+      new Request(`${origin}/api/v1/conversations/${convPublicId}/messages`, {
+        method: 'POST',
+        headers: createHeaders(alice.jar, alice.ip, { includeCsrf: true, json: true }),
+        body: JSON.stringify({
+          clientMsgId: 'msg_offline_bob_01',
+          messageType: 'text',
+          ciphertext: offlineMsgEnvelope.ciphertext,
+          cryptoHeader: offlineMsgEnvelope.cryptoHeader,
+        }),
+      }),
+      { params: Promise.resolve({ conversationPublicId: convPublicId }) },
+    );
+    expect(sendToOfflineBobRes.status).toBe(201);
+
+    // Sau khi đã gửi ít nhất 1 tin nhắn (last_seq = 1), hội thoại mới xuất hiện trong tab Chính của Alice.
+    const primaryListAfterSendRes = await conversationsListGet(
+      new Request(`${origin}/api/v1/conversations?tab=primary`, {
+        headers: createHeaders(alice.jar, alice.ip),
+      }),
+    );
+    const primaryListAfterSend = (await primaryListAfterSendRes.json()) as {
+      items: Array<{ public_id: string }>;
+    };
+    expect(primaryListAfterSend.items.some((c) => c.public_id === convPublicId)).toBe(true);
+
+    // Khi Bob mở web đăng ký thiết bị mới -> nhận bootstrapKeyPair, nạp extractable: false và giải mã được tin nhắn cũ!
+    const bobPrimaryDevice = await getOrCreatePrimaryDeviceKeyMaterial(bob.publicId);
+    const bobRegRes = await e2eeDevicesPost(
+      new Request(`${origin}/api/v1/e2ee/devices`, {
+        method: 'POST',
+        headers: createHeaders(bob.jar, bob.ip, { includeCsrf: true, json: true }),
+        body: JSON.stringify({
+          identityPublicKeyJwk: bobPrimaryDevice.identityPublicKeyJwk,
+          signingPublicKeyJwk: bobPrimaryDevice.signingPublicKeyJwk,
+          keyFingerprint: bobPrimaryDevice.keyFingerprint,
+        }),
+      }),
+    );
+    expect(bobRegRes.status).toBe(200);
+    const bobRegData = (await bobRegRes.json()) as {
+      bootstrapKeyPair: Parameters<typeof importAndStoreBootstrapKeyMaterial>[1];
+    };
+    const importedBootstrap = await importAndStoreBootstrapKeyMaterial(
+      bob.publicId,
+      bobRegData.bootstrapKeyPair,
+    );
+    expect(importedBootstrap.identityPrivateKey.extractable).toBe(false);
+
+    const bobMaterials = await listLocalDeviceKeyMaterials(bob.publicId);
+    const decryptedOfflineMsg = await decryptDirectMessage({
+      conversationPublicId: convPublicId,
+      senderPublicId: alice.publicId,
+      clientMsgId: 'msg_offline_bob_01',
+      ciphertext: offlineMsgEnvelope.ciphertext,
+      cryptoHeader: offlineMsgEnvelope.cryptoHeader,
+      receiverKeyMaterials: bobMaterials,
+    });
+    expect(decryptedOfflineMsg.text).toBe('Tin nhắn gửi khi Bob chưa mở web lần nào');
 
     // 1. Khi hội thoại còn ở `pending`: Alice hỏi trạng thái hoạt động của Bob -> nhận `null`.
     const presWhilePendingRes = await presenceQueryPost(

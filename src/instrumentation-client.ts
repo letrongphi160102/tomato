@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 
 import {
   SENTRY_PRIVACY_DATA_COLLECTION,
+  isThirdPartyBrowserNoiseEvent,
   scrubSentryBreadcrumb,
   scrubSentryEvent,
 } from '@/core/monitoring/sentry-scrub';
@@ -18,7 +19,12 @@ Sentry.init({
   environment: process.env.NODE_ENV ?? 'development',
   dataCollection: SENTRY_PRIVACY_DATA_COLLECTION,
   tracesSampleRate: isProduction ? 0.1 : 0,
-  beforeSend: (event) => scrubSentryEvent(event),
+  ignoreErrors: [
+    /\bzaloJSV2\s+is\s+not\s+defined\b/i,
+    /\bWeixinJSBridge\s+is\s+not\s+defined\b/i,
+    /\b__gCrWeb\b/i,
+  ],
+  beforeSend: (event) => (isThirdPartyBrowserNoiseEvent(event) ? null : scrubSentryEvent(event)),
   beforeBreadcrumb: (breadcrumb) => scrubSentryBreadcrumb(breadcrumb),
 });
 

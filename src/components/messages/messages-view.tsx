@@ -463,12 +463,18 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     }
     handledToParamRef.current = targetToPublicIdParam;
     const timer = setTimeout(() => {
-      void openOrCreateDirectConversation(targetToPublicIdParam).catch((err) => {
-        setChatError(err instanceof Error ? err.message : 'Không thể mở cuộc trò chuyện.');
-      });
+      void openOrCreateDirectConversation(targetToPublicIdParam)
+        .then(() => {
+          // Xóa tham số `?to=` trên thanh địa chỉ sau khi đã mở khung soạn thảo để nếu người dùng
+          // rời đi mà chưa gửi tin nhắn nào, quay lại `/messages` sẽ không tạo đoạn chat trống.
+          router.replace('/messages', { scroll: false });
+        })
+        .catch((err) => {
+          setChatError(err instanceof Error ? err.message : 'Không thể mở cuộc trò chuyện.');
+        });
     }, 0);
     return () => clearTimeout(timer);
-  }, [currentUserPublicId, openOrCreateDirectConversation, targetToPublicIdParam]);
+  }, [currentUserPublicId, openOrCreateDirectConversation, router, targetToPublicIdParam]);
 
   React.useEffect(() => {
     if (!selectedConversation) {

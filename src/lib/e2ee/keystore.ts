@@ -1,4 +1,4 @@
-import type { E2eeDeviceKeyPairMaterial, E2eePublicJwk } from '@/lib/e2ee/types';
+import type { E2eeDeviceKeyPairMaterial, E2eePrivateJwk, E2eePublicJwk } from '@/lib/e2ee/types';
 import {
   computeDeviceKeyFingerprint,
   getWebCrypto,
@@ -84,12 +84,12 @@ async function idbPut(key: string, value: E2eeDeviceKeyPairMaterial): Promise<vo
 }
 
 /**
- * Lưu một cặp khóa thiết bị (hoặc khóa khôi phục từ mã PIN) đã ở trạng thái `extractable: false`
- * vào IndexedDB theo cả slot (`primary` / `backup`) và `keyFingerprint`.
+ * Lưu một cặp khóa thiết bị (hoặc khóa khôi phục từ mã PIN / bootstrap) đã ở trạng thái `extractable: false`
+ * vào IndexedDB theo cả slot (`primary` / `backup` / `bootstrap`) và `keyFingerprint`.
  */
 export async function saveDeviceKeyMaterial(
   material: E2eeDeviceKeyPairMaterial,
-  slot: 'primary' | 'backup' = 'primary',
+  slot: 'primary' | 'backup' | 'bootstrap' = 'primary',
 ): Promise<void> {
   const slotKey = buildStoreKey(material.userPublicId, slot);
   const fingerprintKey = buildStoreKey(material.userPublicId, material.keyFingerprint);
@@ -108,6 +108,12 @@ export async function getBackupDeviceKeyMaterial(
   return idbGet(buildStoreKey(userPublicId, 'backup'));
 }
 
+export async function getBootstrapDeviceKeyMaterial(
+  userPublicId: string,
+): Promise<E2eeDeviceKeyPairMaterial | null> {
+  return idbGet(buildStoreKey(userPublicId, 'bootstrap'));
+}
+
 export async function getDeviceKeyMaterialByFingerprint(
   userPublicId: string,
   keyFingerprint: string,
@@ -116,19 +122,97 @@ export async function getDeviceKeyMaterialByFingerprint(
 }
 
 /**
+ * Nạp cặp khóa khởi tạo hộp thư mặc định (Pre-Key Bootstrap) vào IndexedDB với `extractable: false`
+ * và xóa sạch thành phần khóa riêng `d` trong RAM để giải mã được các tin nhắn gửi đến lúc tài khoản ngoại tuyến.
+ */
+export async function importAndStoreBootstrapKeyMaterial(
+  userPublicId: string,
+  bundle: {
+    readonly keyFingerprint: string;
+    readonly identityPublicKeyJwk: E2eePublicJwk;
+    readonly identityPrivateJwk: E2eePrivateJwk;
+    readonly signingPublicKeyJwk: E2eePublicJwk;
+    readonly signingPrivateJwk: E2eePrivateJwk;
+  },
+): Promise<E2eeDeviceKeyPairMaterial> {
+  const existing = await getBootstrapDeviceKeyMaterial(userPublicId);
+  if (existing && existing.keyFingerprint === bundle.keyFingerprint) {
+    bundle.identityPrivateJwk.d = '';
+    bundle.signingPrivateJwk.d = '';
+    return existing;
+  }
+
+  const cryptoObj = getWebCrypto();
+  const subtle = cryptoObj.subtle;
+  const idPub = normalizePublicP256Jwk(bundle.identityPublicKeyJwk);
+  const sigPub = normalizePublicP256Jwk(bundle.signingPublicKeyJwk);
+
+  const [identityPrivateKey, signingPrivateKey] = await Promise.all([
+    subtle.importKey(
+      'jwk',
+      {
+        kty: 'EC',
+        crv: 'P-256',
+        x: idPub.x,
+        y: idPub.y,
+        d: bundle.identityPrivateJwk.d,
+      },
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false, // extractable: false
+      ['deriveBits'],
+    ),
+    subtle.importKey(
+      'jwk',
+      {
+        kty: 'EC',
+        crv: 'P-256',
+        x: sigPub.x,
+        y: sigPub.y,
+        d: bundle.signingPrivateJwk.d,
+      },
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false, // extractable: false
+      ['sign'],
+    ),
+  ]);
+
+  bundle.identityPrivateJwk.d = '';
+  bundle.signingPrivateJwk.d = '';
+
+  const material: E2eeDeviceKeyPairMaterial = {
+    userPublicId,
+    devicePublicId: cryptoObj.randomUUID(),
+    keyFingerprint: bundle.keyFingerprint,
+    identityPrivateKey,
+    identityPublicKeyJwk: idPub,
+    signingPrivateKey,
+    signingPublicKeyJwk: sigPub,
+    createdAtIso: new Date().toISOString(),
+    isBackupKey: true,
+  };
+
+  await saveDeviceKeyMaterial(material, 'bootstrap');
+  return material;
+}
+
+/**
  * Lấy toàn bộ các khóa giải mã hiện có của người dùng trên trình duyệt này
- * (bao gồm khóa thiết bị chính và khóa đồng bộ từ mã PIN nếu có).
+ * (bao gồm khóa thiết bị chính, khóa hộp thư mặc định và khóa đồng bộ từ mã PIN nếu có).
  */
 export async function listLocalDeviceKeyMaterials(
   userPublicId: string,
 ): Promise<E2eeDeviceKeyPairMaterial[]> {
-  const [primary, backup] = await Promise.all([
+  const [primary, bootstrap, backup] = await Promise.all([
     getPrimaryDeviceKeyMaterial(userPublicId),
+    getBootstrapDeviceKeyMaterial(userPublicId),
     getBackupDeviceKeyMaterial(userPublicId),
   ]);
   const map = new Map<string, E2eeDeviceKeyPairMaterial>();
   if (primary) {
     map.set(primary.keyFingerprint, primary);
+  }
+  if (bootstrap) {
+    map.set(bootstrap.keyFingerprint, bootstrap);
   }
   if (backup) {
     map.set(backup.keyFingerprint, backup);
