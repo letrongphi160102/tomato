@@ -295,4 +295,34 @@ export class NotificationRepository {
 
     return rows.map((row) => row.publicId);
   }
+
+  /**
+   * Xóa cứng đúng 1 thông báo thuộc chính `recipientUserId` theo cặp `(public_id, recipient_id)`.
+   * Tuyệt đối không tác động tới bảng `follows` hay `blocks`.
+   */
+  async deleteOneForRecipient(
+    recipientUserId: string,
+    notificationPublicId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<{
+    readonly publicId: string;
+    readonly recipientId: string;
+    readonly readAt: Date | null;
+  } | null> {
+    const rows = await executor
+      .delete(notifications)
+      .where(
+        and(
+          eq(notifications.publicId, notificationPublicId),
+          eq(notifications.recipientId, recipientUserId),
+        ),
+      )
+      .returning({
+        publicId: notifications.publicId,
+        recipientId: notifications.recipientId,
+        readAt: notifications.readAt,
+      });
+
+    return rows[0] ?? null;
+  }
 }

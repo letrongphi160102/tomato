@@ -19,9 +19,11 @@ import {
   buildNotificationDedupeKey,
 } from '@/modules/notifications/notification.repository';
 import {
+  deleteNotificationQuerySchema,
   encodeNotificationCursor,
   markNotificationsReadInputSchema,
   notificationListQuerySchema,
+  notificationPublicIdParamSchema,
 } from '@/modules/notifications/notification.schemas';
 
 /**
@@ -57,6 +59,12 @@ export interface NotificationListResult {
 
 export interface MarkNotificationsReadResult {
   readonly markedCount: number;
+  readonly unreadCount: number;
+}
+
+export interface DeleteNotificationResult {
+  readonly deleted: true;
+  readonly notificationPublicId: string;
   readonly unreadCount: number;
 }
 
@@ -218,6 +226,83 @@ export class NotificationService {
     return {
       markedCount: markedPublicIds.length,
       unreadCount,
+    };
+  }
+
+  /**
+   * Xóa cứng 1 thông báo thuộc chính người dùng hiện tại (`actor.user.id` từ Access Token):
+   * - Chỉ xóa dòng thông báo hiển thị; TUYỆT ĐỐI KHÔNG làm thay đổi trạng thái follow/unfollow/block.
+   * - Kiểm tra quyền sở hữu qua Policy ReBAC tập trung + scope truy vấn `recipient_id = actor.user.id`.
+   * - Trả đồng nhất `404 Not Found` khi thông báo không tồn tại hoặc thuộc về người khác.
+   * - Phát sự kiện `notification.deleted` chỉ tới kênh cá nhân `user:{actor.publicId}` sau khi commit.
+   */
+  async deleteNotification(
+    actor: AuthenticatedPrincipal,
+    rawNotificationPublicId: string,
+    rawQuery: Record<string, unknown> = {},
+  ): Promise<DeleteNotificationResult> {
+    assertNotificationAuthorized(actor, 'notification:delete');
+    await this.consumeRateLimitOrThrow(
+      `notifications:delete:user:${actor.user.id}`,
+      NOTIFICATION_RATE_LIMITS.deleteByUser,
+    );
+
+    const parsedQuery = deleteNotificationQuerySchema.safeParse(rawQuery);
+    if (!parsedQuery.success) {
+      throw new NotificationDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: NOTIFICATION_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsedQuery.error),
+      });
+    }
+
+    const parsedPublicId = notificationPublicIdParamSchema.safeParse(rawNotificationPublicId);
+    if (!parsedPublicId.success) {
+      throw new NotificationDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: NOTIFICATION_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsedPublicId.error),
+      });
+    }
+
+    const targetPublicId = parsedPublicId.data;
+
+    const txOutcome = await this.repository.getDb().transaction(async (tx) => {
+      const deleted = await this.repository.deleteOneForRecipient(
+        actor.user.id,
+        targetPublicId,
+        tx,
+      );
+
+      // Fail-closed: nếu không tồn tại hoặc thuộc người khác -> Policy ném 404 đồng nhất.
+      assertNotificationAuthorized(actor, 'notification:delete', {
+        notificationRecipientId: deleted?.recipientId ?? null,
+      });
+
+      const unreadCount = await this.repository.countUnreadForRecipient(actor.user.id, tx);
+      return {
+        notificationPublicId: deleted!.publicId,
+        unreadCount,
+      };
+    });
+
+    await this.dispatchRealtimeEvents([
+      {
+        recipientPublicId: actor.user.publicId,
+        eventName: 'notification.deleted',
+        payload: {
+          notificationPublicId: txOutcome.notificationPublicId,
+          unreadCount: txOutcome.unreadCount,
+        },
+      },
+    ]);
+
+    return {
+      deleted: true,
+      notificationPublicId: txOutcome.notificationPublicId,
+      unreadCount: txOutcome.unreadCount,
     };
   }
 

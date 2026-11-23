@@ -4,6 +4,7 @@ import * as React from 'react';
 
 import {
   RealtimePresenceContext,
+  type DeleteNotificationOutcome,
   type RealtimePresenceContextValue,
 } from '@/components/realtime/realtime-presence-context';
 import { authFetch } from '@/lib/auth-client';
@@ -50,11 +51,20 @@ export function RealtimePresenceProvider({
   const [loadingInitial, setLoadingInitial] = React.useState(true);
   const [loadingMore, setLoadingMore] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [activeStatusEnabled, setActiveStatusEnabled] = React.useState(initialShowActiveStatus);
 
+  const notificationsRef = React.useRef<readonly NotificationItemDto[]>(notifications);
+  const deletingIdsRef = React.useRef<Set<string>>(new Set());
+  const inFlightUnreadDeleteIdsRef = React.useRef<Set<string>>(new Set());
+  const exitTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const connectionRef = React.useRef<RealtimeClientConnection | null>(null);
   const heartbeatIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const loggedOutRef = React.useRef(false);
+
+  React.useEffect(() => {
+    notificationsRef.current = notifications;
+  }, [notifications]);
 
   const stopHeartbeatTimer = React.useCallback(() => {
     if (heartbeatIntervalRef.current !== null) {
@@ -238,6 +248,142 @@ export function RealtimePresenceProvider({
     });
   }, []);
 
+  /**
+   * Xóa 1 thông báo với Optimistic UI an toàn khi xóa nhanh nhiều dòng song song:
+   * - Chặn gửi trùng trên cùng `public_id` bằng `deletingIdsRef`.
+   * - Chỉ rollback đúng dòng bị lỗi (không ghi đè snapshot toàn mảng làm hỏng các dòng khác đang xóa).
+   */
+  const deleteNotification = React.useCallback(
+    async (notificationPublicId: string): Promise<DeleteNotificationOutcome> => {
+      if (loggedOutRef.current || deletingIdsRef.current.has(notificationPublicId)) {
+        return { ok: true };
+      }
+
+      const currentItems = notificationsRef.current;
+      const originalIndex = currentItems.findIndex(
+        (item) => item.public_id === notificationPublicId,
+      );
+      if (originalIndex === -1) {
+        return { ok: true };
+      }
+
+      const targetItem = currentItems[originalIndex];
+      if (!targetItem) {
+        return { ok: true };
+      }
+
+      const wasUnread = targetItem.readAt === null;
+
+      deletingIdsRef.current.add(notificationPublicId);
+      setDeletingIds(new Set(deletingIdsRef.current));
+
+      if (wasUnread) {
+        inFlightUnreadDeleteIdsRef.current.add(notificationPublicId);
+        setUnreadCount((count) => Math.max(0, count - 1));
+      }
+
+      let removedFromList = false;
+      let abortedForRollback = false;
+
+      const clearExitTimer = () => {
+        const existingTimer = exitTimersRef.current.get(notificationPublicId);
+        if (existingTimer !== undefined) {
+          clearTimeout(existingTimer);
+          exitTimersRef.current.delete(notificationPublicId);
+        }
+      };
+
+      const removeNow = () => {
+        clearExitTimer();
+        if (removedFromList || abortedForRollback) {
+          return;
+        }
+        removedFromList = true;
+        setNotifications((prev) => prev.filter((item) => item.public_id !== notificationPublicId));
+      };
+
+      const exitTimer = setTimeout(removeNow, 150);
+      exitTimersRef.current.set(notificationPublicId, exitTimer);
+
+      const rollbackItemOnly = (message: string): DeleteNotificationOutcome => {
+        abortedForRollback = true;
+        clearExitTimer();
+        deletingIdsRef.current.delete(notificationPublicId);
+        setDeletingIds(new Set(deletingIdsRef.current));
+
+        if (removedFromList) {
+          setNotifications((prev) => {
+            if (prev.some((item) => item.public_id === targetItem.public_id)) {
+              return prev;
+            }
+            const next = [...prev];
+            const insertAt = Math.min(originalIndex, next.length);
+            next.splice(insertAt, 0, targetItem);
+            return next;
+          });
+        }
+
+        if (wasUnread && inFlightUnreadDeleteIdsRef.current.delete(notificationPublicId)) {
+          setUnreadCount((count) => count + 1);
+        }
+
+        return { ok: false, errorMessage: message };
+      };
+
+      try {
+        const response = await authFetch(
+          `/api/v1/notifications/${encodeURIComponent(notificationPublicId)}`,
+          { method: 'DELETE' },
+        );
+
+        if (loggedOutRef.current) {
+          clearExitTimer();
+          return { ok: true };
+        }
+
+        if (response.status === 404) {
+          // Thông báo đã bị xóa ở tab/thiết bị khác -> giữ trạng thái đã gỡ sạch sẽ.
+          inFlightUnreadDeleteIdsRef.current.delete(notificationPublicId);
+          deletingIdsRef.current.delete(notificationPublicId);
+          setDeletingIds(new Set(deletingIdsRef.current));
+          removeNow();
+          return { ok: true };
+        }
+
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as {
+            readonly error?: { readonly message?: string };
+          } | null;
+          return rollbackItemOnly(
+            body?.error?.message ?? 'Không thể xóa thông báo lúc này. Vui lòng thử lại.',
+          );
+        }
+
+        const data = (await response.json().catch(() => null)) as {
+          readonly unreadCount?: number;
+        } | null;
+
+        inFlightUnreadDeleteIdsRef.current.delete(notificationPublicId);
+        deletingIdsRef.current.delete(notificationPublicId);
+        setDeletingIds(new Set(deletingIdsRef.current));
+        removeNow();
+
+        if (typeof data?.unreadCount === 'number') {
+          setUnreadCount(Math.max(0, data.unreadCount - inFlightUnreadDeleteIdsRef.current.size));
+        }
+
+        return { ok: true };
+      } catch {
+        if (loggedOutRef.current) {
+          clearExitTimer();
+          return { ok: true };
+        }
+        return rollbackItemOnly('Không thể kết nối. Vui lòng thử lại.');
+      }
+    },
+    [],
+  );
+
   const handleRealtimeEvent = React.useCallback((incoming: RealtimeClientEvent) => {
     if (loggedOutRef.current) {
       return;
@@ -300,7 +446,31 @@ export function RealtimePresenceProvider({
         setNotifications((prev) => prev.filter((item) => !removedIds.has(item.public_id)));
       }
       if (typeof incoming.data.unreadCount === 'number') {
-        setUnreadCount(Math.max(0, incoming.data.unreadCount));
+        setUnreadCount(
+          Math.max(0, incoming.data.unreadCount - inFlightUnreadDeleteIdsRef.current.size),
+        );
+      }
+      return;
+    }
+
+    if (incoming.event === 'notification.deleted') {
+      const deletedId =
+        typeof incoming.data.notificationPublicId === 'string'
+          ? incoming.data.notificationPublicId
+          : null;
+
+      if (deletedId) {
+        const timer = exitTimersRef.current.get(deletedId);
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          exitTimersRef.current.delete(deletedId);
+        }
+        setNotifications((prev) => prev.filter((item) => item.public_id !== deletedId));
+      }
+      if (typeof incoming.data.unreadCount === 'number') {
+        setUnreadCount(
+          Math.max(0, incoming.data.unreadCount - inFlightUnreadDeleteIdsRef.current.size),
+        );
       }
     }
   }, []);
@@ -308,6 +478,10 @@ export function RealtimePresenceProvider({
   const disconnectAll = React.useCallback(() => {
     loggedOutRef.current = true;
     stopHeartbeatTimer();
+    for (const timer of exitTimersRef.current.values()) {
+      clearTimeout(timer);
+    }
+    exitTimersRef.current.clear();
     if (connectionRef.current) {
       connectionRef.current.disconnect();
       connectionRef.current = null;
@@ -415,17 +589,21 @@ export function RealtimePresenceProvider({
       loadingInitial,
       loadingMore,
       errorMessage,
+      deletingIds,
       activeStatusEnabled,
       setActiveStatusEnabled,
       refreshNotifications,
       loadMoreNotifications,
       markAsRead,
       markAllAsRead,
+      deleteNotification,
       removeNotificationLocally,
       disconnectAll,
     }),
     [
       activeStatusEnabled,
+      deleteNotification,
+      deletingIds,
       disconnectAll,
       errorMessage,
       loadMoreNotifications,

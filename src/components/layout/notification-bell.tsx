@@ -3,11 +3,17 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Bell, Check, Loader2 } from 'lucide-react';
+import { Bell, Check, Loader2, MoreHorizontal, Trash2 } from 'lucide-react';
 
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { authFetch } from '@/lib/auth-client';
 import { cn } from '@/lib/utils';
 import type { NotificationItemDto } from '@/modules/notifications/notification.service';
@@ -58,6 +64,7 @@ export function NotificationBell() {
   const realtime = useRealtimePresence();
 
   const [open, setOpen] = React.useState(false);
+  const [openMenuId, setOpenMenuId] = React.useState<string | null>(null);
   const [busyActorIds, setBusyActorIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [actionError, setActionError] = React.useState<string | null>(null);
   const containerRef = React.useRef<HTMLDivElement | null>(null);
@@ -69,16 +76,26 @@ export function NotificationBell() {
 
     function handlePointerDown(event: MouseEvent) {
       if (
+        event.target instanceof Element &&
+        event.target.closest('[data-notification-menu-content="true"]')
+      ) {
+        return;
+      }
+      if (
         containerRef.current &&
         event.target instanceof Node &&
         !containerRef.current.contains(event.target)
       ) {
+        setOpenMenuId(null);
         setOpen(false);
       }
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
+        if (openMenuId !== null) {
+          return;
+        }
         setOpen(false);
       }
     }
@@ -89,7 +106,7 @@ export function NotificationBell() {
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [open]);
+  }, [open, openMenuId]);
 
   if (!realtime) {
     return null;
@@ -102,10 +119,12 @@ export function NotificationBell() {
     loadingInitial,
     loadingMore,
     errorMessage,
+    deletingIds,
     refreshNotifications,
     loadMoreNotifications,
     markAsRead,
     markAllAsRead,
+    deleteNotification,
     removeNotificationLocally,
   } = realtime;
 
@@ -113,6 +132,7 @@ export function NotificationBell() {
 
   function handleToggleDropdown() {
     setActionError(null);
+    setOpenMenuId(null);
     setOpen((prev) => {
       const next = !prev;
       if (next) {
@@ -120,6 +140,15 @@ export function NotificationBell() {
       }
       return next;
     });
+  }
+
+  async function handleDeleteNotification(notificationPublicId: string) {
+    setOpenMenuId(null);
+    setActionError(null);
+    const outcome = await deleteNotification(notificationPublicId);
+    if (!outcome.ok && outcome.errorMessage) {
+      setActionError(outcome.errorMessage);
+    }
   }
 
   async function handleFollowRequestDecision(
@@ -254,14 +283,17 @@ export function NotificationBell() {
                   const isFollowRequest =
                     item.type === 'follow_request' && item.followRequestPending;
                   const isBusy = busyActorIds.has(item.actor.public_id);
+                  const isDeleting = deletingIds.has(item.public_id);
+                  const isMenuOpen = openMenuId === item.public_id;
                   const actorHref = `/u/${encodeURIComponent(item.actor.handle)}`;
 
                   return (
                     <li
                       key={item.public_id}
                       className={cn(
-                        'px-4 py-3 transition-colors hover:bg-muted/40',
+                        'group px-4 py-3 transition-all duration-150 ease-out hover:bg-muted/40',
                         isUnread ? 'bg-primary/[0.04]' : null,
+                        isDeleting ? 'pointer-events-none -translate-x-2 opacity-0' : null,
                       )}
                     >
                       <div className="flex items-start gap-3">
@@ -300,8 +332,11 @@ export function NotificationBell() {
                               <Button
                                 type="button"
                                 size="sm"
-                                disabled={isBusy}
-                                onClick={() => void handleFollowRequestDecision(item, 'accept')}
+                                disabled={isBusy || isDeleting}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleFollowRequestDecision(item, 'accept');
+                                }}
                                 className="h-7 rounded-lg px-3 text-xs"
                               >
                                 {isBusy ? (
@@ -314,22 +349,81 @@ export function NotificationBell() {
                                 type="button"
                                 variant="outline"
                                 size="sm"
-                                disabled={isBusy}
-                                onClick={() => void handleFollowRequestDecision(item, 'decline')}
+                                disabled={isBusy || isDeleting}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleFollowRequestDecision(item, 'decline');
+                                }}
                                 className="h-7 rounded-lg px-3 text-xs"
                               >
-                                Xóa
+                                Từ chối
                               </Button>
                             </div>
                           ) : null}
                         </div>
 
-                        {isUnread ? (
-                          <span
-                            aria-label="Chưa đọc"
-                            className="mt-1.5 size-2 shrink-0 rounded-full bg-primary"
-                          />
-                        ) : null}
+                        <div className="flex shrink-0 items-center gap-1">
+                          {isUnread ? (
+                            <span
+                              aria-label="Chưa đọc"
+                              className="size-2 shrink-0 rounded-full bg-primary"
+                            />
+                          ) : null}
+
+                          <DropdownMenu
+                            open={isMenuOpen}
+                            onOpenChange={(nextOpen) =>
+                              setOpenMenuId(nextOpen ? item.public_id : null)
+                            }
+                          >
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                disabled={isDeleting}
+                                aria-label={`Tùy chọn thông báo từ ${item.actor.fullName}`}
+                                onClick={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                className={cn(
+                                  'size-8 rounded-full text-muted-foreground transition-opacity hover:bg-muted hover:text-foreground',
+                                  'opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100',
+                                  isMenuOpen ? 'sm:opacity-100' : null,
+                                )}
+                              >
+                                <MoreHorizontal className="size-4" aria-hidden="true" />
+                              </Button>
+                            </DropdownMenuTrigger>
+
+                            <DropdownMenuContent
+                              align="end"
+                              data-notification-menu-content="true"
+                              onClick={(event) => event.stopPropagation()}
+                              className="w-56"
+                            >
+                              <DropdownMenuItem
+                                disabled={isDeleting}
+                                onSelect={(event) => {
+                                  event.stopPropagation();
+                                  void handleDeleteNotification(item.public_id);
+                                }}
+                                className="items-start text-destructive focus:bg-destructive/10 focus:text-destructive"
+                              >
+                                <Trash2 className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                                <div className="flex flex-col">
+                                  <span className="font-medium leading-tight">
+                                    Xóa thông báo này
+                                  </span>
+                                  {isFollowRequest ? (
+                                    <span className="mt-0.5 text-[11px] font-normal text-muted-foreground">
+                                      Không từ chối yêu cầu theo dõi
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
                       </div>
                     </li>
                   );

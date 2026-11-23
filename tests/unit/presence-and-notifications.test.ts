@@ -4,8 +4,10 @@ import type { SessionRow, UserRow } from '@/core/db/schema';
 import type { AuthenticatedPrincipal } from '@/modules/auth/auth.policy';
 import {
   authorizeNotificationAction,
+  deleteNotificationQuerySchema,
   markNotificationsReadInputSchema,
   notificationListQuerySchema,
+  notificationPublicIdParamSchema,
 } from '@/modules/notifications';
 import {
   PRESENCE_ONLINE_THRESHOLD_MS,
@@ -221,6 +223,22 @@ describe('Notifications Policy & Strict Zod Schemas (M8)', () => {
 
     expect(authorizeNotificationAction(principalA, 'notification:list')).toBe(true);
     expect(authorizeNotificationAction(principalA, 'notification:mark_read')).toBe(true);
+    expect(authorizeNotificationAction(principalA, 'notification:delete')).toBe(true);
+    expect(
+      authorizeNotificationAction(principalA, 'notification:delete', {
+        notificationRecipientId: alice.id,
+      }),
+    ).toBe(true);
+    expect(
+      authorizeNotificationAction(principalA, 'notification:delete', {
+        notificationRecipientId: bob.id,
+      }),
+    ).toBe(false);
+    expect(
+      authorizeNotificationAction(principalA, 'notification:delete', {
+        notificationRecipientId: null,
+      }),
+    ).toBe(false);
     expect(
       authorizeNotificationAction(principalA, 'notification:emit', {
         recipientUser: bob,
@@ -254,6 +272,17 @@ describe('Notifications Policy & Strict Zod Schemas (M8)', () => {
       markNotificationsReadInputSchema.safeParse({ markAll: true, userId: 'hack' }).success,
     ).toBe(false);
     expect(markNotificationsReadInputSchema.safeParse({ markAll: true }).success).toBe(true);
+
+    // Schema xóa 1 thông báo: chỉ chấp nhận UUIDv4 hợp lệ và query rỗng (.strict()).
+    expect(
+      notificationPublicIdParamSchema.safeParse('11111111-1111-4111-8111-111111111111').success,
+    ).toBe(true);
+    expect(
+      notificationPublicIdParamSchema.safeParse('0195a000-0000-7000-8000-000000000001').success,
+    ).toBe(false);
+    expect(notificationPublicIdParamSchema.safeParse('not-a-uuid').success).toBe(false);
+    expect(deleteNotificationQuerySchema.safeParse({}).success).toBe(true);
+    expect(deleteNotificationQuerySchema.safeParse({ userId: 'hack' }).success).toBe(false);
 
     expect(presenceHeartbeatInputSchema.safeParse({ timestamp: 123 }).success).toBe(false);
     expect(presenceHeartbeatInputSchema.safeParse({}).success).toBe(true);

@@ -203,6 +203,11 @@ export const NOTIFICATION_RATE_LIMITS = Object.freeze({
     windowSeconds: 60,
     strategy: 'sliding_window',
   }),
+  deleteByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
 } satisfies Record<string, RateLimitRule>);
 
 export const PRESENCE_RATE_LIMITS = Object.freeze({

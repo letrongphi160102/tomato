@@ -16,6 +16,7 @@ const SUPPORTED_EVENT_NAMES: ReadonlySet<string> = new Set<RealtimeEventName>([
   'notification.created',
   'notification.read',
   'notification.removed',
+  'notification.deleted',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -133,6 +134,7 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
         'notification.created',
         'notification.read',
         'notification.removed',
+        'notification.deleted',
       ];
 
       for (const eventName of eventNames) {

@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { DELETE as notificationDelete } from '@/app/api/v1/notifications/[notificationPublicId]/route';
 import { GET as notificationsGet } from '@/app/api/v1/notifications/route';
 import { POST as notificationsReadPost } from '@/app/api/v1/notifications/read/route';
 import { POST as presenceHeartbeatPost } from '@/app/api/v1/presence/heartbeat/route';
@@ -603,5 +604,181 @@ describe('Security M8: Realtime Channel BOLA, Presence Đối xứng, Notificati
       }),
     );
     expect(badReadRes.status).toBe(400);
+  });
+
+  it('Ma trận BOLA cho DELETE /api/v1/notifications/:publicId (401/403/400/404/429 & cô lập sự kiện notification.deleted)', async () => {
+    const origin = getTestOrigin();
+    const notifOwnedByA = '55555555-5555-4555-8555-555555555555';
+    const nonexistentNotif = '66666666-6666-4666-8666-666666666666';
+
+    const validCsrfNoAuth = {
+      origin,
+      'sec-fetch-site': 'same-origin',
+      cookie: `tomato_csrf=${TEST_CSRF}`,
+      [CSRF_HEADER_NAME]: TEST_CSRF,
+    };
+
+    // 1. Ẩn danh -> 401 + Cache-Control: no-store.
+    const anonRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${notifOwnedByA}`, {
+        method: 'DELETE',
+        headers: validCsrfNoAuth,
+      }),
+      { params: Promise.resolve({ notificationPublicId: notifOwnedByA }) },
+    );
+    expect(anonRes.status).toBe(401);
+    expect(anonRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+
+    // 2. Thiếu CSRF / sai Origin -> 403 CSRF_VALIDATION_FAILED.
+    const badCsrfRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${notifOwnedByA}`, {
+        method: 'DELETE',
+        headers: createAuthHeaders(origin, 'tok-a', false),
+      }),
+      { params: Promise.resolve({ notificationPublicId: notifOwnedByA }) },
+    );
+    expect(badCsrfRes.status).toBe(403);
+    expect(((await badCsrfRes.json()) as { error: { code: string } }).error.code).toBe(
+      'CSRF_VALIDATION_FAILED',
+    );
+
+    const crossOriginRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${notifOwnedByA}`, {
+        method: 'DELETE',
+        headers: {
+          ...createAuthHeaders(origin, 'tok-a', true),
+          origin: 'https://evil.example',
+          'sec-fetch-site': 'cross-site',
+        },
+      }),
+      { params: Promise.resolve({ notificationPublicId: notifOwnedByA }) },
+    );
+    expect(crossOriginRes.status).toBe(403);
+
+    installSessionLookup({
+      'tok-a': makePrincipal(userA),
+      'tok-b': makePrincipal(userB),
+    });
+
+    const localRealtime = new InMemoryRealtimeAdapter({ isolated: true });
+    const records = new Map<string, { publicId: string; recipientId: string; readAt: Date | null }>(
+      [[notifOwnedByA, { publicId: notifOwnedByA, recipientId: userA.id, readAt: null }]],
+    );
+    const rateLimiter = createAllowAllRateLimiter();
+
+    const mockRepo: Partial<NotificationRepository> = {
+      getDb: () =>
+        ({
+          transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn({}),
+        }) as never,
+      deleteOneForRecipient: vi.fn(async (recipientId: string, publicId: string) => {
+        const found = records.get(publicId);
+        if (!found || found.recipientId !== recipientId) {
+          return null;
+        }
+        records.delete(publicId);
+        return found;
+      }),
+      countUnreadForRecipient: vi.fn(async (recipientId: string) => {
+        let count = 0;
+        for (const r of records.values()) {
+          if (r.recipientId === recipientId && r.readAt === null) count += 1;
+        }
+        return count;
+      }),
+    };
+
+    setNotificationServiceForTesting(
+      new NotificationService({
+        repository: mockRepo as NotificationRepository,
+        rateLimiter,
+        realtimeProvider: localRealtime,
+      }),
+    );
+
+    // 3. Tham số định dạng sai (UUIDv7 / không phải UUID) hoặc query lạ (?userId=...) -> 400.
+    const badFormatRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/0195a000-0000-7000-8000-000000000001`, {
+        method: 'DELETE',
+        headers: createAuthHeaders(origin, 'tok-a'),
+      }),
+      { params: Promise.resolve({ notificationPublicId: '0195a000-0000-7000-8000-000000000001' }) },
+    );
+    expect(badFormatRes.status).toBe(400);
+
+    const extraQueryRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${notifOwnedByA}?userId=${userA.publicId}`, {
+        method: 'DELETE',
+        headers: createAuthHeaders(origin, 'tok-a'),
+      }),
+      { params: Promise.resolve({ notificationPublicId: notifOwnedByA }) },
+    );
+    expect(extraQueryRes.status).toBe(400);
+
+    // 4. BOLA: User B cố xóa thông báo của User A -> 404 đồng nhất với ID không tồn tại; thông báo của A còn nguyên.
+    const bolaRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${notifOwnedByA}`, {
+        method: 'DELETE',
+        headers: createAuthHeaders(origin, 'tok-b'),
+      }),
+      { params: Promise.resolve({ notificationPublicId: notifOwnedByA }) },
+    );
+    const missingRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${nonexistentNotif}`, {
+        method: 'DELETE',
+        headers: createAuthHeaders(origin, 'tok-b'),
+      }),
+      { params: Promise.resolve({ notificationPublicId: nonexistentNotif }) },
+    );
+    expect(bolaRes.status).toBe(404);
+    expect(missingRes.status).toBe(404);
+    expect(await bolaRes.json()).toEqual(await missingRes.json());
+    expect(records.has(notifOwnedByA)).toBe(true);
+    expect(localRealtime.getPublishedEvents()).toHaveLength(0);
+
+    // 5. Chính chủ User A xóa thành công -> 200, Cache-Control: no-store, chỉ bắn notification.deleted tới kênh của A.
+    const ownerRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${notifOwnedByA}`, {
+        method: 'DELETE',
+        headers: createAuthHeaders(origin, 'tok-a'),
+      }),
+      { params: Promise.resolve({ notificationPublicId: notifOwnedByA }) },
+    );
+    expect(ownerRes.status).toBe(200);
+    expect(ownerRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+    const ownerText = await ownerRes.text();
+    expect(JSON.parse(ownerText)).toEqual({
+      deleted: true,
+      notificationPublicId: notifOwnedByA,
+      unreadCount: 0,
+    });
+    expect(ownerText).not.toContain(userA.id);
+
+    const events = localRealtime.getPublishedEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]?.channel).toBe(`user:${userA.publicId}`);
+    expect(events[0]?.event).toBe('notification.deleted');
+    expect(events[0]?.data).toEqual({
+      notificationPublicId: notifOwnedByA,
+      unreadCount: 0,
+    });
+
+    // 6. Vượt ngưỡng Rate Limit -> 429 kèm Retry-After.
+    rateLimiter.consume.mockResolvedValueOnce({
+      allowed: false,
+      limit: 60,
+      remaining: 0,
+      resetAt: Date.now() + 30_000,
+      retryAfterSeconds: 30,
+    });
+    const rlRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${nonexistentNotif}`, {
+        method: 'DELETE',
+        headers: createAuthHeaders(origin, 'tok-a'),
+      }),
+      { params: Promise.resolve({ notificationPublicId: nonexistentNotif }) },
+    );
+    expect(rlRes.status).toBe(429);
+    expect(rlRes.headers.get('Retry-After')).toBe('30');
   });
 });

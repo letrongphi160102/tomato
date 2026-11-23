@@ -67,6 +67,16 @@ const notificationPublicIdSchema = z
   .transform((value) => value.toLowerCase());
 
 /**
+ * Schema kiểm tra tham số đường dẫn `:notificationPublicId` (bắt buộc UUIDv4 công khai).
+ */
+export const notificationPublicIdParamSchema = notificationPublicIdSchema;
+
+/**
+ * Schema query cho `DELETE /api/v1/notifications/:notificationPublicId` (`.strict()` từ chối tham số lạ như `userId`).
+ */
+export const deleteNotificationQuerySchema = z.object({}).strict();
+
+/**
  * Schema body `POST /api/v1/notifications/read` (`.strict()` từ chối field lạ):
  * chỉ chấp nhận ĐÚNG 1 trong 2 dạng: `{ markAll: true }` hoặc `{ notificationPublicIds: UUIDv4[] }`.
  */

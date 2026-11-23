@@ -2,6 +2,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { POST as loginPost } from '@/app/api/v1/auth/login/route';
+import { DELETE as notificationDelete } from '@/app/api/v1/notifications/[notificationPublicId]/route';
 import { GET as notificationsGet } from '@/app/api/v1/notifications/route';
 import { POST as notificationsReadPost } from '@/app/api/v1/notifications/read/route';
 import { POST as presenceHeartbeatPost } from '@/app/api/v1/presence/heartbeat/route';
@@ -12,6 +13,7 @@ import {
   DELETE as unfollowDelete,
   POST as followPost,
 } from '@/app/api/v1/social/follow/[userPublicId]/route';
+import { GET as followRequestsGet } from '@/app/api/v1/social/follow-requests/route';
 import { POST as acceptRequestPost } from '@/app/api/v1/social/follow-requests/[userPublicId]/accept/route';
 import { POST as declineRequestPost } from '@/app/api/v1/social/follow-requests/[userPublicId]/decline/route';
 import { GET as privacyGet, PATCH as privacyPatch } from '@/app/api/v1/users/me/privacy/route';
@@ -748,5 +750,160 @@ describe('Integration M8: Notifications (Partial Unique Index), Realtime & Singl
       }),
     );
     expect((await bAsksA.json()).presences[alice.publicId]).toBeNull();
+  });
+
+  it('DELETE /api/v1/notifications/:publicId: xóa thông báo chưa đọc/đã đọc, giữ nguyên follow_request, chặn BOLA 404 và phát notification.deleted đúng kênh', async () => {
+    const origin = getTestOrigin();
+    const alicePrivate = await seedAndLoginUser({
+      prefix: 'm8_del_a',
+      fullName: 'Alice Delete Target',
+      isPrivate: true,
+    });
+    const bob = await seedAndLoginUser({
+      prefix: 'm8_del_b',
+      fullName: 'Bob Requester',
+      isPrivate: false,
+    });
+    const charlie = await seedAndLoginUser({
+      prefix: 'm8_del_c',
+      fullName: 'Charlie Requester',
+      isPrivate: false,
+    });
+
+    // Bob và Charlie cùng gửi yêu cầu follow tới Alice (tạo 2 thông báo chưa đọc trên chuông của Alice).
+    await followPost(
+      new Request(`${origin}/api/v1/social/follow/${alicePrivate.publicId}`, {
+        method: 'POST',
+        headers: createHeaders(bob.jar, bob.ip, { includeCsrf: true }),
+      }),
+      { params: Promise.resolve({ userPublicId: alicePrivate.publicId }) },
+    );
+    await followPost(
+      new Request(`${origin}/api/v1/social/follow/${alicePrivate.publicId}`, {
+        method: 'POST',
+        headers: createHeaders(charlie.jar, charlie.ip, { includeCsrf: true }),
+      }),
+      { params: Promise.resolve({ userPublicId: alicePrivate.publicId }) },
+    );
+
+    const listBeforeRes = await notificationsGet(
+      new Request(`${origin}/api/v1/notifications?limit=10`, {
+        headers: createHeaders(alicePrivate.jar, alicePrivate.ip),
+      }),
+    );
+    const listBefore = (await listBeforeRes.json()) as {
+      items: Array<{ public_id: string; actor: { public_id: string } }>;
+      unreadCount: number;
+    };
+    expect(listBefore.items).toHaveLength(2);
+    expect(listBefore.unreadCount).toBe(2);
+
+    const bobNotif = listBefore.items.find((i) => i.actor.public_id === bob.publicId)!;
+    const charlieNotif = listBefore.items.find((i) => i.actor.public_id === charlie.publicId)!;
+
+    // 1. BOLA: Bob cố xóa thông báo của Alice -> 404, dữ liệu của Alice không bị ảnh hưởng.
+    realtimeAdapter.clearPublishedEvents();
+    const bolaRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${bobNotif.public_id}`, {
+        method: 'DELETE',
+        headers: createHeaders(bob.jar, bob.ip, { includeCsrf: true }),
+      }),
+      { params: Promise.resolve({ notificationPublicId: bobNotif.public_id }) },
+    );
+    expect(bolaRes.status).toBe(404);
+    expect(realtimeAdapter.getPublishedEvents()).toHaveLength(0);
+
+    // 2. Alice xóa thông báo CHƯA ĐỌC của Bob -> 200, unreadCount giảm 2 -> 1, phát notification.deleted chỉ tới Alice.
+    realtimeAdapter.clearPublishedEvents();
+    const delUnreadRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${bobNotif.public_id}`, {
+        method: 'DELETE',
+        headers: createHeaders(alicePrivate.jar, alicePrivate.ip, { includeCsrf: true }),
+      }),
+      { params: Promise.resolve({ notificationPublicId: bobNotif.public_id }) },
+    );
+    expect(delUnreadRes.status).toBe(200);
+    expect(await delUnreadRes.json()).toEqual({
+      deleted: true,
+      notificationPublicId: bobNotif.public_id,
+      unreadCount: 1,
+    });
+
+    const eventsAfterDelete = realtimeAdapter.getPublishedEvents();
+    expect(eventsAfterDelete).toHaveLength(1);
+    expect(eventsAfterDelete[0]?.channel).toBe(`user:${alicePrivate.publicId}`);
+    expect(eventsAfterDelete[0]?.event).toBe('notification.deleted');
+    expect(eventsAfterDelete[0]?.data).toEqual({
+      notificationPublicId: bobNotif.public_id,
+      unreadCount: 1,
+    });
+
+    // Ranh giới nghiệp vụ: yêu cầu follow của Bob trong bảng `follows` vẫn còn nguyên dù thông báo đã bị xóa!
+    const followRequestsRes = await followRequestsGet(
+      new Request(`${origin}/api/v1/social/follow-requests?limit=10`, {
+        headers: createHeaders(alicePrivate.jar, alicePrivate.ip),
+      }),
+    );
+    const followRequestsBody = (await followRequestsRes.json()) as {
+      items: Array<{ public_id: string }>;
+    };
+    expect(followRequestsBody.items.some((req) => req.public_id === bob.publicId)).toBe(true);
+
+    // Xóa lại cùng ID lần 2 -> 404.
+    const delAgainRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${bobNotif.public_id}`, {
+        method: 'DELETE',
+        headers: createHeaders(alicePrivate.jar, alicePrivate.ip, { includeCsrf: true }),
+      }),
+      { params: Promise.resolve({ notificationPublicId: bobNotif.public_id }) },
+    );
+    expect(delAgainRes.status).toBe(404);
+
+    // 3. Đánh dấu đã đọc thông báo của Charlie (unreadCount: 1 -> 0), rồi xóa thông báo ĐÃ ĐỌC -> unreadCount vẫn giữ 0.
+    await notificationsReadPost(
+      new Request(`${origin}/api/v1/notifications/read`, {
+        method: 'POST',
+        headers: createHeaders(alicePrivate.jar, alicePrivate.ip, {
+          includeCsrf: true,
+          json: true,
+        }),
+        body: JSON.stringify({ notificationPublicIds: [charlieNotif.public_id] }),
+      }),
+    );
+
+    const delReadRes = await notificationDelete(
+      new Request(`${origin}/api/v1/notifications/${charlieNotif.public_id}`, {
+        method: 'DELETE',
+        headers: createHeaders(alicePrivate.jar, alicePrivate.ip, { includeCsrf: true }),
+      }),
+      { params: Promise.resolve({ notificationPublicId: charlieNotif.public_id }) },
+    );
+    expect(delReadRes.status).toBe(200);
+    expect(await delReadRes.json()).toEqual({
+      deleted: true,
+      notificationPublicId: charlieNotif.public_id,
+      unreadCount: 0,
+    });
+
+    // Danh sách GET /api/v1/notifications giờ rỗng hoàn toàn.
+    const listAfterRes = await notificationsGet(
+      new Request(`${origin}/api/v1/notifications?limit=10`, {
+        headers: createHeaders(alicePrivate.jar, alicePrivate.ip),
+      }),
+    );
+    const listAfter = (await listAfterRes.json()) as { items: unknown[]; unreadCount: number };
+    expect(listAfter.items).toHaveLength(0);
+    expect(listAfter.unreadCount).toBe(0);
+
+    // 4. Phát sinh lại cùng dedupe_key sau khi xóa cứng -> upsert thành công không xung đột partial unique index.
+    const recreated = await notificationRepo.upsertUnreadNotification({
+      recipientId: alicePrivate.id,
+      actorId: bob.id,
+      type: 'follow_request',
+      entityPublicId: bob.publicId,
+      dedupeKey: buildNotificationDedupeKey('follow_request', bob.id),
+      now: new Date(),
+    });
+    expect(recreated.publicId).not.toBe(bobNotif.public_id);
   });
 });

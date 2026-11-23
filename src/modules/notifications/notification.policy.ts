@@ -12,10 +12,11 @@ import {
 } from '@/modules/social/social.policy';
 
 export type NotificationAction =
-  'notification:list' | 'notification:mark_read' | 'notification:emit';
+  'notification:list' | 'notification:mark_read' | 'notification:delete' | 'notification:emit';
 
 export interface NotificationPolicyResource {
   readonly recipientUser?: Pick<UserRow, 'id' | 'status' | 'deletedAt'> | null;
+  readonly notificationRecipientId?: string | null;
   readonly relationship?: SocialRelationshipSnapshot | null;
 }
 
@@ -34,6 +35,22 @@ export function authorizeNotificationAction(
   switch (action) {
     case 'notification:list':
     case 'notification:mark_read': {
+      if (resource.recipientUser !== undefined) {
+        return (
+          isActiveSocialTarget(resource.recipientUser) &&
+          resource.recipientUser.id === actor.user.id
+        );
+      }
+      return true;
+    }
+
+    case 'notification:delete': {
+      if (resource.notificationRecipientId !== undefined) {
+        return (
+          typeof resource.notificationRecipientId === 'string' &&
+          resource.notificationRecipientId === actor.user.id
+        );
+      }
       if (resource.recipientUser !== undefined) {
         return (
           isActiveSocialTarget(resource.recipientUser) &&

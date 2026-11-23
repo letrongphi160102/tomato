@@ -14,6 +14,7 @@ export const REALTIME_EVENT_NAMES = [
   'notification.created',
   'notification.read',
   'notification.removed',
+  'notification.deleted',
 ] as const;
 
 export type RealtimeEventName = (typeof REALTIME_EVENT_NAMES)[number];
