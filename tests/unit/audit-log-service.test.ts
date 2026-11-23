@@ -30,10 +30,13 @@ describe('AuditLogService & Metadata Sanitization', () => {
         cookie: '__Host-tomato_rt=leak',
         pepperSecret: 'pepper-v1-secret',
         leakedBearerInSafeKey: 'Bearer synthetic-bearer-token-value',
+        leakedEmbeddedBearerInSafeKey: 'Upstream failed: Bearer embedded-bearer-secret',
         leakedJwtInSafeKey: syntheticJwt,
+        leakedEmbeddedJwtInSafeKey: `Token rejected: ${syntheticJwt}`,
         leakedArgon2InSafeKey: '$argon2id$v=19$m=19456,t=2,p=1$salt$digest',
         leakedSessionValInSafeKey: '__Host-tomato_rt=synthetic-leaked-value',
         leakedResetUrlInSafeKey: 'https://tomato.example.com/reset-password?token=secret-reset-val',
+        leakedQueryUrlInSafeKey: 'https://tomato.example.com/verify?otpCode=654321',
       },
     });
 
@@ -43,10 +46,13 @@ describe('AuditLogService & Metadata Sanitization', () => {
       nested: {
         device: 'Chrome / Windows',
         leakedBearerInSafeKey: '[REDACTED]',
+        leakedEmbeddedBearerInSafeKey: '[REDACTED]',
         leakedJwtInSafeKey: '[REDACTED]',
+        leakedEmbeddedJwtInSafeKey: '[REDACTED]',
         leakedArgon2InSafeKey: '[REDACTED]',
         leakedSessionValInSafeKey: '[REDACTED]',
         leakedResetUrlInSafeKey: '[REDACTED]',
+        leakedQueryUrlInSafeKey: '[REDACTED]',
       },
     });
   });

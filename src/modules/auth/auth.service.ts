@@ -64,6 +64,7 @@ import {
 import { parseDeviceInfo } from '@/modules/auth/device-info';
 import {
   SessionService,
+  isSessionCurrentlyActive,
   toPublicUserProfile,
   type CreatedSessionResult,
   type IssuedSessionTokens,
@@ -88,9 +89,12 @@ export const CHANGE_PASSWORD_OTP_COOLDOWN_SECONDS =
 export const ACCOUNT_LOCK_FAILED_ATTEMPTS_THRESHOLD = 50;
 // Sau 24 giờ không xác minh, tài khoản pending_verification được phép đăng ký đè theo Mục 4.1.
 export const PENDING_VERIFICATION_EXPIRY_MS = 24 * 60 * 60 * 1000;
-// Sàn thời gian tối thiểu + jitter cho `/resend-verification` nhằm triệt tiêu timing oracle
-// giữa email không tồn tại (~5ms) và email đang `pending_verification` (gửi SMTP).
+// Sàn thời gian tối thiểu + jitter cho `/resend-verification` và `/verify-email` nhằm triệt tiêu timing oracle
+// giữa email không tồn tại (~5ms) và email đang `pending_verification` (gửi SMTP / mở DB transaction).
 export const DEFAULT_MIN_RESEND_RESPONSE_MS = 250;
+// Sàn thời gian tối thiểu + jitter cho các nhánh 401 INVALID_CREDENTIALS của `/login`
+// nhằm che khuất chênh lệch giữa 1 câu INSERT (email không tồn tại) và 1 DB transaction (sai mật khẩu).
+export const DEFAULT_MIN_LOGIN_FAILURE_RESPONSE_MS = 350;
 const RESEND_TIMING_JITTER_MS = 75;
 
 export interface RegisterResult {
@@ -156,8 +160,10 @@ export interface AuthServiceDependencies {
   readonly pepperProvider?: PepperSecretProvider;
   readonly appUrl?: string;
   readonly now?: () => Date;
-  /** Sàn thời gian tối thiểu (ms) cho `/resend-verification` (mặc định 250ms ở prod/dev, 0ms ở test). */
+  /** Sàn thời gian tối thiểu (ms) cho `/resend-verification` & `/verify-email` (mặc định 250ms ở prod/dev, 0ms ở test). */
   readonly minResendResponseMs?: number;
+  /** Sàn thời gian tối thiểu (ms) cho nhánh 401 của `/login` (mặc định 350ms ở prod/dev, 0ms ở test). */
+  readonly minLoginFailureResponseMs?: number;
 }
 
 type VerifyOtpTransactionOutcome =
@@ -230,6 +236,7 @@ export class AuthService {
   private readonly appUrlOverride?: string;
   private readonly now: () => Date;
   private readonly minResendResponseMs: number;
+  private readonly minLoginFailureResponseMs: number;
 
   constructor(deps: AuthServiceDependencies = {}) {
     this.repository = deps.repository ?? new AuthRepository();
@@ -244,6 +251,9 @@ export class AuthService {
     this.minResendResponseMs =
       deps.minResendResponseMs ??
       (process.env.NODE_ENV === 'test' ? 0 : DEFAULT_MIN_RESEND_RESPONSE_MS);
+    this.minLoginFailureResponseMs =
+      deps.minLoginFailureResponseMs ??
+      (process.env.NODE_ENV === 'test' ? 0 : DEFAULT_MIN_LOGIN_FAILURE_RESPONSE_MS);
     this.sessionService =
       deps.sessionService ??
       new SessionService({
@@ -438,8 +448,24 @@ export class AuthService {
     }
     const input = parsed.data;
 
+    // Rate limit bổ sung theo email chạy TRƯỚC truy vấn DB nhằm chặn tấn công đốt OTP phân tán từ nhiều IP.
+    const emailLimit = await this.rateLimiter.consume(
+      `verify-email:email:${input.email}`,
+      AUTH_RATE_LIMITS.verifyEmailByEmail,
+    );
+    if (!emailLimit.allowed) {
+      throw new AuthDomainError({
+        status: 429,
+        code: 'RATE_LIMITED',
+        message: AUTH_MESSAGES.rateLimited(emailLimit.retryAfterSeconds),
+        retryAfterSeconds: emailLimit.retryAfterSeconds,
+      });
+    }
+
+    const startedAtMs = Date.now();
     const existing = await this.repository.findEmailIdentityWithUser(input.email);
     if (!existing || existing.user.status !== 'pending_verification') {
+      await this.equalizeResponseDuration(startedAtMs, this.minResendResponseMs);
       throw new AuthDomainError({
         status: 400,
         code: 'TOKEN_INVALID',
@@ -549,24 +575,28 @@ export class AuthService {
           message: AUTH_MESSAGES.emailVerified,
         };
       case 'expired':
+        await this.equalizeResponseDuration(startedAtMs, this.minResendResponseMs);
         throw new AuthDomainError({
           status: 400,
           code: 'TOKEN_EXPIRED',
           message: AUTH_MESSAGES.otpExpired,
         });
       case 'max_attempts':
+        await this.equalizeResponseDuration(startedAtMs, this.minResendResponseMs);
         throw new AuthDomainError({
           status: 400,
           code: 'TOKEN_INVALID',
           message: AUTH_MESSAGES.otpRevokedMaxAttempts,
         });
       case 'wrong_code':
+        await this.equalizeResponseDuration(startedAtMs, this.minResendResponseMs);
         throw new AuthDomainError({
           status: 400,
           code: 'TOKEN_INVALID',
           message: AUTH_MESSAGES.otpIncorrectWithRemaining(outcome.remainingAttempts),
         });
       case 'invalid':
+        await this.equalizeResponseDuration(startedAtMs, this.minResendResponseMs);
         throw new AuthDomainError({
           status: 400,
           code: 'TOKEN_INVALID',
@@ -786,7 +816,8 @@ export class AuthService {
       }
     }
 
-    // 4. Tra cứu danh tính theo email đã chuẩn hóa.
+    // 4. Tra cứu danh tính theo email đã chuẩn hóa (ghi mốc thời gian chống timing side-channel).
+    const loginStartedAtMs = Date.now();
     const existing = await this.repository.findEmailIdentityWithUser(input.email);
     if (!existing || !existing.identity.passwordHash) {
       // Chạy Argon2id giả cùng chi phí để thời gian phản hồi đồng nhất dù email không tồn tại.
@@ -810,6 +841,8 @@ export class AuthService {
           pairFailureCount: pairFailure.failureCount,
         },
       });
+
+      await this.equalizeResponseDuration(loginStartedAtMs, this.minLoginFailureResponseMs);
 
       throw new AuthDomainError({
         status: 401,
@@ -896,6 +929,8 @@ export class AuthService {
         });
       }
 
+      await this.equalizeResponseDuration(loginStartedAtMs, this.minLoginFailureResponseMs);
+
       // Ngay cả khi vừa chạm mốc 50 lần sai, vẫn trả `401 INVALID_CREDENTIALS` cho mật khẩu sai
       // để kẻ tấn công không biết email tồn tại hay tài khoản vừa bị khóa (chống User Enumeration).
       throw new AuthDomainError({
@@ -907,6 +942,23 @@ export class AuthService {
     }
 
     // 6. Chỉ tiết lộ trạng thái tài khoản sau khi người gọi đã chứng minh biết đúng mật khẩu.
+    // Riêng trạng thái `deleted` phải đồng nhất tuyệt đối với email không tồn tại (ghi nhận pairFailure,
+    // kích hoạt Backoff/requireCaptcha và cân bằng thời gian phản hồi chống oracle dò tài khoản đã xóa).
+    if (existing.user.status === 'deleted') {
+      const pairFailure = await this.loginProtection.recordPairFailure(
+        input.email,
+        context.rateLimitIpKey,
+      );
+      await this.recordFailedLoginForStatus(existing.user.id, 'deleted', context);
+      await this.equalizeResponseDuration(loginStartedAtMs, this.minLoginFailureResponseMs);
+      throw new AuthDomainError({
+        status: 401,
+        code: 'INVALID_CREDENTIALS',
+        message: AUTH_MESSAGES.invalidCredentials,
+        requireCaptcha: pairFailure.requireCaptcha ? true : undefined,
+      });
+    }
+
     if (existing.user.status !== 'active') {
       await this.recordFailedLoginForStatus(existing.user.id, existing.user.status, context);
       this.throwForNonActiveLoginStatus(existing.user.status);
@@ -981,6 +1033,19 @@ export class AuthService {
       });
 
     if (loginOutcome.kind === 'status_changed') {
+      if (loginOutcome.status === 'deleted') {
+        const pairFailure = await this.loginProtection.recordPairFailure(
+          input.email,
+          context.rateLimitIpKey,
+        );
+        await this.equalizeResponseDuration(loginStartedAtMs, this.minLoginFailureResponseMs);
+        throw new AuthDomainError({
+          status: 401,
+          code: 'INVALID_CREDENTIALS',
+          message: AUTH_MESSAGES.invalidCredentials,
+          requireCaptcha: pairFailure.requireCaptcha ? true : undefined,
+        });
+      }
       this.throwForNonActiveLoginStatus(loginOutcome.status);
     }
 
@@ -1480,7 +1545,7 @@ export class AuthService {
           lockedUser.id,
           tx,
         );
-        if (!currentSession || currentSession.revokedAt !== null) {
+        if (!currentSession || !isSessionCurrentlyActive(currentSession, currentTime)) {
           return { kind: 'unauthorized' };
         }
 
@@ -1597,11 +1662,7 @@ export class AuthService {
           lockedUser.id,
           tx,
         );
-        if (
-          !currentSession ||
-          currentSession.revokedAt !== null ||
-          currentSession.expiresAt.getTime() <= currentTime.getTime()
-        ) {
+        if (!currentSession || !isSessionCurrentlyActive(currentSession, currentTime)) {
           return { kind: 'unauthorized' };
         }
 
@@ -1878,6 +1939,18 @@ export class AuthService {
           if (!lockedUser || lockedUser.status !== 'active') {
             return 'unauthorized';
           }
+          const currentSession = await this.repository.findSessionByPublicIdForUser(
+            principal.session.publicId,
+            lockedUser.id,
+            tx,
+          );
+          if (
+            !currentSession ||
+            !isSessionCurrentlyActive(currentSession, failNow) ||
+            currentSession.familyId !== principal.session.familyId
+          ) {
+            return 'unauthorized';
+          }
           const ticket = await this.repository.lockVerificationTokenByHashForUser(
             lockedUser.id,
             'password_change_ticket',
@@ -1890,6 +1963,10 @@ export class AuthService {
           if (ticket.expiresAt.getTime() <= failNow.getTime()) {
             await this.repository.consumeVerificationToken(ticket.id, lockedUser.id, failNow, tx);
             return 'ticket_expired';
+          }
+          if (ticket.attemptCount >= PASSWORD_CHANGE_TICKET_MAX_ATTEMPTS) {
+            await this.repository.consumeVerificationToken(ticket.id, lockedUser.id, failNow, tx);
+            return 'ticket_max_attempts';
           }
           const nextAttempts = ticket.attemptCount + 1;
           const exhausted = nextAttempts >= PASSWORD_CHANGE_TICKET_MAX_ATTEMPTS;
@@ -1969,8 +2046,7 @@ export class AuthService {
         );
         if (
           !currentSession ||
-          currentSession.revokedAt !== null ||
-          currentSession.expiresAt.getTime() <= currentTime.getTime() ||
+          !isSessionCurrentlyActive(currentSession, currentTime) ||
           currentSession.familyId !== principal.session.familyId
         ) {
           return { kind: 'unauthorized' };

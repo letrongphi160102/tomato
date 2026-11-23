@@ -142,7 +142,8 @@ function wrapEmailLayout(title: string, bodyHtml: string): string {
 export function buildVerificationOtpEmail(data: VerificationOtpEmailData): RenderedEmailTemplate {
   const safeName = escapeHtml(data.displayName);
   const safeOtp = escapeHtml(data.otpCode);
-  const subject = `[TOMATO] Mã xác minh email của bạn: ${data.otpCode}`;
+  // Không đưa mã OTP nhạy cảm vào dòng Subject để tránh lưu trong log MTA/Brevo và lộ trên màn hình khóa.
+  const subject = '[TOMATO] Mã xác minh email tài khoản của bạn';
 
   const bodyHtml = `
     <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;color:#171717;">Xác minh địa chỉ email của bạn</h1>

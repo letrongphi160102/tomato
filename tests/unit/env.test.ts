@@ -116,6 +116,21 @@ describe('parseEnv (fail-fast Zod validation)', () => {
         }),
       ),
     ).toThrow(EnvValidationError);
+
+    // Mọi phiên bản Pepper (kể cả phiên bản cũ khi xoay vòng khóa) đều phải độc lập với JWT_SECRET/OTP_SECRET.
+    const sharedJwtSecret = 'unit-test-shared-jwt-and-old-pepper-at-least-32-chars';
+    expect(() =>
+      parseEnv(
+        createBaseEnv({
+          JWT_SECRET: sharedJwtSecret,
+          CURRENT_PEPPER_VERSION: '2',
+          PASSWORD_PEPPER_SECRETS: JSON.stringify({
+            '1': sharedJwtSecret,
+            '2': 'unit-test-only-pepper-v2-secret-at-least-32-chars',
+          }),
+        }),
+      ),
+    ).toThrow(EnvValidationError);
   });
 
   it('fail-fast khi REDIS_PROVIDER=upstash nhưng thiếu thông tin kết nối Upstash', () => {

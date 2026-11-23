@@ -38,14 +38,21 @@ const SENSITIVE_HEADER_KEYS = new Set([
 ]);
 
 // Phòng thủ chiều sâu: lọc chuỗi chứa JWT, Bearer, Argon2 hash, cookie phiên TOMATO,
-// connection string DB/Redis, query param nhạy cảm (ví dụ `/reset-password?token=...`) và email PII.
+// connection string DB/Redis, tham số truy vấn Drizzle (`params: ...`), xác thực SMTP,
+// JSON/header nhạy cảm, query param nhạy cảm (ví dụ `/reset-password?token=...`) và email PII.
 const BEARER_REGEX = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const JWT_REGEX = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const ARGON2_HASH_REGEX = /\$argon2(?:id|i|d)\$[^\s"'`]+/gi;
 const TOMATO_COOKIE_REGEX = /\b(?:__Host-)?tomato_(?:at|rt|csrf|pwd_ticket)=[^;\s"'`]+/gi;
 const CONNECTION_URL_REGEX = /\b(?:postgres(?:ql)?|rediss?):\/\/[^\s"'`]+/gi;
+const DRIZZLE_PARAMS_REGEX = /(\bparams:\s*)[^\r\n]+/gi;
+const SMTP_AUTH_REGEX = /\b(AUTH\s+(?:PLAIN|LOGIN))\s+[^\r\n]+/gi;
+const INLINE_JSON_SECRET_REGEX =
+  /("(?:password|currentPassword|newPassword|confirmPassword|passwd|pwd|otp|otpCode|otp_code|token|accessToken|access_token|refreshToken|refresh_token|csrfToken|csrf_token|captchaToken|captcha_token|resetToken|reset_token|ticket|passwordChangeTicket|secret|pepper|apiKey|api_key|api-key|cookie|authorization)"\s*:\s*)"[^"]*"/gi;
+const INLINE_SECRET_HEADER_REGEX =
+  /\b(Cookie|Set-Cookie|X-CSRF-Token|Authorization|Proxy-Authorization|Api-Key|X-Api-Key)\s*:\s*[^\r\n|]+/gi;
 const SENSITIVE_QUERY_PARAM_REGEX =
-  /([?&](?:token|reset_token|access_token|refresh_token|otp|otpCode|code|password|secret|key|api_key|email|captchaToken)=)[^&#\s"'`]+/gi;
+  /([?&](?:token|reset_token|access_token|refresh_token|otp|otpCode|otp_code|code|password|currentPassword|newPassword|passwd|pwd|ticket|csrf|csrfToken|csrf_token|secret|pepper|key|api_key|api-key|authorization|email|captchaToken|captcha_token)=)[^&#\s"'`]+/gi;
 const EMAIL_ADDRESS_REGEX = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 
 /**
@@ -81,6 +88,10 @@ export function scrubSensitiveString(raw: string): string {
     .replace(ARGON2_HASH_REGEX, '[REDACTED_HASH]')
     .replace(TOMATO_COOKIE_REGEX, '[REDACTED_COOKIE]')
     .replace(CONNECTION_URL_REGEX, '[REDACTED_URL]')
+    .replace(DRIZZLE_PARAMS_REGEX, '$1[REDACTED]')
+    .replace(SMTP_AUTH_REGEX, '$1 [REDACTED]')
+    .replace(INLINE_JSON_SECRET_REGEX, '$1"[REDACTED]"')
+    .replace(INLINE_SECRET_HEADER_REGEX, '$1: [REDACTED]')
     .replace(SENSITIVE_QUERY_PARAM_REGEX, '$1[REDACTED]')
     .replace(EMAIL_ADDRESS_REGEX, '[REDACTED_EMAIL]');
 }
@@ -193,6 +204,26 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
     scrubbed.message = scrubSensitiveString(scrubbed.message);
   }
 
+  if (typeof scrubbed.transaction === 'string') {
+    scrubbed.transaction = scrubSensitiveString(scrubbed.transaction);
+  }
+
+  if (scrubbed.logentry) {
+    scrubbed.logentry = {
+      ...scrubbed.logentry,
+      ...(typeof scrubbed.logentry.message === 'string'
+        ? { message: scrubSensitiveString(scrubbed.logentry.message) }
+        : {}),
+      ...(scrubbed.logentry.params !== undefined
+        ? {
+            params: scrubSensitiveValue(
+              scrubbed.logentry.params,
+            ) as typeof scrubbed.logentry.params,
+          }
+        : {}),
+    };
+  }
+
   if (scrubbed.user) {
     const safeUser: Record<string, unknown> = {};
     if (typeof scrubbed.user.id === 'string' && !EMAIL_ADDRESS_REGEX.test(scrubbed.user.id)) {
@@ -237,10 +268,27 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
   if (scrubbed.exception?.values) {
     scrubbed.exception = {
       ...scrubbed.exception,
-      values: scrubbed.exception.values.map((ex) => ({
-        ...ex,
-        value: typeof ex.value === 'string' ? scrubSensitiveString(ex.value) : ex.value,
-      })),
+      values: scrubbed.exception.values.map((ex) => {
+        const nextStacktrace = ex.stacktrace?.frames
+          ? {
+              ...ex.stacktrace,
+              frames: ex.stacktrace.frames.map((frame) => {
+                if (!frame.vars) {
+                  return frame;
+                }
+                const cleanedFrame = { ...frame };
+                delete cleanedFrame.vars;
+                return cleanedFrame;
+              }),
+            }
+          : ex.stacktrace;
+
+        return {
+          ...ex,
+          value: typeof ex.value === 'string' ? scrubSensitiveString(ex.value) : ex.value,
+          ...(nextStacktrace ? { stacktrace: nextStacktrace } : {}),
+        };
+      }),
     };
   }
 

@@ -67,6 +67,11 @@ export const AUTH_RATE_LIMITS = Object.freeze({
     windowSeconds: 15 * 60,
     strategy: 'sliding_window',
   }),
+  verifyEmailByEmail: Object.freeze({
+    limit: 15,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
   resetPasswordByIp: Object.freeze({
     limit: 10,
     windowSeconds: 15 * 60,

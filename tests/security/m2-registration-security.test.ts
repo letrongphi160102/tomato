@@ -568,6 +568,76 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
     expect(smtpFailRes).toEqual(missingRes);
   });
 
+  it('Audit Q2: /verify-email áp dụng Rate Limit theo email TRƯỚC DB và cân bằng sàn thời gian phản hồi khi email không tồn tại', async () => {
+    const findIdentitySpy = vi.fn().mockResolvedValue(null);
+    const consumeSpy = vi
+      .fn()
+      .mockResolvedValueOnce({
+        allowed: true,
+        limit: 30,
+        remaining: 29,
+        resetAt: Date.now() + 60_000,
+        retryAfterSeconds: 0,
+      })
+      .mockResolvedValueOnce({
+        allowed: false,
+        limit: 15,
+        remaining: 0,
+        resetAt: Date.now() + 45_000,
+        retryAfterSeconds: 45,
+      });
+
+    const rateLimitedService = new AuthService({
+      rateLimiter: { consume: consumeSpy } as unknown as RateLimiter,
+      repository: { findEmailIdentityWithUser: findIdentitySpy } as unknown as AuthRepository,
+      emailProvider: { provider: 'memory', send: vi.fn() },
+      auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+      appUrl: allowedOrigin,
+    });
+
+    await expect(
+      rateLimitedService.verifyEmail(
+        { email: 'target@example.com', otpCode: '123456' },
+        { ipAddress: '198.51.100.40', rateLimitIpKey: '198.51.100.40', userAgent: 'Vitest' },
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof AuthDomainError &&
+        err.status === 429 &&
+        err.code === 'RATE_LIMITED' &&
+        err.retryAfterSeconds === 45,
+    );
+    expect(findIdentitySpy).not.toHaveBeenCalled();
+
+    const timingService = new AuthService({
+      rateLimiter: {
+        consume: vi.fn().mockResolvedValue({
+          allowed: true,
+          limit: 30,
+          remaining: 29,
+          resetAt: Date.now() + 60_000,
+          retryAfterSeconds: 0,
+        }),
+      } as unknown as RateLimiter,
+      repository: {
+        findEmailIdentityWithUser: vi.fn().mockResolvedValue(null),
+      } as unknown as AuthRepository,
+      emailProvider: { provider: 'memory', send: vi.fn() },
+      auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+      appUrl: allowedOrigin,
+      minResendResponseMs: 60,
+    });
+
+    const started = Date.now();
+    await expect(
+      timingService.verifyEmail(
+        { email: 'missing-verify@example.com', otpCode: '123456' },
+        { ipAddress: '198.51.100.41', rateLimitIpKey: '198.51.100.41', userAgent: 'Vitest' },
+      ),
+    ).rejects.toMatchObject({ status: 400, code: 'TOKEN_INVALID' });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(50);
+  });
+
   it('đăng ký trùng ID tài khoản (username) trả 409 CONFLICT với lỗi gắn trường username', async () => {
     const service = new AuthService({
       rateLimiter: {

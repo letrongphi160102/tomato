@@ -32,10 +32,10 @@ export interface AuditLogInput {
 const SENSITIVE_KEY_PATTERN =
   /(password|passwd|pwd|token|otp|ticket|secret|pepper|cookie|authorization|csrf|hash|private[_-]?key|api[_-]?key|credential)/i;
 
-// Phòng thủ chiều sâu: ngăn chuỗi giống JWT, header Bearer, hash Argon2, cookie phiên hoặc URL chứa token
-// vô tình lọt vào giá trị metadata ngay cả khi gán dưới tên khóa thông thường.
+// Phòng thủ chiều sâu: ngăn chuỗi giống JWT, header Bearer, hash Argon2, cookie phiên hoặc URL chứa token/OTP
+// vô tình lọt vào giá trị metadata ngay cả khi nằm giữa chuỗi tự do hoặc gán dưới tên khóa thông thường.
 const SENSITIVE_VALUE_PATTERN =
-  /(^Bearer\s+\S+)|(^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$)|(\$argon2(?:id|i|d)\$)|((?:__Host-)?tomato_(?:at|rt|csrf|pwd_ticket)=)|([?&](?:token|reset_token|access_token|refresh_token)=[^&\s]+)/i;
+  /(\bBearer\s+\S+)|(\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b)|(\$argon2(?:id|i|d)\$)|((?:__Host-)?tomato_(?:at|rt|csrf|pwd_ticket)=)|([?&](?:token|reset_token|access_token|refresh_token|otp|otpCode|otp_code|code|password|ticket)=[^&\s]+)/i;
 
 const MAX_METADATA_DEPTH = 5;
 const MAX_METADATA_KEYS = 50;

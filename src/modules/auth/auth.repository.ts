@@ -108,6 +108,7 @@ export interface RotateSessionInFamilyParams {
 export interface RevokeAllUserSessionsParams {
   readonly userId: string;
   readonly excludeSessionId?: string;
+  readonly excludeFamilyId?: string;
   readonly revokedAt: Date;
   readonly reason: string;
 }
@@ -309,6 +310,8 @@ export class AuthRepository {
       .set({
         passwordHash: params.passwordHash,
         pepperVersion: params.pepperVersion,
+        verifiedAt: null,
+        failedLoginAttempts: 0,
         updatedAt: params.now,
       })
       .where(
@@ -785,18 +788,6 @@ export class AuthRepository {
     };
   }
 
-  async findSessionByPublicId(
-    sessionPublicId: string,
-    executor: DbExecutor = this.getDefaultDb(),
-  ): Promise<SessionRow | null> {
-    const rows = await executor
-      .select()
-      .from(sessions)
-      .where(eq(sessions.publicId, sessionPublicId))
-      .limit(1);
-    return rows[0] ?? null;
-  }
-
   /**
    * Tra cứu phiên kèm điều kiện chủ sở hữu `user_id` ngay tại tầng SQL (phòng thủ chiều sâu chống IDOR).
    */
@@ -1091,6 +1082,9 @@ export class AuthRepository {
     const conditions = [eq(sessions.userId, params.userId), isNull(sessions.revokedAt)];
     if (params.excludeSessionId) {
       conditions.push(ne(sessions.id, params.excludeSessionId));
+    }
+    if (params.excludeFamilyId) {
+      conditions.push(ne(sessions.familyId, params.excludeFamilyId));
     }
 
     const rows = await tx

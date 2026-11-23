@@ -222,7 +222,11 @@ const rawEnvSchema = z
           path: ['CURRENT_PEPPER_VERSION'],
           message: `Không tìm thấy khóa pepper cho phiên bản CURRENT_PEPPER_VERSION=${data.CURRENT_PEPPER_VERSION}`,
         });
-      } else if (currentPepper === data.JWT_SECRET || currentPepper === data.OTP_SECRET) {
+      } else if (
+        Object.values(pepperMap).some(
+          (secret) => secret === data.JWT_SECRET || secret === data.OTP_SECRET,
+        )
+      ) {
         ctx.addIssue({
           code: 'custom',
           path: ['PASSWORD_PEPPER_SECRETS'],

@@ -186,4 +186,75 @@ describe('Unit M5: Sentry beforeSend / beforeBreadcrumb PII & Secret Scrubber', 
     expect(serialized).not.toContain('owner@tomato.test');
     expect(serialized).not.toContain('secret-rt');
   });
+
+  it('Audit Q5: lọc Drizzle params, SMTP AUTH, inline JSON/header bí mật, logentry, transaction và stack frame vars', () => {
+    const drizzleErr =
+      'Failed query: insert into "verification_tokens" values ($1,$2,$3)\nparams: 01950000-0000-7000-8000-000000000001,secret-hash-hex-64,849201';
+    const smtpErr = 'SMTP failed at AUTH PLAIN dXNlcjpzdXBlcl9zZWNyZXQ=';
+    const inlineJsonErr =
+      'Bad payload {"password":"RawPassValue123!","otpCode":"998877","ticket":"ticket-secret-val"}';
+    const inlineHeaderErr = 'Proxy error X-CSRF-Token: csrf-secret-xyz | Api-Key: brevo-secret-key';
+
+    const cleanedDrizzle = scrubSensitiveString(drizzleErr);
+    expect(cleanedDrizzle).not.toContain('secret-hash-hex-64');
+    expect(cleanedDrizzle).not.toContain('849201');
+    expect(cleanedDrizzle).toContain('params: [REDACTED]');
+
+    const cleanedSmtp = scrubSensitiveString(smtpErr);
+    expect(cleanedSmtp).not.toContain('dXNlcjpzdXBlcl9zZWNyZXQ=');
+    expect(cleanedSmtp).toContain('AUTH PLAIN [REDACTED]');
+
+    const cleanedJson = scrubSensitiveString(inlineJsonErr);
+    expect(cleanedJson).not.toContain('RawPassValue123!');
+    expect(cleanedJson).not.toContain('998877');
+    expect(cleanedJson).not.toContain('ticket-secret-val');
+
+    const cleanedHeader = scrubSensitiveString(inlineHeaderErr);
+    expect(cleanedHeader).not.toContain('csrf-secret-xyz');
+    expect(cleanedHeader).not.toContain('brevo-secret-key');
+
+    const eventWithFrameVars: ErrorEvent = {
+      type: undefined,
+      transaction: 'GET /reset-password?token=tx-secret-token&otp_code=112233',
+      logentry: {
+        message: 'Failure with ?ticket=log-ticket-secret&csrfToken=log-csrf-secret',
+        params: ['Bearer log-bearer-secret'],
+      },
+      exception: {
+        values: [
+          {
+            type: 'DrizzleQueryError',
+            value: drizzleErr,
+            stacktrace: {
+              frames: [
+                {
+                  filename: 'auth.service.ts',
+                  vars: {
+                    rawPassword: 'LocalFramePassword!',
+                    otpCode: '654321',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    const scrubbed = scrubSentryEvent(eventWithFrameVars);
+    const serialized = JSON.stringify(scrubbed);
+    for (const secret of [
+      'tx-secret-token',
+      '112233',
+      'log-ticket-secret',
+      'log-csrf-secret',
+      'log-bearer-secret',
+      'secret-hash-hex-64',
+      'LocalFramePassword!',
+      '654321',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(scrubbed.exception?.values?.[0]?.stacktrace?.frames?.[0]?.vars).toBeUndefined();
+  });
 });

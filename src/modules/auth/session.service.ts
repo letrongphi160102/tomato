@@ -142,6 +142,28 @@ type RefreshTransactionOutcome =
   | { readonly kind: 'idle_expired' }
   | { readonly kind: 'inactive_user' };
 
+type RevokeSessionTransactionOutcome = 'revoked' | 'not_found' | 'unauthorized';
+
+type RevokeAllSessionsTransactionOutcome =
+  { readonly kind: 'revoked'; readonly count: number } | { readonly kind: 'unauthorized' };
+
+/**
+ * Kiểm tra thống nhất một bản ghi phiên có còn đang hoạt động hợp lệ (chưa thu hồi,
+ * chưa quá hạn tuyệt đối 30 ngày và chưa quá hạn không hoạt động 14 ngày) hay không.
+ */
+export function isSessionCurrentlyActive(
+  session: Pick<SessionRow, 'revokedAt' | 'expiresAt' | 'lastUsedAt'>,
+  now: Date,
+  idleTtlMs: number = SESSION_IDLE_TTL_MS,
+): boolean {
+  const nowMs = now.getTime();
+  return (
+    session.revokedAt === null &&
+    session.expiresAt.getTime() > nowMs &&
+    nowMs - session.lastUsedAt.getTime() <= idleTtlMs
+  );
+}
+
 export function toPublicUserProfile(user: UserRow): PublicUserProfile {
   return {
     public_id: user.publicId,
@@ -575,7 +597,13 @@ export class SessionService {
       try {
         const claims = await verifyAccessToken(tokens.accessToken, { currentDate: currentTime });
         const match = await this.repository.findSessionWithUserByPublicId(claims.sid);
-        if (match && match.user.publicId === claims.sub && match.session.revokedAt === null) {
+        // Chấp nhận cả phiên vừa xoay vòng (`token_rotated`) để triệt tiêu race condition
+        // khi 1 tab vừa chạy Silent Refresh `S1 -> S2` ngay trước lúc tab khác bấm Đăng xuất bằng AT1.
+        if (
+          match &&
+          match.user.publicId === claims.sub &&
+          (match.session.revokedAt === null || match.session.revokeReason === 'token_rotated')
+        ) {
           targetSession = match.session;
         }
       } catch {
@@ -591,7 +619,10 @@ export class SessionService {
       const candidate = await this.repository.findSessionByRefreshTokenHash(
         hashTokenSha256(tokens.refreshToken),
       );
-      if (candidate && candidate.revokedAt === null) {
+      if (
+        candidate &&
+        (candidate.revokedAt === null || candidate.revokeReason === 'token_rotated')
+      ) {
         targetSession = candidate;
       }
     }
@@ -686,16 +717,16 @@ export class SessionService {
       });
     }
 
-    const targetSession = await this.repository.findSessionByPublicId(parsedId.data);
+    // Phòng thủ chiều sâu chống IDOR: lọc chủ sở hữu `user_id` ngay tại tầng SQL,
+    // đồng thời tiếp tục kiểm tra tập trung qua `auth.policy.ts` (Deny by default).
+    const targetSession = await this.repository.findSessionByPublicIdForUser(
+      parsedId.data,
+      principal.user.id,
+    );
     assertCanRevokeSession(principal, targetSession);
 
     const currentTime = this.now();
-    const isAlreadyInactive =
-      targetSession.revokedAt !== null ||
-      targetSession.expiresAt.getTime() <= currentTime.getTime() ||
-      currentTime.getTime() - targetSession.lastUsedAt.getTime() > SESSION_IDLE_TTL_MS;
-
-    if (isAlreadyInactive) {
+    if (!isSessionCurrentlyActive(targetSession, currentTime)) {
       throw new AuthDomainError({
         status: 404,
         code: 'NOT_FOUND',
@@ -705,41 +736,74 @@ export class SessionService {
 
     const revokedCurrent = targetSession.familyId === principal.session.familyId;
 
-    const didRevoke = await this.repository.getDb().transaction(async (tx) => {
-      // Tuân thủ thứ tự khóa toàn cục (`users FOR SHARE` -> `advisory(familyId)` -> `sessions`)
-      // và thu hồi toàn bộ chuỗi `family_id` để chống race condition nếu thiết bị mục tiêu vừa `/refresh` song song.
-      await this.repository.lockUserById(principal.user.id, tx, 'share');
-      await this.repository.acquireSessionFamilyLock(targetSession.familyId, tx);
-      const revokedIds = await this.repository.revokeSessionFamily(
-        targetSession.familyId,
-        principal.user.id,
-        currentTime,
-        'session_revoked',
-        tx,
-      );
-      const revoked = revokedIds.length > 0;
+    const txOutcome = await this.repository
+      .getDb()
+      .transaction<RevokeSessionTransactionOutcome>(async (tx) => {
+        // Tuân thủ thứ tự khóa toàn cục (`users FOR SHARE` -> `advisory(familyId)` -> `sessions`)
+        // và tái kiểm tra trạng thái user/phiên hiện tại/phiên mục tiêu trong transaction chống TOCTOU.
+        const lockedUser = await this.repository.lockUserById(principal.user.id, tx, 'share');
+        if (!lockedUser || lockedUser.status !== 'active') {
+          return 'unauthorized';
+        }
 
-      if (revoked) {
+        await this.repository.acquireSessionFamilyLock(targetSession.familyId, tx);
+
+        const currentSession = await this.repository.findSessionByPublicIdForUser(
+          principal.session.publicId,
+          lockedUser.id,
+          tx,
+        );
+        if (!currentSession || !isSessionCurrentlyActive(currentSession, currentTime)) {
+          return 'unauthorized';
+        }
+
+        const freshTarget = await this.repository.findSessionByPublicIdForUser(
+          targetSession.publicId,
+          lockedUser.id,
+          tx,
+        );
+        if (!freshTarget || !isSessionCurrentlyActive(freshTarget, currentTime)) {
+          return 'not_found';
+        }
+
+        const revokedIds = await this.repository.revokeSessionFamily(
+          freshTarget.familyId,
+          lockedUser.id,
+          currentTime,
+          'session_revoked',
+          tx,
+        );
+        if (revokedIds.length === 0) {
+          return 'not_found';
+        }
+
         await this.auditLogService.record(
           {
-            userId: principal.user.id,
+            userId: lockedUser.id,
             action: 'SESSION_REVOKED',
             ipAddress: context.ipAddress,
             userAgent: context.userAgent,
             metadata: {
               scope: 'single_session',
-              targetSessionPublicId: targetSession.publicId,
+              targetSessionPublicId: freshTarget.publicId,
               revokedCurrent,
             },
           },
           tx,
         );
-      }
 
-      return revoked;
-    });
+        return 'revoked';
+      });
 
-    if (!didRevoke) {
+    if (txOutcome === 'unauthorized') {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+      });
+    }
+
+    if (txOutcome === 'not_found') {
       throw new AuthDomainError({
         status: 404,
         code: 'NOT_FOUND',
@@ -757,7 +821,7 @@ export class SessionService {
 
   /**
    * Đăng xuất đồng loạt tất cả thiết bị khác (mặc định `includeCurrent: false`) hoặc toàn bộ thiết bị.
-   * Bắt buộc kiểm tra qua `auth.policy.ts`.
+   * Bắt buộc kiểm tra qua `auth.policy.ts` và tái xác minh trạng thái tài khoản/phiên trong transaction.
    */
   async revokeAllSessions(
     principal: AuthenticatedPrincipal,
@@ -779,37 +843,64 @@ export class SessionService {
     const { includeCurrent } = parsed.data;
     const currentTime = this.now();
 
-    const revokedCount = await this.repository.getDb().transaction(async (tx) => {
-      const count = await this.repository.revokeAllUserSessions(
-        {
-          userId: principal.user.id,
-          excludeSessionId: includeCurrent ? undefined : principal.session.id,
-          revokedAt: currentTime,
-          reason: includeCurrent ? 'revoke_all_sessions' : 'revoke_other_sessions',
-        },
-        tx,
-      );
+    const txOutcome = await this.repository
+      .getDb()
+      .transaction<RevokeAllSessionsTransactionOutcome>(async (tx) => {
+        // Khóa `users FOR UPDATE` và xác minh lại tài khoản + phiên hiện tại trước khi thu hồi hàng loạt
+        // nhằm chặn TOCTOU nếu phiên gọi vừa bị thu hồi hoặc tài khoản vừa bị khóa/đình chỉ song song.
+        const lockedUser = await this.repository.lockUserById(principal.user.id, tx, 'update');
+        if (!lockedUser || lockedUser.status !== 'active') {
+          return { kind: 'unauthorized' };
+        }
 
-      await this.auditLogService.record(
-        {
-          userId: principal.user.id,
-          action: 'SESSION_REVOKED',
-          ipAddress: context.ipAddress,
-          userAgent: context.userAgent,
-          metadata: {
-            scope: includeCurrent ? 'all_sessions' : 'other_sessions',
-            revokedCount: count,
-            currentSessionPublicId: principal.session.publicId,
+        const currentSession = await this.repository.findSessionByPublicIdForUser(
+          principal.session.publicId,
+          lockedUser.id,
+          tx,
+        );
+        if (!currentSession || !isSessionCurrentlyActive(currentSession, currentTime)) {
+          return { kind: 'unauthorized' };
+        }
+
+        const count = await this.repository.revokeAllUserSessions(
+          {
+            userId: lockedUser.id,
+            excludeSessionId: includeCurrent ? undefined : currentSession.id,
+            excludeFamilyId: includeCurrent ? undefined : currentSession.familyId,
+            revokedAt: currentTime,
+            reason: includeCurrent ? 'revoke_all_sessions' : 'revoke_other_sessions',
           },
-        },
-        tx,
-      );
+          tx,
+        );
 
-      return count;
-    });
+        await this.auditLogService.record(
+          {
+            userId: lockedUser.id,
+            action: 'SESSION_REVOKED',
+            ipAddress: context.ipAddress,
+            userAgent: context.userAgent,
+            metadata: {
+              scope: includeCurrent ? 'all_sessions' : 'other_sessions',
+              revokedCount: count,
+              currentSessionPublicId: currentSession.publicId,
+            },
+          },
+          tx,
+        );
+
+        return { kind: 'revoked', count };
+      });
+
+    if (txOutcome.kind === 'unauthorized') {
+      throw new AuthDomainError({
+        status: 401,
+        code: 'UNAUTHORIZED',
+        message: AUTH_MESSAGES.unauthorized,
+      });
+    }
 
     return {
-      revokedCount,
+      revokedCount: txOutcome.count,
       includeCurrent,
       message: includeCurrent
         ? AUTH_MESSAGES.allSessionsRevoked

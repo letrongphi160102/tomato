@@ -115,15 +115,19 @@ describe('Security M0: Pino redact chống rò rỉ dữ liệu nhạy cảm', (
       'postgresql://tomato:synthetic-db-pass@127.0.0.1:5432/tomato',
       '__Host-tomato_at=synthetic-at-cookie',
       'https://tomato.example.com/reset-password?token=synthetic-reset-token-256bit',
+      'synthetic-brevo-api-key-header-value',
+      'synthetic-raw-ticket-256bit-value',
     ];
 
     testLogger.error(
       {
         csrfToken: extraSecrets[0],
         resetUrl: extraSecrets[6],
+        rawTicket: extraSecrets[8],
         session: {
           refreshTokenHash: extraSecrets[1],
           otpTokenHash: extraSecrets[2],
+          tomato_at: extraSecrets[5],
         },
         config: {
           smtpPass: extraSecrets[3],
@@ -133,6 +137,7 @@ describe('Security M0: Pino redact chống rò rỉ dữ liệu nhạy cảm', (
           headers: {
             Cookie: extraSecrets[5],
             'X-CSRF-Token': extraSecrets[0],
+            'api-key': extraSecrets[7],
           },
         },
         res: {
@@ -151,9 +156,11 @@ describe('Security M0: Pino redact chống rò rỉ dữ liệu nhạy cảm', (
 
     const parsed = JSON.parse(rawOutput.trim()) as Record<string, unknown>;
     expect(parsed.csrfToken).toBe('[REDACTED]');
+    expect(parsed.rawTicket).toBe('[REDACTED]');
     const req = parsed.req as { headers: Record<string, unknown> };
     expect(req.headers.Cookie).toBe('[REDACTED]');
     expect(req.headers['X-CSRF-Token']).toBe('[REDACTED]');
+    expect(req.headers['api-key']).toBe('[REDACTED]');
     const res = parsed.res as { headers: Record<string, unknown> };
     expect(res.headers['Set-Cookie']).toBe('[REDACTED]');
   });

@@ -423,6 +423,80 @@ describe('Security M5: Chống Brute-Force thông minh, Anti-Account-DoS, Lockou
     }
   });
 
+  it('Audit Q2 (Anti-Enumeration trạng thái deleted & sàn thời gian /login): tài khoản deleted với đúng mật khẩu vẫn ghi nhận pairFailure, bật requireCaptcha ở mốc 5 và giữ sàn thời gian đồng nhất với email không tồn tại', async () => {
+    let clockMs = 1_700_000_000_000;
+    const deletedPassword = 'deleted user valid passphrase 2026!';
+    const hashed = await hashPassword(deletedPassword);
+    const loginProtection = createMemoryLoginProtection(() => clockMs);
+
+    const deletedUser: UserRow = {
+      id: '01950000-0000-7000-8000-000000005099',
+      publicId: 'e1a5a057-0f04-47b2-95f4-0d6464275099',
+      username: 'deleted_audit_user',
+      fullName: 'Deleted User',
+      gender: 'other',
+      dateOfBirth: '1998-01-01',
+      status: 'deleted',
+      createdAt: new Date(clockMs),
+      updatedAt: new Date(clockMs),
+      deletedAt: new Date(clockMs),
+    };
+
+    setAuthServiceForTesting(
+      new AuthService({
+        repository: {
+          findEmailIdentityWithUser: vi.fn(async (email: string) =>
+            email === 'deleted-user@tomato.test'
+              ? {
+                  user: deletedUser,
+                  identity: {
+                    id: '01950000-0000-7000-8000-000000005098',
+                    userId: deletedUser.id,
+                    provider: 'email_password' as const,
+                    identifierNormalized: 'deleted-user@tomato.test',
+                    passwordHash: hashed.hash,
+                    pepperVersion: hashed.pepperVersion,
+                    verifiedAt: new Date(clockMs),
+                    failedLoginAttempts: 0,
+                    createdAt: new Date(clockMs),
+                    updatedAt: new Date(clockMs),
+                  },
+                }
+              : null,
+          ),
+        } as unknown as AuthRepository,
+        rateLimiter: makeAllowRateLimiter(),
+        loginProtection,
+        auditLogService: {
+          record: vi.fn().mockResolvedValue({ id: 'a-del' }),
+        } as unknown as AuditLogService,
+        now: () => new Date(clockMs),
+        minLoginFailureResponseMs: 60,
+      }),
+    );
+
+    const ip = '203.0.113.199';
+    for (let i = 1; i <= 5; i += 1) {
+      clockMs += 10_000;
+      const started = Date.now();
+      const res = await loginPost(
+        makeLoginReq({ email: 'deleted-user@tomato.test', password: deletedPassword }, ip),
+      );
+      expect(Date.now() - started).toBeGreaterThanOrEqual(50);
+      expect(res.status).toBe(401);
+      const body = (await res.json()) as {
+        error: { code: string; message: string; requireCaptcha?: boolean };
+      };
+      expect(body.error.code).toBe('INVALID_CREDENTIALS');
+      expect(body.error.message).toBe(AUTH_MESSAGES.invalidCredentials);
+      if (i < 5) {
+        expect(body.error.requireCaptcha).toBeUndefined();
+      } else {
+        expect(body.error.requireCaptcha).toBe(true);
+      }
+    }
+  });
+
   it('Mốc 50 lần sai liên tiếp: khóa nguyên tử sang locked, ghi ACCOUNT_LOCKED, gửi email cảnh báo (kể cả khi SMTP lỗi không phá 401), và không lộ trạng thái ở mật khẩu sai', async () => {
     const validPassword = 'lockout target passphrase 2026!';
     const hashed = await hashPassword(validPassword);

@@ -153,6 +153,7 @@ describe('Integration & Security M2: Đăng ký & Xác minh Email (PostgreSQL + 
         keyPrefix: testRunPrefix,
         now: () => testClockMs,
       });
+      await limiter.reset(`verify-email:email:${email}`, AUTH_RATE_LIMITS.verifyEmailByEmail);
       await limiter.reset(`resend:cooldown:${email}`, AUTH_RATE_LIMITS.resendVerificationCooldown);
       await limiter.reset(`resend:email15m:${email}`, AUTH_RATE_LIMITS.resendVerificationByEmail);
       await limiter.reset(

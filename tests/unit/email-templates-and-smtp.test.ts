@@ -21,14 +21,14 @@ describe('Unit M2: Email Templates & SmtpEmailAdapter', () => {
     );
   });
 
-  it('buildVerificationOtpEmail tạo cả HTML sạch và Plain Text chứa OTP & thời hạn', () => {
+  it('buildVerificationOtpEmail tạo cả HTML sạch và Plain Text chứa OTP & thời hạn, không lộ OTP trong Subject', () => {
     const rendered = buildVerificationOtpEmail({
       displayName: '<b>Hacker</b>',
       otpCode: '084921',
       expiresInMinutes: 15,
     });
 
-    expect(rendered.subject).toContain('084921');
+    expect(rendered.subject).not.toContain('084921');
     expect(rendered.html).toContain('084921');
     expect(rendered.html).toContain('15 phút');
     expect(rendered.html).toContain('&lt;b&gt;Hacker&lt;/b&gt;');

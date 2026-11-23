@@ -357,15 +357,16 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
       refreshTokenHash: 'b'.repeat(64),
     };
 
-    const mockRevokeById = vi.fn();
+    const mockRevokeFamily = vi.fn();
+    const mockFindForUser = vi.fn(async (sid: string, userId: string) =>
+      sid === sessionB.publicId && userId === sessionB.userId ? sessionB : null,
+    );
     const repository = {
       findSessionWithUserByPublicId: vi.fn(async (sid: string) =>
         sid === sessionA.publicId ? { session: sessionA, user: userA } : null,
       ),
-      findSessionByPublicId: vi.fn(async (sid: string) =>
-        sid === sessionB.publicId ? sessionB : null,
-      ),
-      revokeSessionById: mockRevokeById,
+      findSessionByPublicIdForUser: mockFindForUser,
+      revokeSessionFamily: mockRevokeFamily,
     } as unknown as AuthRepository;
 
     setSessionServiceForTesting(
@@ -398,7 +399,8 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
     expect(response.status).toBe(404);
     const json = (await response.json()) as { error: { code: string } };
     expect(json.error.code).toBe('NOT_FOUND');
-    expect(mockRevokeById).not.toHaveBeenCalled();
+    expect(mockFindForUser).toHaveBeenCalledWith(sessionB.publicId, userA.id);
+    expect(mockRevokeFamily).not.toHaveBeenCalled();
   });
 
   it('Bắt buộc (Reuse Detection): Dùng lại RT1 đã xoay vòng thu hồi toàn bộ family_id, ghi TOKEN_REUSE_DETECTED, xóa cookie và trả 401', async () => {
@@ -747,5 +749,129 @@ describe('Security M3: Anti-Enumeration Login, CSRF 3 lớp, IDOR 404, Reuse Det
     expect(json.error.code).toBe('ACCOUNT_SUSPENDED');
     expect(createSessionSpy).not.toHaveBeenCalled();
     expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  it('Audit Q3 (TOCTOU Session Revocation & Concurrent Refresh Logout): chặn phiên đã bị thu hồi song song khi gọi revokeSession/revokeAllSessions và vẫn thu hồi family_id khi logout ngay sau khi RT vừa xoay vòng', async () => {
+    const userRow: UserRow = {
+      id: '01950000-0000-7000-8000-000000000951',
+      publicId: 'f29e0411-4090-4a1c-a40a-3a951a9cf951',
+      username: 'toctou_session_user',
+      fullName: 'TOCTOU User',
+      gender: 'other',
+      dateOfBirth: '1999-01-01',
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      deletedAt: null,
+    };
+    const currentSession: SessionRow = {
+      id: '01950000-0000-7000-8000-000000000952',
+      publicId: 'session-curr-952',
+      userId: userRow.id,
+      familyId: 'family-curr-952',
+      refreshTokenHash: 'c'.repeat(64),
+      deviceInfo: 'Chrome 130 / Windows 10/11',
+      ipAddress: '198.51.100.51',
+      lastUsedAt: new Date(),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      revokedAt: null,
+      revokeReason: null,
+      createdAt: new Date(),
+    };
+    const otherSession: SessionRow = {
+      ...currentSession,
+      id: '01950000-0000-7000-8000-000000000953',
+      publicId: 'session-other-953',
+      familyId: 'family-other-953',
+      refreshTokenHash: 'd'.repeat(64),
+    };
+
+    const revokeFamilySpy = vi.fn();
+    const revokeAllSpy = vi.fn();
+
+    // Giả lập phiên gọi `currentSession` vừa bị thu hồi song song ngay trước khi bước vào transaction.
+    const toctouRepo = {
+      getDb: () => ({
+        transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn({}),
+      }),
+      lockUserById: vi.fn().mockResolvedValue(userRow),
+      acquireSessionFamilyLock: vi.fn().mockResolvedValue(undefined),
+      findSessionByPublicIdForUser: vi.fn(async (sid: string, _uid: string, tx?: unknown) => {
+        if (!tx && sid === otherSession.publicId) {
+          return otherSession;
+        }
+        if (tx && sid === currentSession.publicId) {
+          return { ...currentSession, revokedAt: new Date(), revokeReason: 'revoke_all_sessions' };
+        }
+        return otherSession;
+      }),
+      revokeSessionFamily: revokeFamilySpy,
+      revokeAllUserSessions: revokeAllSpy,
+    } as unknown as AuthRepository;
+
+    const sessionSvc = new SessionService({
+      repository: toctouRepo,
+      rateLimiter: makeAllowRateLimiter(),
+      auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+    });
+    const ctx = {
+      ipAddress: '198.51.100.51',
+      rateLimitIpKey: '198.51.100.51',
+      userAgent: 'Vitest',
+    };
+
+    await expect(
+      sessionSvc.revokeSession(
+        { user: userRow, session: currentSession },
+        otherSession.publicId,
+        ctx,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
+    expect(revokeFamilySpy).not.toHaveBeenCalled();
+
+    await expect(
+      sessionSvc.revokeAllSessions(
+        { user: userRow, session: currentSession },
+        { includeCurrent: false },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
+    expect(revokeAllSpy).not.toHaveBeenCalled();
+
+    // Trường hợp `/logout` mang AT/RT cũ vừa bị Silent Refresh xoay vòng (`token_rotated`) -> vẫn phải thu hồi family_id!
+    const rotatedRow: SessionRow = {
+      ...currentSession,
+      revokedAt: new Date(Date.now() - 500),
+      revokeReason: 'token_rotated',
+    };
+    const logoutRevokeFamilySpy = vi.fn().mockResolvedValue(['new-rotated-session-id']);
+    const logoutSvc = new SessionService({
+      repository: {
+        getDb: () => ({
+          transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn({}),
+        }),
+        findSessionByRefreshTokenHash: vi.fn().mockResolvedValue(rotatedRow),
+        lockUserById: vi.fn().mockResolvedValue(userRow),
+        acquireSessionFamilyLock: vi.fn().mockResolvedValue(undefined),
+        revokeSessionFamily: logoutRevokeFamilySpy,
+      } as unknown as AuthRepository,
+      rateLimiter: makeAllowRateLimiter(),
+      auditLogService: {
+        record: vi.fn().mockResolvedValue({ id: 'a-rot' }),
+      } as unknown as AuditLogService,
+    });
+
+    const logoutRes = await logoutSvc.logoutCurrentSession(
+      { accessToken: null, refreshToken: generateSecureToken(32) },
+      ctx,
+    );
+    expect(logoutRes.loggedOut).toBe(true);
+    expect(logoutRevokeFamilySpy).toHaveBeenCalledWith(
+      rotatedRow.familyId,
+      rotatedRow.userId,
+      expect.any(Date),
+      'user_logout',
+      expect.anything(),
+    );
   });
 });

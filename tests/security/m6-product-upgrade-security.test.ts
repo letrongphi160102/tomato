@@ -286,6 +286,7 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
             updatedAt: new Date(),
           }),
           lockUserById: vi.fn().mockResolvedValue(principal.user),
+          findSessionByPublicIdForUser: vi.fn().mockResolvedValue(principal.session),
           findVerificationTokenByHashForUser: vi.fn(async () => ({
             id: '01950000-0000-7000-8000-000000006088',
             userId: principal.user.id,
@@ -347,6 +348,70 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
         .getSetCookie()
         .some((c) => c.startsWith('tomato_pwd_ticket=') && c.includes('Max-Age=0')),
     ).toBe(true);
+
+    // Audit Q3: nếu phiên hiện tại đã bị thu hồi song song trong lúc Argon2id chạy -> trả 401 và KHÔNG sửa attemptCount của ticket.
+    const updateAttemptSpy = vi.fn();
+    setAuthServiceForTesting(
+      new AuthService({
+        rateLimiter: makeAllowRateLimiter(),
+        repository: {
+          getDb: () => ({
+            transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn({}),
+          }),
+          findEmailIdentityByUserId: vi.fn().mockResolvedValue({
+            id: '01950000-0000-7000-8000-000000006002',
+            userId: principal.user.id,
+            provider: 'email_password',
+            identifierNormalized: 'revoked-mid@tomato.test',
+            passwordHash: hashedPw.hash,
+            pepperVersion: hashedPw.pepperVersion,
+            verifiedAt: new Date(),
+            failedLoginAttempts: 0,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          }),
+          lockUserById: vi.fn().mockResolvedValue(principal.user),
+          findSessionByPublicIdForUser: vi.fn().mockResolvedValue({
+            ...principal.session,
+            revokedAt: new Date(),
+            revokeReason: 'user_logout',
+          }),
+          findVerificationTokenByHashForUser: vi.fn().mockResolvedValue({
+            id: '01950000-0000-7000-8000-000000006088',
+            userId: principal.user.id,
+            purpose: 'password_change_ticket' as const,
+            tokenHash: ticketHash,
+            attemptCount: 0,
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+            consumedAt: null,
+            createdAt: new Date(),
+          }),
+          updateVerificationTokenAttempt: updateAttemptSpy,
+        } as unknown as AuthRepository,
+        emailProvider: { provider: 'memory', send: vi.fn() },
+        auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+        appUrl: allowedOrigin,
+      }),
+    );
+
+    const revokedMidRes = await changePasswordPost(
+      new Request(`${allowedOrigin}/api/v1/auth/change-password`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: allowedOrigin,
+          'Sec-Fetch-Site': 'same-origin',
+          cookie: `tomato_at=synthetic-at; tomato_csrf=${csrfToken}; tomato_pwd_ticket=${rawTicket}`,
+          [CSRF_HEADER_NAME]: csrfToken,
+        },
+        body: JSON.stringify({
+          currentPassword: 'wrong current passphrase 2026!',
+          newPassword: 'brand new safe passphrase 2027!',
+        }),
+      }),
+    );
+    expect(revokedMidRes.status).toBe(401);
+    expect(updateAttemptSpy).not.toHaveBeenCalled();
   });
 
   it('POST /change-password/verify-otp không bao giờ trả raw ticket ra JSON body và gắn HttpOnly cookie đúng chuẩn', async () => {
