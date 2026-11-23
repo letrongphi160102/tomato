@@ -1,9 +1,11 @@
 'use client';
 
 import * as React from 'react';
+import { usePathname } from 'next/navigation';
 
 import {
   buildMessageDecryptCacheKey,
+  canAutoMarkConversationRead,
   ChatStoreContext,
   clearChatRamMemorySingleton,
   DEFAULT_MESSAGES_PAGE_LIMIT,
@@ -48,9 +50,11 @@ export interface ChatStoreProviderProps {
 }
 
 export function ChatStoreProvider({ currentUserPublicId, children }: ChatStoreProviderProps) {
+  const pathname = usePathname();
   const realtime = useRealtimePresence();
   const activeStatusEnabled = realtime?.activeStatusEnabled ?? true;
   const readReceiptsEnabled = realtime?.readReceiptsEnabled ?? true;
+  const e2eeReady = realtime?.e2eeReady ?? false;
   const subscribeChatEvents = realtime?.subscribeChatEvents;
 
   const [activeTab, setActiveTabState] = React.useState<'primary' | 'pending'>(
@@ -94,8 +98,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   const [hasLocalRestoredBackup, setHasLocalRestoredBackupState] = React.useState(
     () => getOrInitUserChatRamCache(currentUserPublicId).hasLocalRestoredBackup,
   );
-  const [, setThreadVersion] = React.useState(0);
+  const [threadVersion, setThreadVersion] = React.useState(0);
 
+  const pathnameRef = React.useRef<string | null>(pathname);
+  const isMessagesViewportActiveRef = React.useRef<boolean>(false);
   const selectedConvRef = React.useRef<ConversationSummaryDto | null>(selectedConversation);
   const primaryConvsRef = React.useRef<readonly ConversationSummaryDto[]>(primaryConversations);
   const pendingConvsRef = React.useRef<readonly ConversationSummaryDto[]>(pendingConversations);
@@ -103,11 +109,19 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   const inFlightPeerKeysRef = React.useRef<Map<string, Promise<UserE2eeKeyBundleDto | null>>>(
     new Map(),
   );
+  const inFlightThreadLoadByConvRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightReadReqRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightOwnStatusRef = React.useRef<Promise<void> | null>(null);
   const prevReadReceiptsEnabledRef = React.useRef<boolean | undefined>(
     realtime?.readReceiptsEnabled,
   );
+
+  React.useEffect(() => {
+    pathnameRef.current = pathname;
+    if (!pathname || !pathname.startsWith('/messages')) {
+      isMessagesViewportActiveRef.current = false;
+    }
+  }, [pathname]);
 
   React.useEffect(() => {
     selectedConvRef.current = selectedConversation;
@@ -466,6 +480,26 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     [currentUserPublicId],
   );
 
+  const checkCanAutoMarkRead = React.useCallback(
+    (conversationPublicId: string, targetSeq: number): boolean => {
+      const visibilityState = typeof document !== 'undefined' ? document.visibilityState : 'hidden';
+      const windowHasFocus =
+        typeof document !== 'undefined' && typeof document.hasFocus === 'function'
+          ? document.hasFocus()
+          : true;
+      return canAutoMarkConversationRead({
+        pathname: pathnameRef.current,
+        isMessagesViewportActive: isMessagesViewportActiveRef.current,
+        selectedConversation: selectedConvRef.current,
+        targetConversationPublicId: conversationPublicId,
+        targetSeq,
+        documentVisibilityState: visibilityState,
+        windowHasFocus,
+      });
+    },
+    [],
+  );
+
   /**
    * Đánh dấu cuộc hội thoại là đã đọc với Optimistic UI tức thì (0ms):
    * - Gỡ ngay chấm đỏ ở danh sách bên trái + giảm ngay huy hiệu trên TopBar.
@@ -490,10 +524,13 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
 
       const currentMyReadSeq = targetConv?.myState.lastReadSeq ?? 0;
-      const wasUnread = targetConv ? isConversationUnread(targetConv) : false;
+      const wasTrackedUnread = store.unreadPrimaryConvIds.has(conversationPublicId);
+      const wasUnread = wasTrackedUnread || (targetConv ? isConversationUnread(targetConv) : false);
 
       if (targetSeq > currentMyReadSeq || wasUnread) {
         const nextReadSeq = Math.max(currentMyReadSeq, targetSeq);
+        store.unreadPrimaryConvIds.delete(conversationPublicId);
+
         setPrimaryConversations((prev) =>
           prev.map((c) =>
             c.public_id === conversationPublicId
@@ -519,7 +556,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         }
 
         if (wasUnread) {
-          setUnreadConversationsCount((count) => Math.max(0, count - 1));
+          setUnreadConversationsCount((count) =>
+            Math.min(Math.max(0, count - 1), store.unreadPrimaryConvIds.size),
+          );
         }
       }
 
@@ -617,10 +656,32 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         const data = (await response.json()) as ConversationListResult;
         const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
 
+        let normalizedItems: readonly ConversationSummaryDto[] = data.items;
         if (tabToLoad === 'primary') {
+          normalizedItems = data.items.map((item) => {
+            const locallyReadSeq = targetStore.lastSentReadSeqByConvId.get(item.public_id) ?? 0;
+            if (locallyReadSeq > item.myState.lastReadSeq) {
+              return {
+                ...item,
+                myState: {
+                  ...item.myState,
+                  lastReadSeq: locallyReadSeq,
+                },
+              };
+            }
+            return item;
+          });
+
           targetStore.hasLoadedPrimary = true;
           setHasLoadedPrimaryState(true);
-          setPrimaryConversations(data.items);
+          setPrimaryConversations(normalizedItems);
+
+          targetStore.unreadPrimaryConvIds.clear();
+          for (const convItem of normalizedItems) {
+            if (isConversationUnread(convItem)) {
+              targetStore.unreadPrimaryConvIds.add(convItem.public_id);
+            }
+          }
         } else {
           targetStore.hasLoadedPending = true;
           setHasLoadedPendingState(true);
@@ -629,13 +690,21 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         setPendingCount(data.pendingCount);
         if (typeof data.unreadConversationsCount === 'number') {
-          setUnreadConversationsCount(data.unreadConversationsCount);
+          if (tabToLoad === 'primary' && inFlightReadReqRef.current.size > 0) {
+            setUnreadConversationsCount(targetStore.unreadPrimaryConvIds.size);
+          } else {
+            setUnreadConversationsCount(
+              Math.max(data.unreadConversationsCount, targetStore.unreadPrimaryConvIds.size),
+            );
+          }
         }
 
         // Đồng bộ lại selectedConversation nếu đang mở 1 hội thoại trong danh sách vừa tải.
         const currentSelected = selectedConvRef.current;
         if (currentSelected) {
-          const updatedSelected = data.items.find((c) => c.public_id === currentSelected.public_id);
+          const updatedSelected = normalizedItems.find(
+            (c) => c.public_id === currentSelected.public_id,
+          );
           if (updatedSelected) {
             selectConversation(updatedSelected);
           }
@@ -780,13 +849,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             [conversationPublicId]: `${latest.dto.isOwnMessage ? 'Bạn: ' : ''}${latest.plaintext}`,
           }));
 
-          // Nếu người dùng đang mở đúng đoạn chat này và tab đang hiển thị -> tự động đánh dấu đã đọc.
+          // Chỉ tự động đánh dấu đã đọc khi thỏa mãn đủ 4 điều kiện (đang ở `/messages`, khung chat đang mount, đúng đoạn chat đang mở và cửa sổ đang hiển thị/focus).
           if (
             !latest.dto.isOwnMessage &&
-            selectedConvRef.current?.public_id === conversationPublicId &&
-            selectedConvRef.current.myState.inboxState === 'primary' &&
-            typeof document !== 'undefined' &&
-            document.visibilityState === 'visible'
+            checkCanAutoMarkRead(conversationPublicId, nextHighestSeq)
           ) {
             void markConversationReadOptimistic(conversationPublicId, nextHighestSeq);
           }
@@ -796,6 +862,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
     },
     [
+      checkCanAutoMarkRead,
       currentUserPublicId,
       decryptSingleMessageCached,
       ensurePeerKeyBundle,
@@ -809,27 +876,42 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
    * Mở luồng tin nhắn của một cuộc hội thoại:
    * - Nếu đã có trong RAM cache (`hasInitialized === true`): hiển thị TỨC THÌ (0ms, không hiện "Đang tải cuộc trò chuyện...")
    *   và chỉ chạy `deltaSyncConversationThread` ngầm ở hậu trường.
-   * - Nếu mở lần đầu: tải trang gần nhất `limit = 25` tin nhắn.
-   * - Tự động kích hoạt Optimistic Read nếu hội thoại đang có tin chưa đọc.
+   * - Nếu mở lần đầu: chờ `ensureE2eeDeviceRegisteredSingleton` sẵn sàng, tải trang gần nhất `limit = 25` tin nhắn và giải mã.
+   * - Khử trùng lặp bằng `inFlightThreadLoadByConvRef` và đảm bảo khối `finally` luôn tắt `loadingInitial: false`.
    */
   const openConversationThread = React.useCallback(
     async (conv: ConversationSummaryDto, options?: { readonly forceReload?: boolean }) => {
       selectConversation(conv);
 
-      if (conv.myState.inboxState === 'primary' && isConversationUnread(conv)) {
+      if (
+        conv.myState.inboxState === 'primary' &&
+        (isConversationUnread(conv) || checkCanAutoMarkRead(conv.public_id, conv.lastSeq))
+      ) {
         void markConversationReadOptimistic(conv.public_id, conv.lastSeq);
       }
 
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       const cachedThread = store.threadsByConvId.get(conv.public_id);
-      if (cachedThread && cachedThread.hasInitialized && !options?.forceReload) {
+      if (
+        cachedThread &&
+        cachedThread.hasInitialized &&
+        !cachedThread.errorMessage &&
+        !options?.forceReload
+      ) {
         updateThreadState(conv.public_id, (prev) => ({
           ...(prev ?? cachedThread),
+          loadingInitial: false,
+          errorMessage: null,
           lastAccessedAt: Date.now(),
         }));
         void ensurePeerKeyBundle(conv.peer.public_id);
         void deltaSyncConversationThread(conv.public_id, conv.peer.public_id);
         return;
+      }
+
+      const existingLoad = inFlightThreadLoadByConvRef.current.get(conv.public_id);
+      if (existingLoad && !options?.forceReload) {
+        return existingLoad;
       }
 
       updateThreadState(conv.public_id, (prev) => ({
@@ -838,83 +920,119 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         nextBeforeSeq: prev?.nextBeforeSeq ?? null,
         highestSeq: prev?.highestSeq ?? 0,
         hasInitialized: prev?.hasInitialized ?? false,
-        loadingInitial: !(prev?.hasInitialized ?? false),
+        loadingInitial: (prev?.items.length ?? 0) === 0,
         loadingOlder: false,
+        errorMessage: null,
         lastAccessedAt: Date.now(),
       }));
 
-      try {
-        const [msgRes, currentPeerBundle] = await Promise.all([
-          authFetch(
-            `/api/v1/conversations/${encodeURIComponent(conv.public_id)}/messages?limit=${DEFAULT_MESSAGES_PAGE_LIMIT}`,
-          ),
-          ensurePeerKeyBundle(conv.peer.public_id),
-        ]);
+      const loadPromise = (async () => {
+        try {
+          await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+          const [msgRes, currentPeerBundle] = await Promise.all([
+            authFetch(
+              `/api/v1/conversations/${encodeURIComponent(conv.public_id)}/messages?limit=${DEFAULT_MESSAGES_PAGE_LIMIT}`,
+            ),
+            ensurePeerKeyBundle(conv.peer.public_id),
+            ownKeyBundleRef.current ? Promise.resolve() : refreshOwnE2eeStatus(),
+          ]);
 
-        if (!msgRes.ok) {
-          updateThreadState(conv.public_id, (prev) => ({
+          if (!msgRes.ok) {
+            updateThreadState(conv.public_id, (prev) => ({
+              conversationPublicId: conv.public_id,
+              items: prev?.items ?? [],
+              nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+              highestSeq: prev?.highestSeq ?? 0,
+              hasInitialized: (prev?.items.length ?? 0) > 0,
+              loadingInitial: false,
+              loadingOlder: false,
+              errorMessage: 'Không thể tải cuộc trò chuyện lúc này. Vui lòng thử lại.',
+              lastAccessedAt: Date.now(),
+            }));
+            return;
+          }
+
+          const msgData = (await msgRes.json()) as MessageListResult;
+          const decryptedItems = await Promise.all(
+            msgData.items.map((item) => {
+              const expectedDevices = item.isOwnMessage
+                ? ownKeyBundleRef.current?.devices
+                : currentPeerBundle?.devices;
+              return decryptSingleMessageCached(item, expectedDevices);
+            }),
+          );
+
+          let highestSeq = conv.lastSeq;
+          for (const item of msgData.items) {
+            if (item.seq > highestSeq) {
+              highestSeq = item.seq;
+            }
+          }
+
+          updateThreadState(conv.public_id, () => ({
             conversationPublicId: conv.public_id,
-            items: prev?.items ?? [],
-            nextBeforeSeq: null,
-            highestSeq: prev?.highestSeq ?? 0,
+            items: decryptedItems,
+            nextBeforeSeq: msgData.nextCursor,
+            highestSeq,
             hasInitialized: true,
             loadingInitial: false,
             loadingOlder: false,
+            errorMessage: null,
             lastAccessedAt: Date.now(),
           }));
-          return;
-        }
 
-        const msgData = (await msgRes.json()) as MessageListResult;
-        const decryptedItems = await Promise.all(
-          msgData.items.map((item) => {
-            const expectedDevices = item.isOwnMessage
-              ? ownKeyBundleRef.current?.devices
-              : currentPeerBundle?.devices;
-            return decryptSingleMessageCached(item, expectedDevices);
-          }),
-        );
-
-        let highestSeq = conv.lastSeq;
-        for (const item of msgData.items) {
-          if (item.seq > highestSeq) {
-            highestSeq = item.seq;
+          if (conv.myState.inboxState === 'primary' && highestSeq > conv.myState.lastReadSeq) {
+            void markConversationReadOptimistic(conv.public_id, highestSeq);
           }
+        } catch {
+          updateThreadState(conv.public_id, (prev) => ({
+            conversationPublicId: conv.public_id,
+            items: prev?.items ?? [],
+            nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+            highestSeq: prev?.highestSeq ?? 0,
+            hasInitialized: (prev?.items.length ?? 0) > 0,
+            loadingInitial: false,
+            loadingOlder: false,
+            errorMessage: 'Không thể tải cuộc trò chuyện lúc này. Vui lòng thử lại.',
+            lastAccessedAt: Date.now(),
+          }));
+        } finally {
+          inFlightThreadLoadByConvRef.current.delete(conv.public_id);
+          updateThreadState(conv.public_id, (prev) => {
+            if (!prev || !prev.loadingInitial) {
+              return (
+                prev ?? {
+                  conversationPublicId: conv.public_id,
+                  items: [],
+                  nextBeforeSeq: null,
+                  highestSeq: 0,
+                  hasInitialized: false,
+                  loadingInitial: false,
+                  loadingOlder: false,
+                  errorMessage: null,
+                  lastAccessedAt: Date.now(),
+                }
+              );
+            }
+            return {
+              ...prev,
+              loadingInitial: false,
+            };
+          });
         }
+      })();
 
-        updateThreadState(conv.public_id, () => ({
-          conversationPublicId: conv.public_id,
-          items: decryptedItems,
-          nextBeforeSeq: msgData.nextCursor,
-          highestSeq,
-          hasInitialized: true,
-          loadingInitial: false,
-          loadingOlder: false,
-          lastAccessedAt: Date.now(),
-        }));
-
-        if (conv.myState.inboxState === 'primary' && highestSeq > conv.myState.lastReadSeq) {
-          void markConversationReadOptimistic(conv.public_id, highestSeq);
-        }
-      } catch {
-        updateThreadState(conv.public_id, (prev) => ({
-          conversationPublicId: conv.public_id,
-          items: prev?.items ?? [],
-          nextBeforeSeq: prev?.nextBeforeSeq ?? null,
-          highestSeq: prev?.highestSeq ?? 0,
-          hasInitialized: true,
-          loadingInitial: false,
-          loadingOlder: false,
-          lastAccessedAt: Date.now(),
-        }));
-      }
+      inFlightThreadLoadByConvRef.current.set(conv.public_id, loadPromise);
+      return loadPromise;
     },
     [
+      checkCanAutoMarkRead,
       currentUserPublicId,
       decryptSingleMessageCached,
       deltaSyncConversationThread,
       ensurePeerKeyBundle,
       markConversationReadOptimistic,
+      refreshOwnE2eeStatus,
       selectConversation,
       updateThreadState,
     ],
@@ -1399,6 +1517,73 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     return () => clearTimeout(timer);
   }, [loadConversations, readReceiptsEnabled, selectConversation, setPrimaryConversations]);
 
+  const setMessagesViewportActive = React.useCallback(
+    (active: boolean) => {
+      isMessagesViewportActiveRef.current = active;
+      if (active) {
+        const current = selectedConvRef.current;
+        if (current && checkCanAutoMarkRead(current.public_id, current.lastSeq)) {
+          void markConversationReadOptimistic(current.public_id, current.lastSeq);
+        }
+      }
+    },
+    [checkCanAutoMarkRead, markConversationReadOptimistic],
+  );
+
+  // Tự động giải mã bù các tin nhắn bị `decryptionFailed: true` nếu thread được mở trước khi E2EE Bootstrap hoàn tất.
+  React.useEffect(() => {
+    if (!e2eeReady) {
+      return;
+    }
+    const store = getOrInitUserChatRamCache(currentUserPublicId);
+    const convIdsToRetry: string[] = [];
+    for (const [convId, thread] of store.threadsByConvId.entries()) {
+      if (thread.items.some((m) => m.decryptionFailed)) {
+        convIdsToRetry.push(convId);
+      }
+    }
+    if (convIdsToRetry.length === 0) {
+      return;
+    }
+
+    void (async () => {
+      await refreshOwnE2eeStatus();
+      for (const convId of convIdsToRetry) {
+        const currentThread = store.threadsByConvId.get(convId);
+        if (!currentThread) {
+          continue;
+        }
+        const peerId =
+          selectedConvRef.current?.public_id === convId
+            ? selectedConvRef.current.peer.public_id
+            : primaryConvsRef.current.find((c) => c.public_id === convId)?.peer.public_id;
+        const peerBundle = peerId ? await ensurePeerKeyBundle(peerId) : null;
+        const reDecrypted = await Promise.all(
+          currentThread.items.map(async (item) => {
+            if (!item.decryptionFailed) {
+              return item;
+            }
+            const expectedDevices = item.dto.isOwnMessage
+              ? ownKeyBundleRef.current?.devices
+              : peerBundle?.devices;
+            return decryptSingleMessageCached(item.dto, expectedDevices);
+          }),
+        );
+        updateThreadState(convId, (prev) => ({
+          ...(prev ?? currentThread),
+          items: reDecrypted,
+        }));
+      }
+    })();
+  }, [
+    currentUserPublicId,
+    decryptSingleMessageCached,
+    e2eeReady,
+    ensurePeerKeyBundle,
+    refreshOwnE2eeStatus,
+    updateThreadState,
+  ]);
+
   // Lắng nghe sự kiện Realtime toàn cục (`chat.message.created`, `chat.conversation.read`, `chat.conversation.updated`).
   React.useEffect(() => {
     if (!subscribeChatEvents) {
@@ -1416,6 +1601,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         const senderPublicId =
           typeof event.data.senderPublicId === 'string' ? event.data.senderPublicId : null;
         const incomingSeq = typeof event.data.seq === 'number' ? event.data.seq : null;
+        const recipientInboxState =
+          event.data.recipientInboxState === 'primary' ||
+          event.data.recipientInboxState === 'pending'
+            ? event.data.recipientInboxState
+            : null;
 
         if (!convId) {
           return;
@@ -1425,19 +1615,49 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           senderPublicId !== null &&
           senderPublicId.toLowerCase() === currentUserPublicId.toLowerCase();
 
+        // CHỈ đánh dấu là đang xem trực tiếp khi người dùng đang thực sự đứng ở `/messages`, khung chat đang mount, đúng đoạn chat đó và cửa sổ đang hiển thị/focus.
         const isActivelyViewingThisPrimaryConv =
-          selectedConvRef.current?.public_id === convId &&
-          selectedConvRef.current.myState.inboxState === 'primary' &&
-          typeof document !== 'undefined' &&
-          document.visibilityState === 'visible';
+          incomingSeq !== null ? checkCanAutoMarkRead(convId, incomingSeq) : false;
 
-        // Cập nhật Optimistic danh sách hội thoại & huy hiệu chưa đọc trên TopBar ngay khi nhận tin mới.
-        if (!isFromMe && incomingSeq !== null) {
-          const existingPrimary = primaryConvsRef.current.find((c) => c.public_id === convId);
-          if (existingPrimary) {
-            const wasAlreadyUnread = isConversationUnread(existingPrimary);
-            if (!isActivelyViewingThisPrimaryConv && !wasAlreadyUnread) {
-              setUnreadConversationsCount((count) => count + 1);
+        // Chỉ tính vào huy hiệu đỏ "Tin nhắn" trên TopBar khi sự kiện thuộc hộp thư `Chính` (`recipientInboxState === 'primary'`).
+        const isPrimaryInboxForRecipient =
+          recipientInboxState === 'primary' ||
+          (recipientInboxState === null &&
+            primaryConvsRef.current.some((c) => c.public_id === convId));
+
+        if (!isFromMe && incomingSeq !== null && isPrimaryInboxForRecipient) {
+          // Cập nhật ngay `lastSeq` trong RAM cho cuộc hội thoại để trạng thái chưa đọc nhất quán trước khi background fetch trả về.
+          setPrimaryConversations((prev) =>
+            prev.map((c) =>
+              c.public_id === convId && incomingSeq > c.lastSeq
+                ? {
+                    ...c,
+                    lastSeq: incomingSeq,
+                  }
+                : c,
+            ),
+          );
+          if (
+            selectedConvRef.current?.public_id === convId &&
+            incomingSeq > selectedConvRef.current.lastSeq
+          ) {
+            selectConversation({
+              ...selectedConvRef.current,
+              lastSeq: incomingSeq,
+            });
+          }
+
+          if (!isActivelyViewingThisPrimaryConv) {
+            const wasAlreadyTrackedUnread = store.unreadPrimaryConvIds.has(convId);
+            const existingPrimary = primaryConvsRef.current.find((c) => c.public_id === convId);
+            const wasAlreadyUnreadInList = existingPrimary
+              ? isConversationUnread(existingPrimary)
+              : false;
+            store.unreadPrimaryConvIds.add(convId);
+            if (!wasAlreadyTrackedUnread && !wasAlreadyUnreadInList) {
+              setUnreadConversationsCount((count) =>
+                Math.max(count + 1, store.unreadPrimaryConvIds.size),
+              );
             }
           }
         }
@@ -1452,7 +1672,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         }
 
         void loadConversations('primary', { background: true });
-        if (store.hasLoadedPending || store.activeTab === 'pending') {
+        if (
+          recipientInboxState === 'pending' ||
+          store.hasLoadedPending ||
+          store.activeTab === 'pending'
+        ) {
           void loadConversations('pending', { background: true });
         }
         return;
@@ -1478,8 +1702,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         const isSelfRead = readerPublicId.toLowerCase() === currentUserPublicId.toLowerCase();
 
         if (isSelfRead) {
+          store.unreadPrimaryConvIds.delete(convId);
           if (serverUnreadCount !== null) {
             setUnreadConversationsCount(serverUnreadCount);
+          } else {
+            setUnreadConversationsCount(store.unreadPrimaryConvIds.size);
           }
           setPrimaryConversations((prev) =>
             prev.map((c) =>
@@ -1506,7 +1733,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           return;
         }
 
-        // Đối phương vừa đọc tin nhắn của mình -> cập nhật ngay `peerLastReadSeq` để hiện nhãn "Đã xem" realtime.
+        // Đối phương vừa đọc tin nhắn của mình -> cập nhật ngay `peerLastReadSeq` và bumpThreadVersion để hiện nhãn "Đã xem" realtime.
         if (readReceiptsEnabled) {
           setPrimaryConversations((prev) =>
             prev.map((c) =>
@@ -1524,6 +1751,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               peerLastReadSeq: Math.max(selectedConvRef.current.peerLastReadSeq ?? 0, readSeq),
             });
           }
+          bumpThreadVersion();
         }
         return;
       }
@@ -1553,6 +1781,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
     });
   }, [
+    bumpThreadVersion,
+    checkCanAutoMarkRead,
     currentUserPublicId,
     deltaSyncConversationThread,
     loadConversations,
@@ -1563,22 +1793,21 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     subscribeChatEvents,
   ]);
 
-  // Tự động đánh dấu đã đọc khi người dùng quay lại tab trình duyệt lúc đang mở sẵn 1 đoạn chat chưa đọc.
+  // Tự động đánh dấu đã đọc khi người dùng quay lại tab trình duyệt hoặc focus cửa sổ lúc đang mở sẵn 1 đoạn chat chưa đọc tại `/messages`.
   React.useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (typeof document === 'undefined' || document.visibilityState !== 'visible') {
-        return;
-      }
+    const handleVisibilityOrFocus = () => {
       const current = selectedConvRef.current;
-      if (current && current.myState.inboxState === 'primary' && isConversationUnread(current)) {
+      if (current && checkCanAutoMarkRead(current.public_id, current.lastSeq)) {
         void markConversationReadOptimistic(current.public_id, current.lastSeq);
       }
     };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
     };
-  }, [markConversationReadOptimistic]);
+  }, [checkCanAutoMarkRead, markConversationReadOptimistic]);
 
   const contextValue = React.useMemo<ChatStoreContextValue>(
     () => ({
@@ -1596,8 +1825,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       ownKeyBundle,
       serverKeyBackup,
       hasLocalRestoredBackup,
+      threadVersion,
       setActiveTab,
       selectConversation,
+      setMessagesViewportActive,
       getThreadState,
       getCachedPeerKeyBundle,
       ensurePeerKeyBundle,
@@ -1643,6 +1874,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       sendOptimisticTextMessage,
       serverKeyBackup,
       setActiveTab,
+      setMessagesViewportActive,
+      threadVersion,
       unreadConversationsCount,
     ],
   );

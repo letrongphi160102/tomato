@@ -23,6 +23,7 @@ export interface CachedConversationThreadState {
   readonly hasInitialized: boolean;
   readonly loadingInitial: boolean;
   readonly loadingOlder: boolean;
+  readonly errorMessage?: string | null;
   readonly lastAccessedAt: number;
 }
 
@@ -41,8 +42,10 @@ export interface ChatStoreContextValue {
   readonly ownKeyBundle: UserE2eeKeyBundleDto | null;
   readonly serverKeyBackup: E2eeKeyBackupDto | null;
   readonly hasLocalRestoredBackup: boolean;
+  readonly threadVersion: number;
   readonly setActiveTab: (tab: 'primary' | 'pending') => void;
   readonly selectConversation: (conv: ConversationSummaryDto | null) => void;
+  readonly setMessagesViewportActive: (active: boolean) => void;
   readonly getThreadState: (conversationPublicId: string) => CachedConversationThreadState | null;
   readonly getCachedPeerKeyBundle: (peerPublicId: string) => UserE2eeKeyBundleDto | null;
   readonly ensurePeerKeyBundle: (
@@ -118,6 +121,7 @@ export interface UserChatRamCache {
   readonly decryptedMessagesByCacheKey: Map<string, DecryptedMessageCacheEntry>;
   readonly peerKeyBundlesByUserId: Map<string, PeerKeyBundleCacheEntry>;
   readonly lastSentReadSeqByConvId: Map<string, number>;
+  readonly unreadPrimaryConvIds: Set<string>;
 }
 
 let activeUserChatRamCache: UserChatRamCache | null = null;
@@ -147,6 +151,7 @@ export function getOrInitUserChatRamCache(userPublicId: string): UserChatRamCach
     decryptedMessagesByCacheKey: new Map(),
     peerKeyBundlesByUserId: new Map(),
     lastSentReadSeqByConvId: new Map(),
+    unreadPrimaryConvIds: new Set(),
   };
 
   return activeUserChatRamCache;
@@ -158,6 +163,7 @@ export function clearChatRamMemorySingleton(): void {
     activeUserChatRamCache.decryptedMessagesByCacheKey.clear();
     activeUserChatRamCache.peerKeyBundlesByUserId.clear();
     activeUserChatRamCache.lastSentReadSeqByConvId.clear();
+    activeUserChatRamCache.unreadPrimaryConvIds.clear();
     activeUserChatRamCache.primaryConversations = [];
     activeUserChatRamCache.pendingConversations = [];
     activeUserChatRamCache.previewsByConvId = {};
@@ -167,6 +173,49 @@ export function clearChatRamMemorySingleton(): void {
     activeUserChatRamCache.serverKeyBackup = null;
   }
   activeUserChatRamCache = null;
+}
+
+export interface AutoMarkConversationReadCheckParams {
+  readonly pathname: string | null | undefined;
+  readonly isMessagesViewportActive: boolean;
+  readonly selectedConversation: ConversationSummaryDto | null;
+  readonly targetConversationPublicId: string;
+  readonly targetSeq: number;
+  readonly documentVisibilityState: DocumentVisibilityState | string;
+  readonly windowHasFocus?: boolean;
+}
+
+/**
+ * Khóa chặt 4 điều kiện bắt buộc trước khi tự động gửi `POST /api/v1/conversations/[id]/read`:
+ * (a) Người dùng đang thực sự đứng ở route `/messages` VÀ `<MessagesView>` đang mount.
+ * (b) Đoạn chat đó đang được mở trực tiếp ở khung chat bên phải và thuộc hộp thư `Chính` (`primary`).
+ * (c) Tab trình duyệt đang hiển thị (`visible`) và cửa sổ đang có tiêu điểm (`windowHasFocus !== false`).
+ * (d) Có tin nhắn mới từ đối phương (`targetSeq > selectedConversation.myState.lastReadSeq`).
+ */
+export function canAutoMarkConversationRead(params: AutoMarkConversationReadCheckParams): boolean {
+  if (!params.pathname || !params.pathname.startsWith('/messages')) {
+    return false;
+  }
+  if (!params.isMessagesViewportActive) {
+    return false;
+  }
+  const selected = params.selectedConversation;
+  if (!selected || selected.public_id !== params.targetConversationPublicId) {
+    return false;
+  }
+  if (selected.myState.inboxState !== 'primary') {
+    return false;
+  }
+  if (params.documentVisibilityState !== 'visible') {
+    return false;
+  }
+  if (params.windowHasFocus === false) {
+    return false;
+  }
+  if (params.targetSeq <= selected.myState.lastReadSeq) {
+    return false;
+  }
+  return true;
 }
 
 export function buildMessageDecryptCacheKey(message: {

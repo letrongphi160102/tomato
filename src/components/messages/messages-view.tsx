@@ -147,6 +147,18 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const openConversationThread = chatStore?.openConversationThread;
   const openOrCreateDirectConversation = chatStore?.openOrCreateDirectConversation;
   const setActiveTab = chatStore?.setActiveTab;
+  const setMessagesViewportActive = chatStore?.setMessagesViewportActive;
+
+  // Đánh dấu khung chat `/messages` đang thực sự mở trên màn hình; tự động hủy ngay khi rời sang Trang chủ `/` hoặc route khác.
+  React.useEffect(() => {
+    if (!setMessagesViewportActive) {
+      return;
+    }
+    setMessagesViewportActive(true);
+    return () => {
+      setMessagesViewportActive(false);
+    };
+  }, [setMessagesViewportActive]);
 
   // Khởi tạo trạng thái khóa E2EE cá nhân (Singleton — chỉ chạy nếu chưa có trong RAM).
   React.useEffect(() => {
@@ -786,6 +798,24 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         className="size-4 animate-spin text-muted-foreground"
                       />
                     </div>
+                  ) : activeThread?.errorMessage && messages.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center gap-2.5 py-8 text-center">
+                      <p className="text-xs text-muted-foreground">{activeThread.errorMessage}</p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          void chatStore?.openConversationThread(selectedConversation, {
+                            forceReload: true,
+                          })
+                        }
+                        className="h-8 gap-1.5 rounded-lg px-3 text-xs"
+                      >
+                        <RotateCcw className="size-3.5" aria-hidden="true" />
+                        <span>Thử lại</span>
+                      </Button>
+                    </div>
                   ) : (
                     <div className="flex flex-col">
                       {clusteredMessages.map((entry, idx) => {
@@ -795,6 +825,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                           showPeerAvatar,
                           timeDividerLabel,
                           isLastReadByPeer,
+                          isLatestOwnSentUnread,
                         } = entry;
                         const isMine = item.dto.isOwnMessage;
                         const isNewCluster =
@@ -909,6 +940,13 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                                   />
                                   <span>Đã xem</span>
                                 </div>
+                              ) : isLatestOwnSentUnread ? (
+                                <span
+                                  aria-label="Đã gửi"
+                                  className="mt-1 px-1 text-[11px] text-muted-foreground"
+                                >
+                                  Đã gửi
+                                </span>
                               ) : null}
                             </div>
                           </React.Fragment>

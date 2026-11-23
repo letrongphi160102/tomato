@@ -10,6 +10,7 @@ import type {
   UserE2eeDeviceRow,
   UserE2eeKeyBackupRow,
 } from '@/core/db/schema';
+import { logger } from '@/core/logger';
 import { getRealtimeProvider, type RealtimeProvider } from '@/core/realtime';
 import { CHAT_RATE_LIMITS, getRateLimiter, type RateLimiter } from '@/core/redis';
 import { formatZodErrorDetails } from '@/core/security/http-response';
@@ -1571,6 +1572,8 @@ export class ChatService {
         // Tuyệt đối không bắn sự kiện Realtime cho người nhận nếu họ đã `decline`.
         shouldNotifyPeerRealtime: !isPeerDeclined,
         peerPublicId: peerUser!.publicId,
+        peerInboxState: (peerParticipant!.inboxState === 'pending' ? 'pending' : 'primary') as
+          'primary' | 'pending',
       };
     });
 
@@ -1581,7 +1584,7 @@ export class ChatService {
     if (!txOutcome.deduplicated) {
       // Sự kiện Realtime `chat.message.created` CHỈ gửi metadata tối giản,
       // TUYỆT ĐỐI KHÔNG đẩy `ciphertext` hay `cryptoHeader` qua bên thứ ba (Ably).
-      const minimalEventPayload = {
+      const baseEventPayload = {
         conversationPublicId: txOutcome.conversation.public_id,
         messagePublicId: txOutcome.message.public_id,
         seq: txOutcome.message.seq,
@@ -1590,20 +1593,18 @@ export class ChatService {
       };
 
       const publishTasks: Promise<void>[] = [
-        this.publishChatEventBestEffort(
-          actor.user.publicId,
-          'chat.message.created',
-          minimalEventPayload,
-        ),
+        this.publishChatEventBestEffort(actor.user.publicId, 'chat.message.created', {
+          ...baseEventPayload,
+          recipientInboxState: 'primary',
+        }),
       ];
 
       if (txOutcome.shouldNotifyPeerRealtime) {
         publishTasks.push(
-          this.publishChatEventBestEffort(
-            txOutcome.peerPublicId,
-            'chat.message.created',
-            minimalEventPayload,
-          ),
+          this.publishChatEventBestEffort(txOutcome.peerPublicId, 'chat.message.created', {
+            ...baseEventPayload,
+            recipientInboxState: txOutcome.peerInboxState,
+          }),
         );
       }
 
@@ -1624,8 +1625,17 @@ export class ChatService {
   ): Promise<void> {
     try {
       await this.realtimeProvider.publishToUser(recipientPublicId, eventName, payload);
-    } catch {
-      // Best-effort: dữ liệu đã được lưu bền vững trong PostgreSQL.
+    } catch (error) {
+      // Best-effort: dữ liệu đã được lưu bền vững trong PostgreSQL, chỉ ghi nhận cảnh báo kỹ thuật qua structured logger.
+      logger.warn(
+        {
+          component: 'chat-service',
+          event: 'chat_realtime_publish_failed',
+          eventName,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+        },
+        'Không thể đẩy sự kiện Realtime cho cuộc trò chuyện',
+      );
     }
   }
 }

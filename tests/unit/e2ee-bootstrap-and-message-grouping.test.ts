@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildMessageDecryptCacheKey,
+  canAutoMarkConversationRead,
   clearChatRamMemorySingleton,
   getOrInitUserChatRamCache,
   MAX_LRU_CACHED_CONVERSATION_THREADS,
@@ -24,6 +25,11 @@ import {
   fetchServerKeyBackupLazySingleton,
   getOrCreatePrimaryDeviceKeyMaterial,
 } from '@/lib/e2ee';
+import {
+  connectUserRealtime,
+  disconnectAllRealtimeConnections,
+  REALTIME_MULTIPLEX_GRACE_MS,
+} from '@/lib/realtime-client';
 import type { ChatMessageDto, ConversationSummaryDto } from '@/modules/chat';
 
 function makeMessageItem(overrides: {
@@ -272,22 +278,45 @@ describe('Unit: Singleton E2EE Bootstrap (Chống spam 429), Gom cụm bong bón
     expect(clustered[2]?.showPeerAvatar).toBe(true);
     expect(clustered[2]?.timeDividerLabel).toBeNull();
 
-    // Tin 4, 5 của mình tạo thành cụm: first -> last; tin 5 là tin mới nhất có seq <= peerLastReadSeq (5) -> hiện "Đã xem".
+    // Tin 4, 5 của mình tạo thành cụm: first -> last.
+    // Vì có tin 6 mới hơn ở cuối cuộc trò chuyện nên tin 5 KHÔNG còn hiện "Đã xem" (tránh hiện "Đã xem" cũ trong khi tin 6 mới gửi chưa đọc).
     expect(clustered[3]?.clusterPosition).toBe('first');
     expect(clustered[3]?.timeDividerLabel).toBeNull();
     expect(clustered[3]?.isLastReadByPeer).toBe(false);
+    expect(clustered[3]?.isLatestOwnSentUnread).toBe(false);
 
     expect(clustered[4]?.clusterPosition).toBe('last');
-    expect(clustered[4]?.isLastReadByPeer).toBe(true);
+    expect(clustered[4]?.isLastReadByPeer).toBe(false);
+    expect(clustered[4]?.isLatestOwnSentUnread).toBe(false);
 
-    // Tin 6 cách 20 phút (>= 15 phút) -> có Time Divider, vị trí 'single', chưa được đọc (seq 6 > 5).
+    // Tin 6 là tin mới nhất của cả cuộc trò chuyện (seq 6 > peerLastReadSeq 5) -> hiện "Đã gửi" (`isLatestOwnSentUnread = true`).
     expect(clustered[5]?.timeDividerLabel).not.toBeNull();
     expect(clustered[5]?.clusterPosition).toBe('single');
     expect(clustered[5]?.isLastReadByPeer).toBe(false);
+    expect(clustered[5]?.isLatestOwnSentUnread).toBe(true);
 
-    // Nếu tắt trạng thái Đã xem (peerLastReadSeq = null) -> không có tin nào hiện "Đã xem".
+    // Ngay khi đối phương đọc tin 6 (`peerLastReadSeq = 6`), tin 6 chuyển mượt từ "Đã gửi" sang "Đã xem".
+    const clusteredAfterPeerRead = buildClusteredMessageEntries(items, 6, now);
+    expect(clusteredAfterPeerRead[5]?.isLastReadByPeer).toBe(true);
+    expect(clusteredAfterPeerRead[5]?.isLatestOwnSentUnread).toBe(false);
+
+    // Khi đối phương nhắn trả lời tin 7 (tin cuối cuộc trò chuyện là của đối phương) -> ẩn cả "Đã gửi" và "Đã xem" trên tin 6 của mình.
+    const itemsWithPeerReply: GroupableMessageItem[] = [
+      ...items,
+      makeMessageItem({
+        seq: 7,
+        isOwnMessage: false,
+        createdAt: '2026-11-24T10:24:00.000Z',
+      }),
+    ];
+    const clusteredAfterPeerReply = buildClusteredMessageEntries(itemsWithPeerReply, 6, now);
+    expect(clusteredAfterPeerReply.some((e) => e.isLastReadByPeer)).toBe(false);
+    expect(clusteredAfterPeerReply.some((e) => e.isLatestOwnSentUnread)).toBe(false);
+
+    // Nếu tắt trạng thái Đã xem (peerLastReadSeq = null) -> tin cuối của mình chỉ hiện "Đã gửi", không có tin nào hiện "Đã xem".
     const clusteredNoReceipt = buildClusteredMessageEntries(items, null, now);
     expect(clusteredNoReceipt.some((e) => e.isLastReadByPeer)).toBe(false);
+    expect(clusteredNoReceipt[5]?.isLatestOwnSentUnread).toBe(true);
   });
 
   it('kiểm tra định dạng Time Divider, Tooltip thời gian chi tiết, trạng thái chưa đọc và giới hạn LRU 10 hội thoại trong RAM', () => {
@@ -400,5 +429,171 @@ describe('Unit: Singleton E2EE Bootstrap (Chống spam 429), Gom cụm bong bón
     const freshRam = getOrInitUserChatRamCache(userAPublicId);
     expect(freshRam.threadsByConvId.size).toBe(0);
     expect(freshRam.decryptedMessagesByCacheKey.size).toBe(0);
+    expect(freshRam.unreadPrimaryConvIds.size).toBe(0);
+  });
+
+  it('Hồi quy Lỗi (2): canAutoMarkConversationRead chặn tuyệt đối việc tự động bắn POST .../read khi người nhận đang ở Trang chủ (/) hoặc ẩn tab', () => {
+    const convId = '99999999-9999-4999-8999-999999999999';
+    const selectedPrimaryConv: ConversationSummaryDto = {
+      public_id: convId,
+      type: 'direct',
+      lastSeq: 10,
+      lastMessageAt: '2026-11-24T10:00:00.000Z',
+      createdAt: '2026-11-24T09:00:00.000Z',
+      peer: {
+        public_id: '22222222-2222-4222-8222-222222222222',
+        handle: 'bob',
+        fullName: 'Bob',
+        avatarUrl: null,
+        isPrivate: false,
+      },
+      myState: {
+        inboxState: 'primary',
+        pendingMessagesSent: 0,
+        pendingMessagesRemaining: 3,
+        lastReadSeq: 9,
+      },
+      isAwaitingPeerAcceptance: false,
+      canSendMedia: true,
+      canSendMoreMessages: true,
+      peerLastReadSeq: 9,
+      lastMessage: null,
+    };
+
+    // 1. Người dùng B đã rời `/messages` sang Trang chủ (`/`) -> dù `selectedConversation` còn lưu trong RAM vẫn PHẢI trả về `false`!
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/',
+        isMessagesViewportActive: false,
+        selectedConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
+
+    // 2. Pathname vẫn là `/messages` nhưng `<MessagesView>` đã unmount (`isMessagesViewportActive = false`) -> `false`.
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/messages',
+        isMessagesViewportActive: false,
+        selectedConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
+
+    // 3. Đang ở `/messages` nhưng người dùng đang mở một cuộc hội thoại khác -> `false`.
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/messages',
+        isMessagesViewportActive: true,
+        selectedConversation: selectedPrimaryConv,
+        targetConversationPublicId: '88888888-8888-4888-8888-888888888888',
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
+
+    // 4. Đang mở đúng đoạn chat ở `/messages` nhưng tab trình duyệt đang bị ẩn (`hidden`) hoặc cửa sổ mất focus -> `false`.
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/messages',
+        isMessagesViewportActive: true,
+        selectedConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'hidden',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
+
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/messages',
+        isMessagesViewportActive: true,
+        selectedConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: false,
+      }),
+    ).toBe(false);
+
+    // 5. Khi người dùng B quay lại `/messages`, khung chat đang mở, tab đang hiển thị & focus và `targetSeq (10) > lastReadSeq (9)` -> `true`.
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/messages',
+        isMessagesViewportActive: true,
+        selectedConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(true);
+  });
+
+  it('Hồi quy Shared Realtime Multiplexer: giữ nguyên kết nối khi chuyển route (/) <-> (/messages) cùng tài khoản và đóng tức thì khi đổi userPublicId hoặc đăng xuất', async () => {
+    vi.useFakeTimers();
+    try {
+      const userBPublicId = '22222222-2222-4222-8222-222222222222';
+      const tokenRequestMock = vi.fn(async () => null);
+
+      const onEventPage1 = vi.fn();
+      const onEventPage2 = vi.fn();
+
+      // 1. Mount ở `/messages` -> mở kết nối vật lý lần 1.
+      const conn1 = connectUserRealtime({
+        userPublicId: userAPublicId,
+        onEvent: onEventPage1,
+        requestTokenFn: tokenRequestMock,
+      });
+      await Promise.resolve();
+      expect(tokenRequestMock).toHaveBeenCalledTimes(1);
+
+      // 2. Chuyển trang từ `/messages` sang Trang chủ `/` (unmount conn1 rồi mount conn2 trong vòng < 1500ms):
+      //    Multiplexer tái sử dụng kết nối đang sống, KHÔNG gọi lại `/api/v1/realtime/token`.
+      conn1.disconnect();
+      vi.advanceTimersByTime(200);
+      const conn2 = connectUserRealtime({
+        userPublicId: userAPublicId,
+        onEvent: onEventPage2,
+        requestTokenFn: tokenRequestMock,
+      });
+      await Promise.resolve();
+      expect(tokenRequestMock).toHaveBeenCalledTimes(1);
+
+      // 3. Nếu đổi sang tài khoản khác (`userBPublicId`) -> đóng ngay lập tức kết nối của User A (bỏ qua grace timeout 1500ms) và tạo kết nối mới cho User B.
+      const connUserB = connectUserRealtime({
+        userPublicId: userBPublicId,
+        onEvent: vi.fn(),
+        requestTokenFn: tokenRequestMock,
+      });
+      await Promise.resolve();
+      expect(tokenRequestMock).toHaveBeenCalledTimes(2);
+
+      // 4. Khi đăng xuất (`disconnectAllRealtimeConnections`) -> đóng sạch ngay lập tức; lần kết nối sau phải xin token mới.
+      conn2.disconnect();
+      connUserB.disconnect();
+      disconnectAllRealtimeConnections();
+      vi.advanceTimersByTime(REALTIME_MULTIPLEX_GRACE_MS + 100);
+
+      const connAfterRelogin = connectUserRealtime({
+        userPublicId: userAPublicId,
+        onEvent: vi.fn(),
+        requestTokenFn: tokenRequestMock,
+      });
+      await Promise.resolve();
+      expect(tokenRequestMock).toHaveBeenCalledTimes(3);
+      connAfterRelogin.disconnect();
+      disconnectAllRealtimeConnections();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

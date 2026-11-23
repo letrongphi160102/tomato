@@ -593,6 +593,7 @@ export function RealtimePresenceProvider({
       });
 
     const connection = connectUserRealtime({
+      userPublicId: currentUserPublicId,
       onEvent: handleRealtimeEvent,
     });
     connectionRef.current = connection;
@@ -604,7 +605,7 @@ export function RealtimePresenceProvider({
         connectionRef.current = null;
       }
     };
-  }, [handleRealtimeEvent]);
+  }, [currentUserPublicId, handleRealtimeEvent]);
 
   // Duy trì nhịp cập nhật trạng thái hoạt động mỗi 60 giây khi tab đang mở và người dùng đang bật tính năng.
   React.useEffect(() => {

@@ -53,9 +53,44 @@ async function requestRealtimeToken(): Promise<RealtimeSubscribeTokenDto | null>
 const activeConnections = new Set<() => void>();
 
 /**
- * Đóng ngay lập tức toàn bộ kết nối Realtime đang mở (Ably WSS / SSE) khi người dùng đăng xuất.
+ * Thời gian ân hạn giữ kết nối Realtime sống khi chuyển trang nội bộ (`/` <-> `/messages`)
+ * để không làm rớt sự kiện Ably/SSE phát sinh trong khoảnh khắc chuyển route.
+ */
+export const REALTIME_MULTIPLEX_GRACE_MS = 1500;
+
+interface SharedRealtimeMultiplexer {
+  readonly userPublicId: string;
+  readonly subscribers: Set<(event: RealtimeClientEvent) => void>;
+  graceCloseTimer: ReturnType<typeof setTimeout> | null;
+  disposed: boolean;
+  closePhysicalConnection: () => void;
+}
+
+let activeSharedMultiplexer: SharedRealtimeMultiplexer | null = null;
+
+function destroySharedMultiplexerImmediate(mux: SharedRealtimeMultiplexer | null): void {
+  if (!mux) {
+    return;
+  }
+  if (mux.graceCloseTimer !== null) {
+    clearTimeout(mux.graceCloseTimer);
+    mux.graceCloseTimer = null;
+  }
+  mux.subscribers.clear();
+  mux.closePhysicalConnection();
+  if (activeSharedMultiplexer === mux) {
+    activeSharedMultiplexer = null;
+  }
+}
+
+/**
+ * Đóng ngay lập tức toàn bộ kết nối Realtime đang mở (Ably WSS / SSE) khi người dùng đăng xuất
+ * hoặc chuyển đổi tài khoản (bỏ qua hoàn toàn grace timeout 1500ms).
  */
 export function disconnectAllRealtimeConnections(): void {
+  destroySharedMultiplexerImmediate(activeSharedMultiplexer);
+  activeSharedMultiplexer = null;
+
   for (const disconnect of Array.from(activeConnections)) {
     try {
       disconnect();
@@ -67,27 +102,27 @@ export function disconnectAllRealtimeConnections(): void {
 }
 
 export interface ConnectRealtimeOptions {
+  readonly userPublicId?: string;
   readonly onEvent: (event: RealtimeClientEvent) => void;
+  /** Tuỳ chọn nạp hàm lấy token cho kiểm thử đơn vị (Unit Test). */
+  readonly requestTokenFn?: () => Promise<RealtimeSubscribeTokenDto | null>;
 }
 
-/**
- * Thiết lập kết nối Realtime chỉ-nghe (subscribe-only) tới kênh cá nhân `user:{publicId}`:
- * - Production / có `ABLY_API_KEY`: dùng `@ably/pubsub-device` v3 (tương thích tài khoản MAU)
- *   + `authCallback` tự gia hạn mỗi 15 phút qua `/api/v1/realtime/token`.
- * - Local fallback: dùng `EventSource('/api/v1/realtime/stream')` qua SSE.
- */
-export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeClientConnection {
+function openPhysicalRealtimeConnection(
+  dispatchEvent: (event: RealtimeClientEvent) => void,
+  requestTokenFn: () => Promise<RealtimeSubscribeTokenDto | null> = requestRealtimeToken,
+): () => void {
   let disposed = false;
   let ablyClient: PubSubClient | null = null;
   let eventSource: EventSource | null = null;
   let channelUnsubscribe: (() => void) | null = null;
 
-  const disconnect = () => {
+  const closePhysical = () => {
     if (disposed) {
       return;
     }
     disposed = true;
-    activeConnections.delete(disconnect);
+    activeConnections.delete(closePhysical);
 
     if (channelUnsubscribe) {
       try {
@@ -117,10 +152,10 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
     }
   };
 
-  activeConnections.add(disconnect);
+  activeConnections.add(closePhysical);
 
   void (async () => {
-    const initialToken = await requestRealtimeToken();
+    const initialToken = await requestTokenFn();
     if (disposed || !initialToken) {
       return;
     }
@@ -152,7 +187,7 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
           try {
             const parsed: unknown = JSON.parse(messageEvent.data);
             if (isRecord(parsed)) {
-              options.onEvent({ event: eventName, data: parsed });
+              dispatchEvent({ event: eventName, data: parsed });
             }
           } catch {
             // Bỏ qua frame không hợp lệ.
@@ -187,7 +222,7 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
             callback(null, firstToken);
             return;
           }
-          void requestRealtimeToken().then((fresh) => {
+          void requestTokenFn().then((fresh) => {
             if (disposed || !fresh?.tokenRequest) {
               callback('Không thể gia hạn kết nối.', null);
               return;
@@ -210,7 +245,7 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
           return;
         }
         if (isRecord(message.data)) {
-          options.onEvent({
+          dispatchEvent({
             event: message.name as RealtimeEventName,
             data: message.data,
           });
@@ -225,6 +260,96 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
       };
     }
   })().catch(() => undefined);
+
+  return closePhysical;
+}
+
+/**
+ * Thiết lập kết nối Realtime chỉ-nghe (subscribe-only) tới kênh cá nhân `user:{publicId}`:
+ * - Hỗ trợ Multiplexer theo `userPublicId`: giữ kết nối sống xuyên suốt khi chuyển trang nội bộ (`/` <-> `/messages`).
+ * - Đóng kết nối vật lý ngay lập tức và xóa sạch `subscribers` khi đổi `userPublicId` hoặc đăng xuất.
+ */
+export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeClientConnection {
+  const normalizedUserId = (options.userPublicId ?? '').trim().toLowerCase();
+
+  // Nếu không truyền `userPublicId`, tạo kết nối độc lập không dùng chung.
+  if (!normalizedUserId) {
+    const closePhysical = openPhysicalRealtimeConnection(options.onEvent, options.requestTokenFn);
+    return { disconnect: closePhysical };
+  }
+
+  // Nếu đang có kết nối dùng chung của một tài khoản KHÁC -> đóng ngay lập tức (không chờ 1500ms).
+  if (
+    activeSharedMultiplexer &&
+    (activeSharedMultiplexer.userPublicId !== normalizedUserId || activeSharedMultiplexer.disposed)
+  ) {
+    destroySharedMultiplexerImmediate(activeSharedMultiplexer);
+  }
+
+  let mux = activeSharedMultiplexer;
+  if (!mux) {
+    const subscribers = new Set<(event: RealtimeClientEvent) => void>();
+    const dispatchToSubscribers = (event: RealtimeClientEvent) => {
+      for (const sub of Array.from(subscribers)) {
+        try {
+          sub(event);
+        } catch {
+          // Cô lập lỗi của từng listener để không làm gián đoạn các listener khác.
+        }
+      }
+    };
+
+    const closePhysical = openPhysicalRealtimeConnection(
+      dispatchToSubscribers,
+      options.requestTokenFn,
+    );
+
+    mux = {
+      userPublicId: normalizedUserId,
+      subscribers,
+      graceCloseTimer: null,
+      disposed: false,
+      closePhysicalConnection: () => {
+        mux!.disposed = true;
+        closePhysical();
+      },
+    };
+    activeSharedMultiplexer = mux;
+  }
+
+  if (mux.graceCloseTimer !== null) {
+    clearTimeout(mux.graceCloseTimer);
+    mux.graceCloseTimer = null;
+  }
+
+  mux.subscribers.add(options.onEvent);
+
+  let subscriberRemoved = false;
+  const targetMux = mux;
+
+  const disconnect = () => {
+    if (subscriberRemoved) {
+      return;
+    }
+    subscriberRemoved = true;
+    targetMux.subscribers.delete(options.onEvent);
+
+    if (targetMux.disposed) {
+      return;
+    }
+
+    if (targetMux.subscribers.size === 0) {
+      if (targetMux.graceCloseTimer !== null) {
+        clearTimeout(targetMux.graceCloseTimer);
+      }
+      targetMux.graceCloseTimer = setTimeout(() => {
+        targetMux.graceCloseTimer = null;
+        if (targetMux.subscribers.size === 0 && !targetMux.disposed) {
+          destroySharedMultiplexerImmediate(targetMux);
+        }
+      }, REALTIME_MULTIPLEX_GRACE_MS);
+    }
+  };
 
   return { disconnect };
 }

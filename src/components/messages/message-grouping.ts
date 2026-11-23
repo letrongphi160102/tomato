@@ -22,6 +22,7 @@ export interface ClusteredMessageEntry<TItem extends GroupableMessageItem = Grou
   readonly showPeerAvatar: boolean;
   readonly timeDividerLabel: string | null;
   readonly isLastReadByPeer: boolean;
+  readonly isLatestOwnSentUnread: boolean;
 }
 
 function isSameLocalCalendarDay(dateA: Date, dateB: Date): boolean {
@@ -201,22 +202,28 @@ export function buildClusteredMessageEntries<TItem extends GroupableMessageItem>
     return null;
   });
 
-  // Tìm tin nhắn cuối cùng do chính mình gửi (đã gửi thành công, chưa thu hồi) có `seq <= peerLastReadSeq`.
+  // Chỉ gắn nhãn "Đã xem" hoặc "Đã gửi" cho tin nhắn mới nhất của cả cuộc trò chuyện
+  // khi tin nhắn đó do chính mình gửi (đã gửi thành công, chưa bị thu hồi, và chưa có tin trả lời nào của đối phương phía sau).
   let lastReadOwnClientMsgId: string | null = null;
-  if (typeof peerLastReadSeq === 'number' && peerLastReadSeq > 0) {
-    for (let i = items.length - 1; i >= 0; i -= 1) {
-      const candidate = items[i]!;
-      if (
-        candidate.dto.isOwnMessage &&
-        !candidate.sending &&
-        !candidate.sendError &&
-        candidate.dto.recalledAt === null &&
-        candidate.dto.seq > 0 &&
-        candidate.dto.seq <= peerLastReadSeq
-      ) {
-        lastReadOwnClientMsgId = candidate.dto.clientMsgId;
-        break;
-      }
+  let latestOwnSentUnreadClientMsgId: string | null = null;
+
+  const latestConversationItem = items[items.length - 1];
+  if (
+    latestConversationItem &&
+    latestConversationItem.dto.isOwnMessage &&
+    !latestConversationItem.sending &&
+    !latestConversationItem.sendError &&
+    latestConversationItem.dto.recalledAt === null &&
+    latestConversationItem.dto.seq > 0
+  ) {
+    if (
+      typeof peerLastReadSeq === 'number' &&
+      peerLastReadSeq > 0 &&
+      latestConversationItem.dto.seq <= peerLastReadSeq
+    ) {
+      lastReadOwnClientMsgId = latestConversationItem.dto.clientMsgId;
+    } else {
+      latestOwnSentUnreadClientMsgId = latestConversationItem.dto.clientMsgId;
     }
   }
 
@@ -250,6 +257,9 @@ export function buildClusteredMessageEntries<TItem extends GroupableMessageItem>
       timeDividerLabel: dividers[idx] ?? null,
       isLastReadByPeer:
         lastReadOwnClientMsgId !== null && item.dto.clientMsgId === lastReadOwnClientMsgId,
+      isLatestOwnSentUnread:
+        latestOwnSentUnreadClientMsgId !== null &&
+        item.dto.clientMsgId === latestOwnSentUnreadClientMsgId,
     };
   });
 }
