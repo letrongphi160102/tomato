@@ -4,6 +4,7 @@ import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 
 import { getEnv } from '@/core/config/env';
+import { normalizePostgresConnectionString } from '@/core/db/connection-string';
 import * as schema from '@/core/db/schema';
 import { logger } from '@/core/logger';
 
@@ -11,6 +12,7 @@ export type Database = NodePgDatabase<typeof schema>;
 export type DatabaseTransaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type DbExecutor = Database | DatabaseTransaction;
 
+export { normalizePostgresConnectionString } from '@/core/db/connection-string';
 export {
   PG_ERROR_CODES,
   extractPostgresConstraintName,
@@ -27,7 +29,7 @@ function createDatabasePool(): Pool {
   const env = getEnv();
 
   const pool = new Pool({
-    connectionString: env.DATABASE_URL,
+    connectionString: normalizePostgresConnectionString(env.DATABASE_URL),
     max: env.DB_POOL_MAX,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 3_000,
