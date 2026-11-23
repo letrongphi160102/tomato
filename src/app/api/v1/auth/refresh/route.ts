@@ -1,5 +1,6 @@
 import { handleAuthRouteError } from '@/app/api/v1/auth/_utils';
 import {
+  REFRESH_TOKEN_COOKIE_MAX_AGE_SECONDS,
   createAuthJsonResponse,
   enforceCsrfAndOrigin,
   extractRequestClientContext,
@@ -32,13 +33,28 @@ export async function POST(request: Request) {
       { status: 200 },
     );
 
-    // Giữ nguyên giá trị CSRF cookie hợp lệ hiện tại để tránh phá vỡ các tab đang mở cùng phiên,
-    // đồng thời gia hạn cùng chu kỳ với Refresh Token mới.
-    setAuthCookies(response, {
-      accessToken: result.tokens.accessToken,
-      refreshToken: result.tokens.refreshToken,
-      csrfToken: cookies.csrfToken ?? undefined,
-    });
+    // Giữ Max-Age bền vững khớp đúng thời hạn tuyệt đối còn lại của phiên (tối đa 30 ngày)
+    // để duy trì trạng thái đăng nhập xuyên suốt khi người dùng đóng và mở lại trình duyệt.
+    const remainingSeconds = Math.max(
+      60,
+      Math.min(
+        REFRESH_TOKEN_COOKIE_MAX_AGE_SECONDS,
+        Math.floor((result.expiresAt.getTime() - Date.now()) / 1000),
+      ),
+    );
+
+    setAuthCookies(
+      response,
+      {
+        accessToken: result.tokens.accessToken,
+        refreshToken: result.tokens.refreshToken,
+        csrfToken: cookies.csrfToken ?? undefined,
+      },
+      {
+        refreshTokenMaxAgeSeconds: remainingSeconds,
+        csrfTokenMaxAgeSeconds: remainingSeconds,
+      },
+    );
 
     return response;
   } catch (error) {

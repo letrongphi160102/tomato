@@ -1,0 +1,2 @@
+ALTER TYPE "public"."verification_token_purpose" ADD VALUE 'password_change_ticket';--> statement-breakpoint
+CREATE INDEX "idx_sessions_user_family_activity" ON "sessions" USING btree ("user_id","family_id","last_used_at");

@@ -29,25 +29,32 @@ export const AUTH_MESSAGES = Object.freeze({
   allOtherSessionsRevoked: 'Đã đăng xuất khỏi tất cả các thiết bị khác.',
   allSessionsRevoked: 'Đã đăng xuất khỏi tất cả các thiết bị.',
 
-  // Quên mật khẩu, Đặt lại mật khẩu & Đổi mật khẩu (M4)
+  // Quên mật khẩu, Đặt lại mật khẩu & Đổi mật khẩu 2 bước
   forgotPasswordSent:
-    'Liên kết đặt lại mật khẩu đã được gửi tới hộp thư của bạn. Vui lòng kiểm tra email trong vòng 15 phút.',
+    'Liên kết đặt lại mật khẩu đã được gửi tới email của bạn. Vui lòng kiểm tra hộp thư trong vòng 15 phút.',
   forgotPasswordEmailNotFound: 'Không tìm thấy tài khoản TOMATO nào gắn với địa chỉ email này.',
   resetTokenInvalidOrExpired: 'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã được sử dụng.',
   resetTokenExpired: 'Liên kết đặt lại mật khẩu đã hết hạn. Vui lòng yêu cầu liên kết mới.',
   passwordResetSuccess:
-    'Đặt lại mật khẩu thành công! Toàn bộ phiên đăng nhập cũ đã được đăng xuất. Vui lòng đăng nhập lại với mật khẩu mới.',
+    'Đặt lại mật khẩu thành công! Tất cả các thiết bị cũ đã được đăng xuất. Vui lòng đăng nhập lại với mật khẩu mới.',
   changePasswordOtpSent:
-    'Mã OTP xác nhận đổi mật khẩu gồm 6 chữ số đã được gửi tới email tài khoản của bạn (hiệu lực 10 phút).',
+    'Mã xác nhận gồm 6 chữ số đã được gửi tới email của bạn (có hiệu lực trong 10 phút).',
+  changePasswordOtpVerified: 'Xác nhận email thành công. Bạn có 10 phút để cập nhật mật khẩu mới.',
   changePasswordOtpCooldown: (retryAfterSeconds: number) =>
-    `Vui lòng chờ ${retryAfterSeconds} giây trước khi yêu cầu gửi lại mã OTP đổi mật khẩu.`,
+    `Vui lòng chờ ${retryAfterSeconds} giây trước khi yêu cầu gửi lại mã xác nhận.`,
+  changePasswordTicketRequired:
+    'Vui lòng hoàn tất bước xác nhận qua email trước khi đặt mật khẩu mới.',
+  changePasswordTicketInvalid:
+    'Phiên xác nhận đổi mật khẩu không hợp lệ hoặc đã được sử dụng. Vui lòng xác nhận lại qua email.',
+  changePasswordTicketExpired:
+    'Phiên xác nhận đổi mật khẩu đã hết hạn. Vui lòng yêu cầu mã xác nhận mới qua email.',
+  changePasswordTicketRevokedMaxAttempts:
+    'Bạn đã nhập sai mật khẩu hiện tại quá số lần cho phép. Vui lòng xác nhận lại qua email.',
   currentPasswordRequired: 'Vui lòng nhập mật khẩu hiện tại.',
   currentPasswordIncorrect: 'Mật khẩu hiện tại không chính xác.',
   newPasswordSameAsCurrent: 'Mật khẩu mới không được trùng với mật khẩu hiện tại.',
-  passwordChangedSuccess:
-    'Đổi mật khẩu thành công! Tất cả các thiết bị khác đã được đăng xuất và phiên hiện tại của bạn đã được làm mới.',
-  passwordChangeConcurrentConflict:
-    'Mật khẩu tài khoản vừa được thay đổi bởi một yêu cầu khác. Vui lòng kiểm tra lại.',
+  passwordChangedSuccess: 'Đổi mật khẩu thành công! Các thiết bị khác đã tự động được đăng xuất.',
+  passwordChangeConcurrentConflict: 'Mật khẩu tài khoản vừa được thay đổi. Vui lòng thử lại.',
 
   // Validation lỗi đầu vào
   invalidJsonBody: 'Dữ liệu gửi lên không phải định dạng JSON hợp lệ.',

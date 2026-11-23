@@ -25,6 +25,8 @@ export const sessions = pgTable(
   (table) => [
     index('idx_sessions_user_active').on(table.userId, table.revokedAt),
     index('idx_sessions_family_id').on(table.familyId),
+    // Tối ưu truy vấn `SELECT DISTINCT ON (family_id)` lấy danh sách thiết bị & lịch sử đăng nhập theo user.
+    index('idx_sessions_user_family_activity').on(table.userId, table.familyId, table.lastUsedAt),
   ],
 );
 

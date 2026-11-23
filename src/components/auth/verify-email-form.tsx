@@ -164,7 +164,7 @@ export function VerifyEmailForm() {
       const errorBody = (await response.json().catch(() => ({}))) as ApiErrorPayload;
       const serverCode = errorBody.error?.code;
       const serverMessage =
-        errorBody.error?.message ?? 'Xác minh thất bại. Vui lòng kiểm tra lại mã OTP.';
+        errorBody.error?.message ?? 'Xác minh chưa thành công. Vui lòng kiểm tra lại mã xác nhận.';
 
       if (response.status === 429 || serverCode === 'RATE_LIMITED') {
         const retryHeader = Number(response.headers.get('Retry-After') ?? '60');
@@ -267,7 +267,7 @@ export function VerifyEmailForm() {
           <Alert variant="success" aria-live="polite">
             <CheckCircle2 aria-hidden="true" />
             <div>
-              <AlertTitle>Tài khoản đã ở trạng thái hoạt động (Active)</AlertTitle>
+              <AlertTitle>Tài khoản đã sẵn sàng sử dụng</AlertTitle>
               <AlertDescription>
                 Địa chỉ email của bạn đã được xác nhận. Bạn có thể đăng nhập ngay bây giờ.
               </AlertDescription>
@@ -292,8 +292,8 @@ export function VerifyEmailForm() {
         <CardHeader className="space-y-1">
           <CardTitle>Xác minh địa chỉ email</CardTitle>
           <CardDescription>
-            Không tìm thấy phiên xác minh email đang chờ. Vui lòng đăng nhập hoặc đăng ký tài khoản
-            để nhận mã xác minh.
+            Chưa có địa chỉ email đang chờ xác nhận. Vui lòng đăng nhập hoặc đăng ký tài khoản để
+            nhận mã xác nhận.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2 sm:flex-row">
@@ -317,13 +317,13 @@ export function VerifyEmailForm() {
         <CardDescription>
           {pendingHint.sentAt > 0 ? (
             <>
-              Nhập mã OTP gồm 6 chữ số đã được gửi tới{' '}
+              Nhập mã xác nhận gồm 6 chữ số đã được gửi tới{' '}
               <span className="font-medium text-foreground">{email}</span>. Mã có hiệu lực trong 15
               phút.
             </>
           ) : (
             <>
-              Nhập mã OTP gồm 6 chữ số cho{' '}
+              Nhập mã xác nhận gồm 6 chữ số cho{' '}
               <span className="font-medium text-foreground">{email}</span> hoặc bấm gửi lại mã mới.
             </>
           )}
@@ -352,7 +352,7 @@ export function VerifyEmailForm() {
             <Alert variant="warning">
               <Clock aria-hidden="true" />
               <div>
-                <AlertTitle>Tạm giới hạn tần suất xác minh</AlertTitle>
+                <AlertTitle>Vui lòng chờ một lát</AlertTitle>
                 <AlertDescription>
                   {bannerMessage}
                   {verifyRetryAfter > 0 ? (
@@ -391,7 +391,7 @@ export function VerifyEmailForm() {
 
         <form onSubmit={handleVerifySubmit} noValidate className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="otpCode">Mã xác minh OTP (6 chữ số)</Label>
+            <Label htmlFor="otpCode">Mã xác nhận (6 chữ số)</Label>
             <Input
               id="otpCode"
               name="otpCode"

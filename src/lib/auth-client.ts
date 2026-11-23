@@ -47,10 +47,7 @@ export function getCsrfTokenFromDocumentCookie(
  * Chặn lỗ hổng Open Redirect cho tham số `?next=`:
  * chỉ chấp nhận đường dẫn tương đối nội bộ bắt đầu bằng đúng 1 dấu `/` (cấm `//`, `\`, scheme lạ).
  */
-export function sanitizeRedirectPath(
-  rawPath: string | null | undefined,
-  fallback = '/settings/security',
-): string {
+export function sanitizeRedirectPath(rawPath: string | null | undefined, fallback = '/'): string {
   if (!rawPath) {
     return fallback;
   }

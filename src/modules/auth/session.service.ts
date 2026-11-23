@@ -32,6 +32,12 @@ export const SESSION_ABSOLUTE_TTL_DAYS = 30;
 export const SESSION_ABSOLUTE_TTL_MS = SESSION_ABSOLUTE_TTL_DAYS * 24 * 60 * 60 * 1000;
 export const SESSION_IDLE_TTL_DAYS = 14;
 export const SESSION_IDLE_TTL_MS = SESSION_IDLE_TTL_DAYS * 24 * 60 * 60 * 1000;
+/** Thiết bị khác có hoạt động trong 15 phút gần đây được phân loại là "Đang hoạt động" (Online). */
+export const SESSION_ONLINE_THRESHOLD_MS = 15 * 60 * 1000;
+/** Tiết lưu cập nhật `last_used_at` tối đa 5 phút/lần trên API đọc để tối ưu chi phí ghi Neon Free. */
+export const SESSION_LAST_USED_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
+/** Giới hạn số thiết bị/lịch sử đăng nhập gần nhất trả về cho trang quản lý thiết bị. */
+export const SESSION_LIST_MAX_ITEMS = 25;
 // Địa chỉ IPv4 chưa xác định theo RFC 1122 dùng cho cột `sessions.ip_address INET NOT NULL`
 // khi request chạy cục bộ không đi qua reverse proxy gắn header IP.
 export const FALLBACK_SESSION_IP_ADDRESS = '0.0.0.0';
@@ -60,6 +66,7 @@ export interface CreatedSessionResult {
 export interface RefreshSessionResult {
   readonly refreshed: true;
   readonly user: PublicUserProfile;
+  readonly expiresAt: Date;
   readonly tokens: {
     readonly accessToken: string;
     readonly refreshToken: string;
@@ -71,6 +78,9 @@ export interface LogoutSessionResult {
   readonly message: string;
 }
 
+export type SessionActivityStatus = 'online' | 'offline';
+export type SessionHistoryStatus = 'logged_out' | 'expired';
+
 export interface PublicSessionItem {
   readonly public_id: string;
   readonly deviceInfo: string;
@@ -79,10 +89,22 @@ export interface PublicSessionItem {
   readonly lastUsedAt: string;
   readonly expiresAt: string;
   readonly isCurrent: boolean;
+  readonly activityStatus: SessionActivityStatus;
+}
+
+export interface PublicSessionHistoryItem {
+  readonly public_id: string;
+  readonly deviceInfo: string;
+  readonly ipAddress: string;
+  readonly createdAt: string;
+  readonly lastUsedAt: string;
+  readonly endedAt: string;
+  readonly historyStatus: SessionHistoryStatus;
 }
 
 export interface ListSessionsResult {
   readonly sessions: readonly PublicSessionItem[];
+  readonly history: readonly PublicSessionHistoryItem[];
 }
 
 export interface RevokeSessionResult {
@@ -111,6 +133,7 @@ type RefreshTransactionOutcome =
       readonly user: UserRow;
       readonly newSessionPublicId: string;
       readonly newRefreshToken: string;
+      readonly expiresAt: Date;
     }
   | { readonly kind: 'reuse_detected' }
   | { readonly kind: 'invalid' }
@@ -126,6 +149,82 @@ export function toPublicUserProfile(user: UserRow): PublicUserProfile {
     fullName: user.fullName,
     gender: user.gender,
     status: user.status,
+  };
+}
+
+/**
+ * Phân loại tập bản ghi đại diện theo từng `family_id` thành:
+ * - `sessions`: thiết bị đang có phiên hợp lệ (thiết bị hiện tại lên đầu; phân biệt `online` <= 15p vs `offline` > 15p).
+ * - `history`: lịch sử thiết bị đã đăng xuất (`logged_out`) hoặc hết hạn (`expired`).
+ * Không bao giờ trả về khóa nội bộ `id`, `userId`, `familyId` hay `refreshTokenHash`.
+ */
+export function classifyDeviceSessions(
+  rows: readonly SessionRow[],
+  options: {
+    readonly currentSessionPublicId: string;
+    readonly now: Date;
+    readonly idleTtlMs?: number;
+    readonly onlineThresholdMs?: number;
+  },
+): ListSessionsResult {
+  const nowMs = options.now.getTime();
+  const idleTtlMs = options.idleTtlMs ?? SESSION_IDLE_TTL_MS;
+  const onlineThresholdMs = options.onlineThresholdMs ?? SESSION_ONLINE_THRESHOLD_MS;
+
+  const activeItems: PublicSessionItem[] = [];
+  const historyItems: PublicSessionHistoryItem[] = [];
+
+  for (const row of rows) {
+    const isRevoked = row.revokedAt !== null;
+    const isAbsoluteExpired = row.expiresAt.getTime() <= nowMs;
+    const isIdleExpired = nowMs - row.lastUsedAt.getTime() > idleTtlMs;
+
+    if (!isRevoked && !isAbsoluteExpired && !isIdleExpired) {
+      const isCurrent = row.publicId === options.currentSessionPublicId;
+      const isOnline = isCurrent || nowMs - row.lastUsedAt.getTime() <= onlineThresholdMs;
+
+      activeItems.push({
+        public_id: row.publicId,
+        deviceInfo: row.deviceInfo ?? UNKNOWN_DEVICE_LABEL,
+        ipAddress: row.ipAddress,
+        createdAt: row.createdAt.toISOString(),
+        lastUsedAt: row.lastUsedAt.toISOString(),
+        expiresAt: row.expiresAt.toISOString(),
+        isCurrent,
+        activityStatus: isOnline ? 'online' : 'offline',
+      });
+      continue;
+    }
+
+    const expiredReason =
+      !isRevoked || row.revokeReason === 'expired' || row.revokeReason === 'idle_timeout';
+    const endedAtMs = row.revokedAt
+      ? row.revokedAt.getTime()
+      : Math.min(row.expiresAt.getTime(), row.lastUsedAt.getTime() + idleTtlMs);
+
+    historyItems.push({
+      public_id: row.publicId,
+      deviceInfo: row.deviceInfo ?? UNKNOWN_DEVICE_LABEL,
+      ipAddress: row.ipAddress,
+      createdAt: row.createdAt.toISOString(),
+      lastUsedAt: row.lastUsedAt.toISOString(),
+      endedAt: new Date(endedAtMs).toISOString(),
+      historyStatus: expiredReason ? 'expired' : 'logged_out',
+    });
+  }
+
+  activeItems.sort((a, b) => {
+    if (a.isCurrent !== b.isCurrent) {
+      return a.isCurrent ? -1 : 1;
+    }
+    return b.lastUsedAt.localeCompare(a.lastUsedAt);
+  });
+
+  historyItems.sort((a, b) => b.endedAt.localeCompare(a.endedAt));
+
+  return {
+    sessions: activeItems,
+    history: historyItems,
   };
 }
 
@@ -261,7 +360,20 @@ export class SessionService {
       });
     }
 
-    return { user, session };
+    // Tiết lưu cập nhật `last_used_at` (tối đa 5 phút/lần) để hiển thị trạng thái Online/Offline
+    // sát thực tế mà không gây tải ghi liên tục lên PostgreSQL Serverless (Neon Free).
+    let effectiveSession = session;
+    if (
+      currentTime.getTime() - session.lastUsedAt.getTime() >= SESSION_LAST_USED_TOUCH_INTERVAL_MS &&
+      typeof this.repository.touchSessionLastUsedAt === 'function'
+    ) {
+      await this.repository
+        .touchSessionLastUsedAt(session.id, user.id, currentTime)
+        .catch(() => undefined);
+      effectiveSession = { ...session, lastUsedAt: currentTime };
+    }
+
+    return { user, session: effectiveSession };
   }
 
   /**
@@ -414,6 +526,7 @@ export class SessionService {
           user,
           newSessionPublicId: rotatedSession.publicId,
           newRefreshToken,
+          expiresAt: rotatedSession.expiresAt,
         };
       });
 
@@ -439,6 +552,7 @@ export class SessionService {
     return {
       refreshed: true,
       user: toPublicUserProfile(outcome.user),
+      expiresAt: outcome.expiresAt,
       tokens: {
         accessToken,
         refreshToken: outcome.newRefreshToken,
@@ -533,23 +647,25 @@ export class SessionService {
 
     const currentTime = this.now();
     const idleCutoff = new Date(currentTime.getTime() - SESSION_IDLE_TTL_MS);
-    const activeRows = await this.repository.listActiveSessionsByUserId(
-      principal.user.id,
-      currentTime,
-      idleCutoff,
-    );
 
-    const items: PublicSessionItem[] = activeRows.map((row) => ({
-      public_id: row.publicId,
-      deviceInfo: row.deviceInfo ?? UNKNOWN_DEVICE_LABEL,
-      ipAddress: row.ipAddress,
-      createdAt: row.createdAt.toISOString(),
-      lastUsedAt: row.lastUsedAt.toISOString(),
-      expiresAt: row.expiresAt.toISOString(),
-      isCurrent: row.publicId === principal.session.publicId,
-    }));
+    const rows =
+      typeof this.repository.listLatestSessionsPerFamilyByUserId === 'function'
+        ? await this.repository.listLatestSessionsPerFamilyByUserId(
+            principal.user.id,
+            SESSION_LIST_MAX_ITEMS,
+          )
+        : await this.repository.listActiveSessionsByUserId(
+            principal.user.id,
+            currentTime,
+            idleCutoff,
+          );
 
-    return { sessions: items };
+    return classifyDeviceSessions(rows, {
+      currentSessionPublicId: principal.session.publicId,
+      now: currentTime,
+      idleTtlMs: SESSION_IDLE_TTL_MS,
+      onlineThresholdMs: SESSION_ONLINE_THRESHOLD_MS,
+    });
   }
 
   /**
@@ -573,7 +689,13 @@ export class SessionService {
     const targetSession = await this.repository.findSessionByPublicId(parsedId.data);
     assertCanRevokeSession(principal, targetSession);
 
-    if (targetSession.revokedAt !== null) {
+    const currentTime = this.now();
+    const isAlreadyInactive =
+      targetSession.revokedAt !== null ||
+      targetSession.expiresAt.getTime() <= currentTime.getTime() ||
+      currentTime.getTime() - targetSession.lastUsedAt.getTime() > SESSION_IDLE_TTL_MS;
+
+    if (isAlreadyInactive) {
       throw new AuthDomainError({
         status: 404,
         code: 'NOT_FOUND',
@@ -581,21 +703,21 @@ export class SessionService {
       });
     }
 
-    const currentTime = this.now();
-    const revokedCurrent = targetSession.id === principal.session.id;
+    const revokedCurrent = targetSession.familyId === principal.session.familyId;
 
     const didRevoke = await this.repository.getDb().transaction(async (tx) => {
       // Tuân thủ thứ tự khóa toàn cục (`users FOR SHARE` -> `advisory(familyId)` -> `sessions`)
-      // để chống deadlock khi chạy đồng thời với `changePassword` / `resetPassword` (`users FOR UPDATE`).
+      // và thu hồi toàn bộ chuỗi `family_id` để chống race condition nếu thiết bị mục tiêu vừa `/refresh` song song.
       await this.repository.lockUserById(principal.user.id, tx, 'share');
       await this.repository.acquireSessionFamilyLock(targetSession.familyId, tx);
-      const revoked = await this.repository.revokeSessionById(
-        targetSession.id,
+      const revokedIds = await this.repository.revokeSessionFamily(
+        targetSession.familyId,
         principal.user.id,
         currentTime,
         'session_revoked',
         tx,
       );
+      const revoked = revokedIds.length > 0;
 
       if (revoked) {
         await this.auditLogService.record(

@@ -4,7 +4,7 @@ import { ForgotPasswordForm } from '@/components/auth/forgot-password-form';
 
 export const metadata: Metadata = {
   title: 'Quên mật khẩu — TOMATO',
-  description: 'Khôi phục quyền truy cập tài khoản TOMATO an toàn qua liên kết đặt lại mật khẩu.',
+  description: 'Khôi phục mật khẩu tài khoản TOMATO của bạn qua email.',
 };
 
 export default function ForgotPasswordPage() {

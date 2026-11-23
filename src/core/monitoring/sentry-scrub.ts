@@ -21,7 +21,7 @@ const MAX_ARRAY_ITEMS = 50;
 
 // Danh sách mẫu tên khóa nhạy cảm bắt buộc loại bỏ/che hoàn toàn trước khi gửi sự kiện sang Sentry.
 const SENSITIVE_KEY_PATTERN =
-  /(password|passwd|pwd|pass|token|otp|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url)/i;
+  /(password|passwd|pwd|pass|token|otp|ticket|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url)/i;
 
 const SENSITIVE_HEADER_KEYS = new Set([
   'authorization',
@@ -42,7 +42,7 @@ const SENSITIVE_HEADER_KEYS = new Set([
 const BEARER_REGEX = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const JWT_REGEX = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const ARGON2_HASH_REGEX = /\$argon2(?:id|i|d)\$[^\s"'`]+/gi;
-const TOMATO_COOKIE_REGEX = /\b(?:__Host-)?tomato_(?:at|rt|csrf)=[^;\s"'`]+/gi;
+const TOMATO_COOKIE_REGEX = /\b(?:__Host-)?tomato_(?:at|rt|csrf|pwd_ticket)=[^;\s"'`]+/gi;
 const CONNECTION_URL_REGEX = /\b(?:postgres(?:ql)?|rediss?):\/\/[^\s"'`]+/gi;
 const SENSITIVE_QUERY_PARAM_REGEX =
   /([?&](?:token|reset_token|access_token|refresh_token|otp|otpCode|code|password|secret|key|api_key|email|captchaToken)=)[^&#\s"'`]+/gi;

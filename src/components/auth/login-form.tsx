@@ -13,7 +13,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { authFetch } from '@/lib/auth-client';
 import { loginInputSchema } from '@/modules/auth/auth.schemas';
 
 interface ApiErrorPayload {
@@ -54,38 +53,11 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
   const [captchaToken, setCaptchaToken] = React.useState('');
   const [turnstileResetSignal, setTurnstileResetSignal] = React.useState(0);
 
-  const [checkingSession, setCheckingSession] = React.useState(true);
   const [status, setStatus] = React.useState<FormStatus>('idle');
   const [errorCode, setErrorCode] = React.useState<string | null>(null);
   const [bannerMessage, setBannerMessage] = React.useState('');
   const [fieldErrors, setFieldErrors] = React.useState<FieldErrors>({});
   const [retryAfterSeconds, setRetryAfterSeconds] = React.useState(0);
-
-  // Tự động kiểm tra phiên hiện có (bao gồm gọi `/refresh` nếu AT vừa hết hạn 15 phút).
-  React.useEffect(() => {
-    let active = true;
-
-    async function checkExistingSession() {
-      try {
-        const res = await authFetch('/api/v1/auth/me', { method: 'GET' });
-        if (active && res.ok) {
-          router.replace(nextPath);
-          return;
-        }
-      } catch {
-        // Bỏ qua lỗi mạng nền; cho phép người dùng đăng nhập thủ công.
-      } finally {
-        if (active) {
-          setCheckingSession(false);
-        }
-      }
-    }
-
-    void checkExistingSession();
-    return () => {
-      active = false;
-    };
-  }, [nextPath, router]);
 
   React.useEffect(() => {
     if (retryAfterSeconds <= 0) {
@@ -145,11 +117,11 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
 
     if (requireCaptcha && !captchaToken.trim()) {
       setFieldErrors({
-        captchaToken: 'Vui lòng hoàn thành bước xác thực bảo mật Cloudflare Turnstile.',
+        captchaToken: 'Vui lòng hoàn tất xác nhận bảo mật trước khi tiếp tục.',
       });
       setStatus('error');
       setErrorCode('CAPTCHA_REQUIRED');
-      setBannerMessage('Vui lòng hoàn thành bước xác thực bảo mật Cloudflare Turnstile.');
+      setBannerMessage('Vui lòng hoàn tất xác nhận bảo mật trước khi tiếp tục.');
       return;
     }
 
@@ -243,26 +215,13 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
     }
   }
 
-  if (checkingSession) {
-    return (
-      <Card className="w-full shadow-md">
-        <CardContent className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-          <Loader2 className="size-6 animate-spin text-primary" aria-hidden="true" />
-          <p className="text-sm text-muted-foreground">
-            Đang kiểm tra trạng thái phiên đăng nhập...
-          </p>
-        </CardContent>
-      </Card>
-    );
-  }
-
   const isSubmitting = status === 'loading';
   const isBlocked = isSubmitting || retryAfterSeconds > 0 || status === 'success';
 
   return (
     <Card className="w-full shadow-md">
       <CardHeader className="space-y-1 text-center">
-        <CardTitle>Đăng nhập vào Tomato</CardTitle>
+        <CardTitle>Đăng nhập vào TOMATO</CardTitle>
       </CardHeader>
 
       <CardContent>
@@ -272,7 +231,7 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
               <CheckCircle2 aria-hidden="true" />
               <div>
                 <AlertTitle>Đăng nhập thành công</AlertTitle>
-                <AlertDescription>{bannerMessage} Đang chuyển hướng...</AlertDescription>
+                <AlertDescription>Đang đưa bạn vào trang chủ...</AlertDescription>
               </div>
             </Alert>
           ) : null}
@@ -281,7 +240,7 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
             <Alert variant="warning">
               <Clock aria-hidden="true" />
               <div>
-                <AlertTitle>Tạm giới hạn tần suất đăng nhập</AlertTitle>
+                <AlertTitle>Vui lòng chờ một lát</AlertTitle>
                 <AlertDescription>
                   {bannerMessage}
                   {retryAfterSeconds > 0 ? (
@@ -383,10 +342,7 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
             <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
               <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
                 <ShieldAlert className="size-4 shrink-0 text-amber-700" aria-hidden="true" />
-                <span>
-                  Xác thực bổ sung: Vui lòng hoàn thành Cloudflare Turnstile trước khi thử đăng nhập
-                  lại.
-                </span>
+                <span>Vui lòng hoàn tất xác nhận bảo mật để tiếp tục đăng nhập.</span>
               </div>
               <TurnstileWidget
                 siteKey={turnstileSiteKey}
@@ -411,7 +367,7 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
             {isSubmitting ? (
               <>
                 <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                Đang xác thực...
+                Đang đăng nhập...
               </>
             ) : retryAfterSeconds > 0 ? (
               `Thử lại sau ${retryAfterSeconds}s`

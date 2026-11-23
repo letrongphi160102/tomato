@@ -3,6 +3,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { POST as changePasswordOtpPost } from '@/app/api/v1/auth/change-password/request-otp/route';
 import { POST as changePasswordPost } from '@/app/api/v1/auth/change-password/route';
+import { POST as verifyChangePasswordOtpPost } from '@/app/api/v1/auth/change-password/verify-otp/route';
 import { POST as forgotPasswordPost } from '@/app/api/v1/auth/forgot-password/route';
 import { POST as loginPost } from '@/app/api/v1/auth/login/route';
 import { GET as meGet } from '@/app/api/v1/auth/me/route';
@@ -111,6 +112,7 @@ interface CookieJar {
   at?: string;
   rt?: string;
   csrf?: string;
+  pwdTicket?: string;
 }
 
 function extractCookiesFromResponse(response: Response, previous: CookieJar = {}): CookieJar {
@@ -131,6 +133,8 @@ function extractCookiesFromResponse(response: Response, previous: CookieJar = {}
       next.rt = isCleared ? undefined : value;
     } else if (name === 'tomato_csrf' || name === '__Host-tomato_csrf') {
       next.csrf = isCleared ? undefined : value;
+    } else if (name === 'tomato_pwd_ticket' || name === '__Host-tomato_pwd_ticket') {
+      next.pwdTicket = isCleared ? undefined : value;
     }
   }
   return next;
@@ -146,6 +150,9 @@ function serializeCookieJar(jar: CookieJar): string {
   }
   if (jar.csrf) {
     parts.push(`tomato_csrf=${jar.csrf}`);
+  }
+  if (jar.pwdTicket) {
+    parts.push(`tomato_pwd_ticket=${jar.pwdTicket}`);
   }
   return parts.join('; ');
 }
@@ -764,50 +771,28 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
     expect(cooldownBlockedRes.status).toBe(429);
     expect(Number(cooldownBlockedRes.headers.get('Retry-After'))).toBeGreaterThan(0);
 
-    // 2. Nhập mật khẩu mới trùng mật khẩu cũ -> bị chặn 400 VALIDATION_ERROR.
-    const samePassRes = await changePasswordPost(
+    // 2. Cố nhảy thẳng sang Bước 2 khi chưa xác minh OTP Bước 1 -> bị chặn 403 TOKEN_INVALID.
+    const bypassStep1Res = await changePasswordPost(
       makePostRequest('/api/v1/auth/change-password', {
         body: {
           currentPassword,
-          newPassword: currentPassword,
-          otpCode: otpCode1,
-        },
-        jar: deviceAOldJar,
-        ip: deviceAIp,
-      }),
-    );
-    expect(samePassRes.status).toBe(400);
-    expect(((await samePassRes.json()) as { error: { code: string } }).error.code).toBe(
-      'VALIDATION_ERROR',
-    );
-
-    // 3. Nhập sai mật khẩu hiện tại -> bị chặn 400 INVALID_CREDENTIALS (không làm hỏng OTP).
-    const wrongCurrentRes = await changePasswordPost(
-      makePostRequest('/api/v1/auth/change-password', {
-        body: {
-          currentPassword: 'wrong current passphrase 2026!',
           newPassword,
-          otpCode: otpCode1,
         },
         jar: deviceAOldJar,
         ip: deviceAIp,
       }),
     );
-    expect(wrongCurrentRes.status).toBe(400);
-    expect(((await wrongCurrentRes.json()) as { error: { code: string } }).error.code).toBe(
-      'INVALID_CREDENTIALS',
+    expect(bypassStep1Res.status).toBe(403);
+    expect(((await bypassStep1Res.json()) as { error: { code: string } }).error.code).toBe(
+      'TOKEN_INVALID',
     );
 
-    // 4. Nhập sai OTP 5 lần liên tiếp -> mã OTP #1 bị hủy ngay, kể cả nhập đúng otpCode1 sau đó cũng thất bại.
+    // 3. Nhập sai OTP 5 lần liên tiếp ở Bước 1b -> mã OTP #1 bị hủy ngay, kể cả nhập đúng otpCode1 sau đó cũng thất bại.
     const wrongOtp = otpCode1 === '000000' ? '111111' : '000000';
     for (let attempt = 1; attempt <= PASSWORD_CHANGE_OTP_MAX_ATTEMPTS; attempt += 1) {
-      const wrongOtpRes = await changePasswordPost(
-        makePostRequest('/api/v1/auth/change-password', {
-          body: {
-            currentPassword,
-            newPassword,
-            otpCode: wrongOtp,
-          },
+      const wrongOtpRes = await verifyChangePasswordOtpPost(
+        makePostRequest('/api/v1/auth/change-password/verify-otp', {
+          body: { otpCode: wrongOtp },
           jar: deviceAOldJar,
           ip: nextTestIp(),
         }),
@@ -819,13 +804,9 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
     }
 
     // Nhập đúng otpCode1 sau khi đã quá 5 lần sai -> vẫn bị từ chối vì OTP đã bị hủy.
-    const exhaustedOtpRes = await changePasswordPost(
-      makePostRequest('/api/v1/auth/change-password', {
-        body: {
-          currentPassword,
-          newPassword,
-          otpCode: otpCode1,
-        },
+    const exhaustedOtpRes = await verifyChangePasswordOtpPost(
+      makePostRequest('/api/v1/auth/change-password/verify-otp', {
+        body: { otpCode: otpCode1 },
         jar: deviceAOldJar,
         ip: nextTestIp(),
       }),
@@ -835,7 +816,7 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
       'TOKEN_INVALID',
     );
 
-    // 5. Mô phỏng hết cửa sổ cooldown 60 giây trên Redis thật, xin OTP #2 mới và đổi mật khẩu thành công.
+    // 4. Mô phỏng hết cửa sổ cooldown 60 giây trên Redis thật, xin OTP #2 mới và xác minh Bước 1b nhận HttpOnly ticket.
     await testRateLimiter.reset(
       `change-password-otp:cooldown:${seeded.userId}`,
       AUTH_RATE_LIMITS.changePasswordOtpCooldown,
@@ -850,15 +831,68 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
     expect(otp2Res.status).toBe(200);
     const otpCode2 = extractSixDigitOtp(emailCapture.getLatestFor(email)!.text);
 
+    const verifyOtp2Res = await verifyChangePasswordOtpPost(
+      makePostRequest('/api/v1/auth/change-password/verify-otp', {
+        body: { otpCode: otpCode2 },
+        jar: deviceAOldJar,
+        ip: deviceAIp,
+      }),
+    );
+    expect(verifyOtp2Res.status).toBe(200);
+    expect(verifyOtp2Res.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+    const verifyOtp2Json = (await verifyOtp2Res.json()) as {
+      verified: boolean;
+      expiresInMinutes: number;
+    };
+    expect(verifyOtp2Json.verified).toBe(true);
+    expect(verifyOtp2Json.expiresInMinutes).toBe(10);
+    // Tuyệt đối không trả raw ticket trong JSON body; chỉ gửi qua HttpOnly cookie.
+    expect(JSON.stringify(verifyOtp2Json)).not.toContain('ticket');
+
+    const deviceAWithTicketJar = extractCookiesFromResponse(verifyOtp2Res, deviceAOldJar);
+    expect(deviceAWithTicketJar.pwdTicket).toBeDefined();
+
+    // 5. Bước 2: nhập mật khẩu mới trùng mật khẩu cũ -> bị chặn 400 VALIDATION_ERROR.
+    const samePassRes = await changePasswordPost(
+      makePostRequest('/api/v1/auth/change-password', {
+        body: {
+          currentPassword,
+          newPassword: currentPassword,
+        },
+        jar: deviceAWithTicketJar,
+        ip: deviceAIp,
+      }),
+    );
+    expect(samePassRes.status).toBe(400);
+    expect(((await samePassRes.json()) as { error: { code: string } }).error.code).toBe(
+      'VALIDATION_ERROR',
+    );
+
+    // 6. Bước 2: nhập sai mật khẩu hiện tại -> bị chặn 400 INVALID_CREDENTIALS (vẫn còn lượt thử trên ticket).
+    const wrongCurrentRes = await changePasswordPost(
+      makePostRequest('/api/v1/auth/change-password', {
+        body: {
+          currentPassword: 'wrong current passphrase 2026!',
+          newPassword,
+        },
+        jar: deviceAWithTicketJar,
+        ip: deviceAIp,
+      }),
+    );
+    expect(wrongCurrentRes.status).toBe(400);
+    expect(((await wrongCurrentRes.json()) as { error: { code: string } }).error.code).toBe(
+      'INVALID_CREDENTIALS',
+    );
+
+    // 7. Bước 2: nhập đúng mật khẩu hiện tại và mật khẩu mới -> đổi mật khẩu thành công, xóa cookie ticket, xoay vòng phiên.
     const changeIp = nextTestIp();
     const changeRes = await changePasswordPost(
       makePostRequest('/api/v1/auth/change-password', {
         body: {
           currentPassword,
           newPassword,
-          otpCode: otpCode2,
         },
-        jar: deviceAOldJar,
+        jar: deviceAWithTicketJar,
         ip: changeIp,
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/131.0.0.0',
       }),
@@ -876,7 +910,8 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
     expect(JSON.stringify(changeJson)).not.toContain('accessToken');
     expect(JSON.stringify(changeJson)).not.toContain('refreshToken');
 
-    const deviceANewJar = extractCookiesFromResponse(changeRes);
+    const deviceANewJar = extractCookiesFromResponse(changeRes, deviceAWithTicketJar);
+    expect(deviceANewJar.pwdTicket).toBeUndefined();
     expect(deviceANewJar.at).toBeDefined();
     expect(deviceANewJar.rt).toBeDefined();
     expect(deviceANewJar.csrf).toBeDefined();
@@ -969,5 +1004,5 @@ describe('Integration & Security M4: Quên mật khẩu, Đặt lại mật kh�
       }),
     );
     expect(newLoginRes.status).toBe(200);
-  });
+  }, 15_000);
 });

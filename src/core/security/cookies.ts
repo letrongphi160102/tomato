@@ -5,6 +5,7 @@ import type { NextResponse } from 'next/server';
 export const ACCESS_TOKEN_COOKIE_MAX_AGE_SECONDS = 15 * 60;
 export const REFRESH_TOKEN_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 export const CSRF_TOKEN_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+export const PASSWORD_CHANGE_TICKET_COOKIE_MAX_AGE_SECONDS = 10 * 60;
 
 export interface TomatoCookieNames {
   readonly accessToken: string;
@@ -35,6 +36,14 @@ export function getCookieNames(isProduction = isProductionCookieEnv()): TomatoCo
     refreshToken: `${prefix}tomato_rt`,
     csrfToken: `${prefix}tomato_csrf`,
   };
+}
+
+/**
+ * Tên cookie `HttpOnly` ngắn hạn (10 phút) mang ticket xác thực Bước 1 → Bước 2 đổi mật khẩu.
+ * Luôn dùng `Path=/` để tuân thủ chuẩn tiền tố `__Host-` trên Production HTTPS.
+ */
+export function getPasswordChangeTicketCookieName(isProduction = isProductionCookieEnv()): string {
+  return `${isProduction ? '__Host-' : ''}tomato_pwd_ticket`;
 }
 
 /**
@@ -140,6 +149,32 @@ export function setCsrfCookie(
   );
 }
 
+export function setPasswordChangeTicketCookie(
+  response: NextResponse,
+  rawTicket: string,
+  options: { readonly isProduction?: boolean; readonly maxAgeSeconds?: number } = {},
+): void {
+  const isProduction = options.isProduction ?? isProductionCookieEnv();
+  const cookieName = getPasswordChangeTicketCookieName(isProduction);
+  response.cookies.set(
+    cookieName,
+    rawTicket,
+    buildAuthCookieOptions(
+      options.maxAgeSeconds ?? PASSWORD_CHANGE_TICKET_COOKIE_MAX_AGE_SECONDS,
+      isProduction,
+    ),
+  );
+}
+
+export function clearPasswordChangeTicketCookie(
+  response: NextResponse,
+  options: { readonly isProduction?: boolean } = {},
+): void {
+  const isProduction = options.isProduction ?? isProductionCookieEnv();
+  const cookieName = getPasswordChangeTicketCookieName(isProduction);
+  response.cookies.set(cookieName, '', buildAuthCookieOptions(0, isProduction));
+}
+
 export function clearAuthCookies(
   response: NextResponse,
   options: { readonly isProduction?: boolean; readonly clearCsrf?: boolean } = {},
@@ -149,6 +184,7 @@ export function clearAuthCookies(
 
   response.cookies.set(names.accessToken, '', buildAuthCookieOptions(0, isProduction));
   response.cookies.set(names.refreshToken, '', buildAuthCookieOptions(0, isProduction));
+  clearPasswordChangeTicketCookie(response, { isProduction });
 
   if (options.clearCsrf) {
     response.cookies.set(names.csrfToken, '', buildCsrfCookieOptions(0, isProduction));
@@ -213,4 +249,11 @@ export function getAuthCookiesFromRequest(
     refreshToken: cookies.get(names.refreshToken) ?? null,
     csrfToken: cookies.get(names.csrfToken) ?? null,
   };
+}
+
+export function getPasswordChangeTicketFromRequest(
+  request: Request,
+  isProduction = isProductionCookieEnv(),
+): string | null {
+  return getCookieFromRequest(request, getPasswordChangeTicketCookieName(isProduction));
 }

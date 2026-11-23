@@ -457,6 +457,57 @@ export class AuthRepository {
   }
 
   /**
+   * Tra cứu nhanh token/ticket thuộc đúng `(user_id, purpose, token_hash)` (không khóa)
+   * dùng cho pre-check trước khi tiêu tốn CPU chạy Argon2id ở Bước 2 đổi mật khẩu.
+   */
+  async findVerificationTokenByHashForUser(
+    userId: string,
+    purpose: VerificationTokenPurpose,
+    tokenHash: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<VerificationTokenRow | null> {
+    const rows = await executor
+      .select()
+      .from(verificationTokens)
+      .where(
+        and(
+          eq(verificationTokens.userId, userId),
+          eq(verificationTokens.purpose, purpose),
+          eq(verificationTokens.tokenHash, tokenHash),
+        ),
+      )
+      .orderBy(desc(verificationTokens.createdAt))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Khóa dòng `verification_tokens FOR UPDATE` theo đúng `(user_id, purpose, token_hash)`
+   * SAU khi đã khóa `users FOR UPDATE` nhằm chống replay song song ticket đổi mật khẩu.
+   */
+  async lockVerificationTokenByHashForUser(
+    userId: string,
+    purpose: VerificationTokenPurpose,
+    tokenHash: string,
+    tx: DatabaseTransaction,
+  ): Promise<VerificationTokenRow | null> {
+    const rows = await tx
+      .select()
+      .from(verificationTokens)
+      .where(
+        and(
+          eq(verificationTokens.userId, userId),
+          eq(verificationTokens.purpose, purpose),
+          eq(verificationTokens.tokenHash, tokenHash),
+        ),
+      )
+      .orderBy(desc(verificationTokens.createdAt))
+      .limit(1)
+      .for('update');
+    return rows[0] ?? null;
+  }
+
+  /**
    * Khóa dòng `verification_tokens` bằng `FOR UPDATE` SAU khi đã khóa `users FOR UPDATE`
    * để tuân thủ thứ tự khóa chuẩn, chống deadlock và ngăn replay đồng thời 1 token đặt lại mật khẩu.
    */
@@ -910,6 +961,118 @@ export class AuthRepository {
         ),
       )
       .orderBy(desc(sessions.lastUsedAt), desc(sessions.createdAt));
+  }
+
+  /**
+   * Cập nhật thời điểm hoạt động gần nhất (`last_used_at`) cho phiên đang hoạt động
+   * (được gọi có tiết lưu 5 phút/lần từ `authenticateAccessToken` để hiển thị trạng thái Online chính xác).
+   */
+  async touchSessionLastUsedAt(
+    sessionId: string,
+    userId: string,
+    now: Date,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<void> {
+    await executor
+      .update(sessions)
+      .set({ lastUsedAt: now })
+      .where(
+        and(eq(sessions.id, sessionId), eq(sessions.userId, userId), isNull(sessions.revokedAt)),
+      );
+  }
+
+  /**
+   * Lấy danh sách thiết bị đang hoạt động và lịch sử đăng nhập gần nhất của user, gom nhóm chặt theo `family_id`:
+   * - Mỗi chuỗi xoay vòng Refresh Token (`family_id`) chỉ trả đúng 1 bản ghi đại diện mới nhất
+   *   (loại hoàn toàn bản ghi trung gian `revoke_reason = 'token_rotated'`).
+   * - Lọc `revoke_reason IS DISTINCT FROM 'password_changed_rotated'` ở truy vấn ngoài để không tạo
+   *   dòng lịch sử giả khi cùng thiết bị vừa xoay vòng sang `family_id` mới lúc đổi mật khẩu.
+   */
+  async listLatestSessionsPerFamilyByUserId(
+    userId: string,
+    limit: number,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<SessionRow[]> {
+    const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+    const result = await executor.execute(sql`
+      SELECT
+        id,
+        public_id,
+        user_id,
+        family_id,
+        refresh_token_hash,
+        device_info,
+        ip_address,
+        last_used_at,
+        expires_at,
+        revoked_at,
+        revoke_reason,
+        created_at
+      FROM (
+        SELECT DISTINCT ON (family_id)
+          id,
+          public_id,
+          user_id,
+          family_id,
+          refresh_token_hash,
+          device_info,
+          ip_address,
+          last_used_at,
+          expires_at,
+          revoked_at,
+          revoke_reason,
+          created_at
+        FROM sessions
+        WHERE user_id = ${userId}::uuid
+        ORDER BY
+          family_id,
+          (revoked_at IS NULL) DESC,
+          last_used_at DESC,
+          id DESC
+      ) AS latest_per_family
+      WHERE revoke_reason IS DISTINCT FROM 'password_changed_rotated'
+      ORDER BY last_used_at DESC, id DESC
+      LIMIT ${safeLimit}
+    `);
+
+    const rawRows = (
+      result as unknown as {
+        readonly rows: ReadonlyArray<{
+          readonly id: string;
+          readonly public_id: string;
+          readonly user_id: string;
+          readonly family_id: string;
+          readonly refresh_token_hash: string;
+          readonly device_info: string | null;
+          readonly ip_address: string;
+          readonly last_used_at: Date | string;
+          readonly expires_at: Date | string;
+          readonly revoked_at: Date | string | null;
+          readonly revoke_reason: string | null;
+          readonly created_at: Date | string;
+        }>;
+      }
+    ).rows;
+
+    return rawRows.map((row) => ({
+      id: row.id,
+      publicId: row.public_id,
+      userId: row.user_id,
+      familyId: row.family_id,
+      refreshTokenHash: row.refresh_token_hash,
+      deviceInfo: row.device_info,
+      ipAddress: row.ip_address,
+      lastUsedAt: row.last_used_at instanceof Date ? row.last_used_at : new Date(row.last_used_at),
+      expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
+      revokedAt:
+        row.revoked_at === null
+          ? null
+          : row.revoked_at instanceof Date
+            ? row.revoked_at
+            : new Date(row.revoked_at),
+      revokeReason: row.revoke_reason,
+      createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
+    }));
   }
 
   async revokeAllUserSessions(

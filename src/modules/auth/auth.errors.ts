@@ -10,6 +10,8 @@ export interface AuthDomainErrorOptions {
   readonly requireCaptcha?: boolean;
   /** Khi `true`, Route Handler bắt buộc xóa toàn bộ cookie phiên (ví dụ khi phát hiện Token Reuse). */
   readonly clearCookies?: boolean;
+  /** Khi `true`, Route Handler xóa cookie ticket đổi mật khẩu ngắn hạn (`__Host-tomato_pwd_ticket`). */
+  readonly clearPasswordChangeTicket?: boolean;
   readonly cause?: unknown;
 }
 
@@ -24,6 +26,7 @@ export class AuthDomainError extends Error {
   public readonly retryAfterSeconds?: number;
   public readonly requireCaptcha?: boolean;
   public readonly clearCookies: boolean;
+  public readonly clearPasswordChangeTicket: boolean;
 
   constructor(options: AuthDomainErrorOptions) {
     super(options.message, { cause: options.cause });
@@ -34,5 +37,6 @@ export class AuthDomainError extends Error {
     this.retryAfterSeconds = options.retryAfterSeconds;
     this.requireCaptcha = options.requireCaptcha;
     this.clearCookies = options.clearCookies ?? false;
+    this.clearPasswordChangeTicket = options.clearPasswordChangeTicket ?? false;
   }
 }

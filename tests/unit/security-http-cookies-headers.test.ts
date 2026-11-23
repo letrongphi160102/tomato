@@ -2,7 +2,14 @@ import { NextRequest } from 'next/server';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { clearAuthCookies, getCookieNames, setAuthCookies } from '@/core/security/cookies';
+import {
+  clearAuthCookies,
+  clearPasswordChangeTicketCookie,
+  getCookieNames,
+  getPasswordChangeTicketCookieName,
+  setAuthCookies,
+  setPasswordChangeTicketCookie,
+} from '@/core/security/cookies';
 import {
   HSTS_HEADER_VALUE,
   buildContentSecurityPolicy,
@@ -129,6 +136,36 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     clearAuthCookies(clearedRes, { isProduction: true, clearCsrf: true });
     const clearedHeaders = clearedRes.headers.getSetCookie();
     expect(clearedHeaders.every((c) => c.includes('Max-Age=0'))).toBe(true);
+    expect(clearedHeaders.some((c) => c.startsWith('__Host-tomato_pwd_ticket='))).toBe(true);
+
+    // Cookie ticket Bước 1 đổi mật khẩu: HttpOnly, Path=/, SameSite=Lax, Max-Age=600, prefix __Host- ở prod.
+    expect(getPasswordChangeTicketCookieName(true)).toBe('__Host-tomato_pwd_ticket');
+    expect(getPasswordChangeTicketCookieName(false)).toBe('tomato_pwd_ticket');
+
+    const ticketRes = createAuthJsonResponse({ verified: true });
+    setPasswordChangeTicketCookie(ticketRes, 'synthetic-ticket-value-at-least-32-chars', {
+      isProduction: true,
+    });
+    const ticketCookies = ticketRes.headers.getSetCookie();
+    expect(
+      ticketCookies.some(
+        (c) =>
+          c.startsWith('__Host-tomato_pwd_ticket=') &&
+          c.includes('HttpOnly') &&
+          c.includes('Secure') &&
+          c.includes('SameSite=lax') &&
+          c.includes('Max-Age=600') &&
+          !c.includes('Domain='),
+      ),
+    ).toBe(true);
+
+    const clearTicketRes = createAuthJsonResponse({ ok: true });
+    clearPasswordChangeTicketCookie(clearTicketRes, { isProduction: true });
+    expect(
+      clearTicketRes.headers
+        .getSetCookie()
+        .some((c) => c.startsWith('__Host-tomato_pwd_ticket=') && c.includes('Max-Age=0')),
+    ).toBe(true);
   });
 
   it('createErrorResponse trả đúng cấu trúc { error: { code, message, details } }, Cache-Control: no-store và Retry-After', async () => {

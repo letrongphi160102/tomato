@@ -358,14 +358,19 @@ const currentPasswordSchema = z
     message: AUTH_MESSAGES.passwordTooLong,
   });
 
+export const verifyPasswordChangeOtpInputSchema = z.object({
+  otpCode: z
+    .string({ error: AUTH_MESSAGES.otpFormatInvalid })
+    .trim()
+    .regex(OTP_CODE_REGEX, AUTH_MESSAGES.otpFormatInvalid),
+});
+
+export type VerifyPasswordChangeOtpInput = z.infer<typeof verifyPasswordChangeOtpInputSchema>;
+
 export const changePasswordInputSchema = z
   .object({
     currentPassword: currentPasswordSchema,
     newPassword: newPasswordPolicySchema,
-    otpCode: z
-      .string({ error: AUTH_MESSAGES.otpFormatInvalid })
-      .trim()
-      .regex(OTP_CODE_REGEX, AUTH_MESSAGES.otpFormatInvalid),
   })
   .superRefine((data, ctx) => {
     if (data.newPassword === data.currentPassword) {

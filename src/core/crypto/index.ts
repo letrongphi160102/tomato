@@ -33,6 +33,7 @@ export {
 export {
   MIN_SECURE_TOKEN_BYTES,
   generateSecureToken,
+  hashScopedTokenSha256,
   hashTokenSha256,
   timingSafeEqualHex,
   timingSafeEqualUtf8,

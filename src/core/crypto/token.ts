@@ -31,6 +31,26 @@ export function hashTokenSha256(token: string): string {
 }
 
 /**
+ * Băm SHA-256 có ràng buộc ngữ cảnh (domain separation) dùng ký tự phân cách NUL
+ * để khóa cứng một token 256-bit vào đúng `(purpose, userId, sessionFamilyId)`,
+ * ngăn tuyệt đối việc đánh cắp/tái dùng ticket sang user hoặc thiết bị khác.
+ */
+export function hashScopedTokenSha256(
+  token: string,
+  scope: { readonly purpose: string; readonly userId: string; readonly sessionFamilyId: string },
+): string {
+  if (token.length === 0) {
+    throw new Error('Token không được rỗng khi băm SHA-256 theo ngữ cảnh');
+  }
+  return createHash('sha256')
+    .update(
+      `${scope.purpose}\u0000${scope.userId}\u0000${scope.sessionFamilyId}\u0000${token}`,
+      'utf8',
+    )
+    .digest('hex');
+}
+
+/**
  * So sánh hằng thời gian cho hai chuỗi hex (chống timing side-channel).
  */
 export function timingSafeEqualHex(leftHex: string, rightHex: string): boolean {

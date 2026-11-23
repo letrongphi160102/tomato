@@ -223,7 +223,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
   return (
     <Card className="w-full shadow-md">
       <CardHeader className="space-y-1 text-center">
-        <CardTitle>Tạo tài khoản Tomato</CardTitle>
+        <CardTitle>Tạo tài khoản TOMATO</CardTitle>
       </CardHeader>
 
       <CardContent>
@@ -232,7 +232,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
             <Alert variant="success">
               <CheckCircle2 aria-hidden="true" />
               <div>
-                <AlertTitle>Yêu cầu đăng ký đã được tiếp nhận</AlertTitle>
+                <AlertTitle>Đăng ký thành công</AlertTitle>
                 <AlertDescription>{bannerMessage}</AlertDescription>
               </div>
             </Alert>
@@ -242,7 +242,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
             <Alert variant="warning">
               <Clock aria-hidden="true" />
               <div>
-                <AlertTitle>Tạm giới hạn tần suất gửi yêu cầu</AlertTitle>
+                <AlertTitle>Vui lòng chờ một lát</AlertTitle>
                 <AlertDescription>
                   {bannerMessage}
                   {retryAfterSeconds > 0 ? (

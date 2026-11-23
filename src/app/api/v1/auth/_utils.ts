@@ -5,7 +5,7 @@ import type { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 
 import { logger } from '@/core/logger';
-import { clearAuthCookies } from '@/core/security/cookies';
+import { clearAuthCookies, clearPasswordChangeTicketCookie } from '@/core/security/cookies';
 import {
   createErrorResponse,
   formatZodErrorDetails,
@@ -157,6 +157,8 @@ export function handleAuthRouteError(
 
     if (error.clearCookies) {
       clearAuthCookies(response, { clearCsrf: true });
+    } else if (error.clearPasswordChangeTicket) {
+      clearPasswordChangeTicketCookie(response);
     }
 
     return response;

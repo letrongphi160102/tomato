@@ -6,7 +6,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'TOMATO — Mạng xã hội',
-  description: 'Nền tảng mạng xã hội TOMATO — Giai đoạn 1: Tài khoản, Xác thực & Quản lý Phiên.',
+  description: 'TOMATO — Kết nối và khám phá cùng nhau.',
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

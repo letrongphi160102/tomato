@@ -4,7 +4,7 @@ import { ResetPasswordForm } from '@/components/auth/reset-password-form';
 
 export const metadata: Metadata = {
   title: 'Đặt lại mật khẩu — TOMATO',
-  description: 'Tạo mật khẩu mới an toàn cho tài khoản TOMATO của bạn.',
+  description: 'Tạo mật khẩu mới cho tài khoản TOMATO của bạn.',
   // Lớp phòng thủ bổ sung bên cạnh HTTP header `Referrer-Policy: no-referrer` từ proxy.ts.
   referrer: 'no-referrer',
 };

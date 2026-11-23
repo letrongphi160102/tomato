@@ -55,6 +55,7 @@ export {
   sessionPublicIdParamSchema,
   strongPasswordSchema,
   verifyEmailInputSchema,
+  verifyPasswordChangeOtpInputSchema,
   type ChangePasswordInput,
   type ForgotPasswordInput,
   type LoginInput,
@@ -65,6 +66,7 @@ export {
   type ResetPasswordInput,
   type RevokeAllSessionsInput,
   type VerifyEmailInput,
+  type VerifyPasswordChangeOtpInput,
 } from '@/modules/auth/auth.schemas';
 export {
   ACCOUNT_LOCK_FAILED_ATTEMPTS_THRESHOLD,
@@ -77,6 +79,9 @@ export {
   PASSWORD_CHANGE_OTP_MAX_ATTEMPTS,
   PASSWORD_CHANGE_OTP_TTL_MINUTES,
   PASSWORD_CHANGE_OTP_TTL_MS,
+  PASSWORD_CHANGE_TICKET_MAX_ATTEMPTS,
+  PASSWORD_CHANGE_TICKET_TTL_MINUTES,
+  PASSWORD_CHANGE_TICKET_TTL_MS,
   PASSWORD_RESET_TOKEN_TTL_MINUTES,
   PASSWORD_RESET_TOKEN_TTL_MS,
   PENDING_VERIFICATION_EXPIRY_MS,
@@ -94,6 +99,7 @@ export {
   type ResendVerificationResult,
   type ResetPasswordResult,
   type VerifyEmailResult,
+  type VerifyPasswordChangeOtpResult,
 } from '@/modules/auth/auth.service';
 export { COMMON_PASSWORDS, isCommonOrWeakPassword } from '@/modules/auth/common-passwords';
 export { UNKNOWN_DEVICE_LABEL, parseDeviceInfo } from '@/modules/auth/device-info';
@@ -103,7 +109,11 @@ export {
   SESSION_ABSOLUTE_TTL_MS,
   SESSION_IDLE_TTL_DAYS,
   SESSION_IDLE_TTL_MS,
+  SESSION_LAST_USED_TOUCH_INTERVAL_MS,
+  SESSION_LIST_MAX_ITEMS,
+  SESSION_ONLINE_THRESHOLD_MS,
   SessionService,
+  classifyDeviceSessions,
   createSessionService,
   getSessionService,
   resetSessionServiceForTesting,
@@ -113,10 +123,13 @@ export {
   type IssuedSessionTokens,
   type ListSessionsResult,
   type LogoutSessionResult,
+  type PublicSessionHistoryItem,
   type PublicSessionItem,
   type PublicUserProfile,
   type RefreshSessionResult,
   type RevokeAllSessionsResult,
   type RevokeSessionResult,
+  type SessionActivityStatus,
+  type SessionHistoryStatus,
   type SessionServiceDependencies,
 } from '@/modules/auth/session.service';

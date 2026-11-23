@@ -1,31 +1,31 @@
-import Link from 'next/link';
-import { ShieldCheck } from 'lucide-react';
+import { SilentSessionGate } from '@/components/auth/silent-session-gate';
+import { AuthenticatedHome } from '@/components/home/authenticated-home';
+import { LandingHero } from '@/components/home/landing-hero';
+import { AppShell } from '@/components/layout/app-shell';
+import { resolveServerAuthState } from '@/modules/auth/server-session';
 
-import { Button } from '@/components/ui/button';
+export const dynamic = 'force-dynamic';
 
-export default function HomePage() {
-  return (
-    <main className="mx-auto flex min-h-screen max-w-2xl flex-col items-center justify-center px-6 text-center">
-      <div className="mb-4 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium text-muted-foreground">
-        <ShieldCheck className="size-4 text-primary" aria-hidden="true" />
-        <span>Giai đoạn 1 — Cột mốc M3: Đăng nhập, Phiên &amp; Thiết bị</span>
-      </div>
-      <h1 className="text-4xl font-bold tracking-tight">TOMATO</h1>
-      <p className="mt-3 text-base text-muted-foreground">
-        Nền tảng mạng xã hội kiến trúc Modular Monolith với Argon2id + Pepper, xoay vòng Refresh
-        Token (Reuse Detection), phòng thủ CSRF 3 lớp và quản lý thiết bị đăng nhập.
-      </p>
-      <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-        <Button asChild size="lg">
-          <Link href="/login">Đăng nhập</Link>
-        </Button>
-        <Button asChild variant="outline" size="lg">
-          <Link href="/register">Đăng ký tài khoản</Link>
-        </Button>
-        <Button asChild variant="ghost" size="lg">
-          <Link href="/api/health">Kiểm tra /api/health</Link>
-        </Button>
-      </div>
-    </main>
-  );
+export default async function HomePage() {
+  const authState = await resolveServerAuthState();
+  const showDevHealthLink = process.env.NODE_ENV === 'development';
+
+  if (authState.status === 'authenticated') {
+    return (
+      <AppShell user={authState.user}>
+        <AuthenticatedHome user={authState.user} />
+      </AppShell>
+    );
+  }
+
+  if (authState.status === 'needs_refresh') {
+    return (
+      <SilentSessionGate
+        mode="home"
+        fallback={<LandingHero showDevHealthLink={showDevHealthLink} />}
+      />
+    );
+  }
+
+  return <LandingHero showDevHealthLink={showDevHealthLink} />;
 }

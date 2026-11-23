@@ -11,6 +11,10 @@ import {
   runtime as changePasswordRuntime,
 } from '@/app/api/v1/auth/change-password/route';
 import {
+  POST as verifyChangePasswordOtpPost,
+  runtime as verifyChangePasswordOtpRuntime,
+} from '@/app/api/v1/auth/change-password/verify-otp/route';
+import {
   POST as forgotPasswordPost,
   runtime as forgotPasswordRuntime,
 } from '@/app/api/v1/auth/forgot-password/route';
@@ -21,7 +25,7 @@ import {
 import { getEnv, resetEnvCacheForTesting } from '@/core/config/env';
 import { hashOtpCode } from '@/core/crypto/otp';
 import { hashPassword } from '@/core/crypto/password';
-import { generateSecureToken, hashTokenSha256 } from '@/core/crypto/token';
+import { generateSecureToken, hashScopedTokenSha256, hashTokenSha256 } from '@/core/crypto/token';
 import type { SessionRow, UserRow, VerificationTokenRow } from '@/core/db/schema';
 import { EmailDeliveryError, type EmailProvider } from '@/core/email';
 import type { RateLimiter } from '@/core/redis/rate-limiter';
@@ -29,7 +33,6 @@ import type { AuditLogService } from '@/core/security/audit-log.service';
 import { CSRF_HEADER_NAME } from '@/core/security/csrf';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
 import {
-  AUTH_MESSAGES,
   AuthDomainError,
   AuthService,
   SessionService,
@@ -143,10 +146,11 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
     resetSessionServiceForTesting();
   });
 
-  it('khai báo runtime="nodejs" trên toàn bộ 4 API routes M4 và bảo vệ trang /reset-password bằng Referrer-Policy: no-referrer', () => {
+  it('khai báo runtime="nodejs" trên toàn bộ 5 API routes khôi phục/đổi mật khẩu và bảo vệ trang /reset-password bằng Referrer-Policy: no-referrer', () => {
     expect(forgotPasswordRuntime).toBe('nodejs');
     expect(resetPasswordRuntime).toBe('nodejs');
     expect(changePasswordOtpRuntime).toBe('nodejs');
+    expect(verifyChangePasswordOtpRuntime).toBe('nodejs');
     expect(changePasswordRuntime).toBe('nodejs');
 
     expect(resetPageMetadata.referrer).toBe('no-referrer');
@@ -215,6 +219,10 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
       {
         url: `${allowedOrigin}/api/v1/auth/change-password/request-otp`,
         handler: changePasswordOtpPost,
+      },
+      {
+        url: `${allowedOrigin}/api/v1/auth/change-password/verify-otp`,
+        handler: verifyChangePasswordOtpPost,
       },
       { url: `${allowedOrigin}/api/v1/auth/change-password`, handler: changePasswordPost },
     ];
@@ -322,6 +330,23 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
     expect(reqOtpRes.status).toBe(429);
     expect(reqOtpRes.headers.get('Retry-After')).toBe('55');
 
+    const verifyOtpRes = await verifyChangePasswordOtpPost(
+      new Request(`${allowedOrigin}/api/v1/auth/change-password/verify-otp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: allowedOrigin,
+          'Sec-Fetch-Site': 'same-origin',
+          cookie: `tomato_at=dummy-at; tomato_csrf=${csrfToken}`,
+          [CSRF_HEADER_NAME]: csrfToken,
+          'x-forwarded-for': '203.0.113.205',
+        },
+        body: JSON.stringify({ otpCode: '000000' }),
+      }),
+    );
+    expect(verifyOtpRes.status).toBe(429);
+    expect(verifyOtpRes.headers.get('Retry-After')).toBe('55');
+
     const changeRes = await changePasswordPost(
       new Request(`${allowedOrigin}/api/v1/auth/change-password`, {
         method: 'POST',
@@ -333,7 +358,7 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
           [CSRF_HEADER_NAME]: csrfToken,
           'x-forwarded-for': '203.0.113.204',
         },
-        body: JSON.stringify({ currentPassword: 'x', newPassword: 'y', otpCode: '000000' }),
+        body: JSON.stringify({ currentPassword: 'x', newPassword: 'y' }),
       }),
     );
     expect(changeRes.status).toBe(429);
@@ -400,7 +425,7 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
     }
   });
 
-  it('tách miền OTP (Domain Separation): mã OTP sinh cho email_verify không bao giờ khớp password_change và sai currentPassword không đốt lượt thử OTP', async () => {
+  it('tách miền OTP (Domain Separation): mã OTP sinh cho email_verify không khớp password_change ở Bước 1b, và Bước 2 chặn nhảy cóc khi thiếu ticket', async () => {
     const principal = makeActivePrincipal();
     const currentPassword = 'current strong passphrase 2026!';
     const hashed = await hashPassword(currentPassword);
@@ -447,16 +472,6 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
         lockUserById: vi.fn().mockResolvedValue(principal.user),
         findSessionByPublicIdForUser: vi.fn().mockResolvedValue(principal.session),
         acquireSessionFamilyLock: vi.fn().mockResolvedValue(undefined),
-        findLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
-          id: '01950000-0000-7000-8000-000000004055',
-          userId: principal.user.id,
-          purpose: 'password_change',
-          tokenHash: wrongDomainOtpHash,
-          attemptCount: 0,
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-          consumedAt: null,
-          createdAt: new Date(),
-        }),
         lockLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
           id: '01950000-0000-7000-8000-000000004055',
           userId: principal.user.id,
@@ -480,38 +495,28 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
       userAgent: 'Vitest',
     };
 
-    // 1. Sai currentPassword -> trả 400 INVALID_CREDENTIALS và KHÔNG mở transaction đụng vào OTP.
+    // 1. Nhảy thẳng vào Bước 2 khi chưa có ticket Bước 1 -> trả 403 TOKEN_INVALID ngay trước khi mở transaction hay Argon2id.
     await expect(
       service.changePassword(
         principal,
         {
           currentPassword: 'wrong current passphrase 2026!',
           newPassword: 'brand new safe passphrase 2027!',
-          otpCode,
         },
+        null,
         ctx,
       ),
     ).rejects.toSatisfy(
       (err: unknown) =>
         err instanceof AuthDomainError &&
-        err.status === 400 &&
-        err.code === 'INVALID_CREDENTIALS' &&
-        err.message === AUTH_MESSAGES.currentPasswordIncorrect,
+        err.status === 403 &&
+        err.code === 'TOKEN_INVALID' &&
+        err.clearPasswordChangeTicket === true,
     );
     expect(txSpy).not.toHaveBeenCalled();
 
-    // 2. Đúng currentPassword nhưng hash lưu trong DB thuộc miền `email_verify` -> bị từ chối và tăng attemptCount.
-    await expect(
-      service.changePassword(
-        principal,
-        {
-          currentPassword,
-          newPassword: 'brand new safe passphrase 2027!',
-          otpCode,
-        },
-        ctx,
-      ),
-    ).rejects.toSatisfy(
+    // 2. Bước 1b: hash lưu trong DB thuộc miền `email_verify` -> bị từ chối 400 TOKEN_INVALID và tăng attemptCount.
+    await expect(service.verifyPasswordChangeOtp(principal, { otpCode }, ctx)).rejects.toSatisfy(
       (err: unknown) =>
         err instanceof AuthDomainError && err.status === 400 && err.code === 'TOKEN_INVALID',
     );
@@ -606,11 +611,22 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
     const principal = makeActivePrincipal();
     const currentPassword = 'current strong passphrase 2026!';
     const hashed = await hashPassword(currentPassword);
-    const otpCode = '318294';
-    const validOtpHash = hashOtpCode(otpCode, {
+    const rawTicket = generateSecureToken(32);
+    const validTicketHash = hashScopedTokenSha256(rawTicket, {
+      purpose: 'password_change_ticket',
       userId: principal.user.id,
-      purpose: 'password_change',
+      sessionFamilyId: principal.session.familyId,
     });
+    const validTicketRow: VerificationTokenRow = {
+      id: '01950000-0000-7000-8000-000000004088',
+      userId: principal.user.id,
+      purpose: 'password_change_ticket',
+      tokenHash: validTicketHash,
+      attemptCount: 0,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      consumedAt: null,
+      createdAt: new Date(),
+    };
 
     const txRolledBack = vi.fn();
     const callOrder: string[] = [];
@@ -654,29 +670,11 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
           createdAt: new Date(),
           updatedAt: new Date(),
         }),
-        findLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
-          id: '01950000-0000-7000-8000-000000004088',
-          userId: principal.user.id,
-          purpose: 'password_change',
-          tokenHash: validOtpHash,
-          attemptCount: 0,
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-          consumedAt: null,
-          createdAt: new Date(),
-        }),
+        findVerificationTokenByHashForUser: vi.fn().mockResolvedValue(validTicketRow),
         lockUserById: vi.fn().mockResolvedValue(principal.user),
         findSessionByPublicIdForUser: vi.fn().mockResolvedValue(principal.session),
         acquireSessionFamilyLock: vi.fn().mockResolvedValue(undefined),
-        lockLatestUnconsumedTokenByPurpose: vi.fn().mockResolvedValue({
-          id: '01950000-0000-7000-8000-000000004088',
-          userId: principal.user.id,
-          purpose: 'password_change',
-          tokenHash: validOtpHash,
-          attemptCount: 0,
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-          consumedAt: null,
-          createdAt: new Date(),
-        }),
+        lockVerificationTokenByHashForUser: vi.fn().mockResolvedValue(validTicketRow),
         updateIdentityPasswordHash: vi.fn().mockResolvedValue(true),
         resetFailedLoginAttempts: vi.fn().mockResolvedValue(undefined),
         consumeAllUnconsumedTokensByPurpose: vi.fn().mockResolvedValue(undefined),
@@ -695,8 +693,8 @@ describe('Security M4: CSRF 3 lớp, Rate-Limit-First, Referrer Protection, Toke
         {
           currentPassword,
           newPassword: 'brand new safe passphrase 2028!',
-          otpCode,
         },
+        rawTicket,
         { ipAddress: '203.0.113.80', rateLimitIpKey: '203.0.113.80', userAgent: 'Vitest' },
       ),
     ).rejects.toSatisfy(

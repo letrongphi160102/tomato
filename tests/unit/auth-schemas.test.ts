@@ -11,6 +11,7 @@ import {
   resendVerificationInputSchema,
   resetPasswordInputSchema,
   verifyEmailInputSchema,
+  verifyPasswordChangeOtpInputSchema,
 } from '@/modules/auth/auth.schemas';
 
 const FIXED_NOW = () => new Date('2026-11-22T00:00:00.000Z');
@@ -287,11 +288,19 @@ describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
       }).success,
     ).toBe(false);
 
-    // Đổi mật khẩu: cấm trùng mật khẩu hiện tại (kể cả sau chuẩn hóa NFKC).
+    // Bước 1b đổi mật khẩu: validate mã OTP 6 chữ số độc lập.
+    const verifyOtpOk = verifyPasswordChangeOtpInputSchema.safeParse({ otpCode: ' 049821 ' });
+    expect(verifyOtpOk.success).toBe(true);
+    if (verifyOtpOk.success) {
+      expect(verifyOtpOk.data.otpCode).toBe('049821');
+    }
+    expect(verifyPasswordChangeOtpInputSchema.safeParse({ otpCode: '12345' }).success).toBe(false);
+    expect(verifyPasswordChangeOtpInputSchema.safeParse({ otpCode: '12ab56' }).success).toBe(false);
+
+    // Bước 2 đổi mật khẩu: cấm trùng mật khẩu hiện tại (kể cả sau chuẩn hóa NFKC).
     const samePass = changePasswordInputSchema.safeParse({
       currentPassword: 'old safe passphrase 2026!',
       newPassword: 'old safe passphrase 2026!',
-      otpCode: '123456',
     });
     expect(samePass.success).toBe(false);
     if (!samePass.success) {
@@ -301,12 +310,8 @@ describe('Unit M2: Auth Zod Schemas & Validation Rules', () => {
     const changeOk = changePasswordInputSchema.safeParse({
       currentPassword: 'old safe passphrase 2026!',
       newPassword: 'brand new passphrase 2027!',
-      otpCode: ' 049821 ',
     });
     expect(changeOk.success).toBe(true);
-    if (changeOk.success) {
-      expect(changeOk.data.otpCode).toBe('049821');
-    }
 
     expect(
       getWeakPasswordContextViolation('prefix-alice@example.com-suffix', {

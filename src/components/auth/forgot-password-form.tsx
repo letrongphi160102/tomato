@@ -176,8 +176,8 @@ export function ForgotPasswordForm() {
             <div>
               <AlertTitle>Đã gửi liên kết khôi phục</AlertTitle>
               <AlertDescription>
-                {bannerMessage} Liên kết chỉ sử dụng được một lần trong vòng {expiresInMinutes}{' '}
-                phút.
+                {bannerMessage} Vui lòng mở liên kết trong vòng {expiresInMinutes} phút để tạo mật
+                khẩu mới.
               </AlertDescription>
             </div>
           </Alert>
@@ -212,8 +212,8 @@ export function ForgotPasswordForm() {
       <CardHeader className="space-y-1 text-center">
         <CardTitle>Quên mật khẩu</CardTitle>
         <CardDescription>
-          Nhập địa chỉ email tài khoản TOMATO của bạn để nhận liên kết đặt lại mật khẩu dùng một lần
-          (có hiệu lực trong 15 phút).
+          Nhập địa chỉ email tài khoản TOMATO của bạn để nhận liên kết đặt lại mật khẩu (có hiệu lực
+          trong 15 phút).
         </CardDescription>
       </CardHeader>
 
@@ -223,7 +223,7 @@ export function ForgotPasswordForm() {
             <Alert variant="warning">
               <Clock aria-hidden="true" />
               <div>
-                <AlertTitle>Tạm giới hạn tần suất yêu cầu</AlertTitle>
+                <AlertTitle>Vui lòng chờ một lát</AlertTitle>
                 <AlertDescription>
                   {bannerMessage}
                   {retryAfterSeconds > 0 ? (

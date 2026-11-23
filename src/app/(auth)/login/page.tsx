@@ -1,13 +1,16 @@
 import type { Metadata } from 'next';
 import { headers } from 'next/headers';
+import { redirect } from 'next/navigation';
 
 import { LoginForm } from '@/components/auth/login-form';
+import { SilentSessionGate } from '@/components/auth/silent-session-gate';
 import { getEnv } from '@/core/config/env';
 import { sanitizeRedirectPath } from '@/lib/auth-client';
+import { resolveServerAuthState } from '@/modules/auth/server-session';
 
 export const metadata: Metadata = {
   title: 'Đăng nhập — TOMATO',
-  description: 'Đăng nhập an toàn vào tài khoản mạng xã hội TOMATO.',
+  description: 'Đăng nhập vào tài khoản mạng xã hội TOMATO.',
 };
 
 export const dynamic = 'force-dynamic';
@@ -17,17 +20,32 @@ interface LoginPageProps {
 }
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
-  const [params, requestHeaders] = await Promise.all([searchParams, headers()]);
+  const [params, requestHeaders, authState] = await Promise.all([
+    searchParams,
+    headers(),
+    resolveServerAuthState(),
+  ]);
   const rawNext = Array.isArray(params.next) ? params.next[0] : params.next;
-  const safeNextPath = sanitizeRedirectPath(rawNext, '/settings/security');
+  const safeNextPath = sanitizeRedirectPath(rawNext, '/');
+
+  if (authState.status === 'authenticated') {
+    redirect(safeNextPath);
+  }
+
   const cspNonce = requestHeaders.get('x-nonce') ?? undefined;
   const env = getEnv();
 
-  return (
+  const loginForm = (
     <LoginForm
       nextPath={safeNextPath}
       turnstileSiteKey={env.NEXT_PUBLIC_TURNSTILE_SITE_KEY}
       cspNonce={cspNonce}
     />
   );
+
+  if (authState.status === 'needs_refresh') {
+    return <SilentSessionGate mode="auth-redirect" nextPath={safeNextPath} fallback={loginForm} />;
+  }
+
+  return loginForm;
 }

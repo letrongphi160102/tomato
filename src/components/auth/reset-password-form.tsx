@@ -233,7 +233,7 @@ export function ResetPasswordForm() {
       <Card className="w-full shadow-md">
         <CardContent className="flex flex-col items-center justify-center gap-3 py-12 text-center">
           <Loader2 className="size-6 animate-spin text-primary" aria-hidden="true" />
-          <p className="text-sm text-muted-foreground">Đang chuẩn bị phiên đặt lại mật khẩu...</p>
+          <p className="text-sm text-muted-foreground">Đang tải...</p>
         </CardContent>
       </Card>
     );
@@ -248,7 +248,7 @@ export function ResetPasswordForm() {
           </div>
           <CardTitle>Đặt lại mật khẩu thành công</CardTitle>
           <CardDescription>
-            Tài khoản của bạn đã được bảo vệ và toàn bộ phiên đăng nhập cũ đã bị đăng xuất.
+            Mật khẩu mới đã được áp dụng và tất cả các thiết bị cũ đã được đăng xuất.
           </CardDescription>
         </CardHeader>
 
@@ -280,8 +280,8 @@ export function ResetPasswordForm() {
           </div>
           <CardTitle>Liên kết đặt lại mật khẩu không hợp lệ</CardTitle>
           <CardDescription>
-            Không tìm thấy mã xác thực đặt lại mật khẩu hoặc liên kết đã bị làm mới trang. Vui lòng
-            mở lại liên kết từ hộp thư hoặc yêu cầu liên kết mới.
+            Liên kết không còn hiệu lực hoặc trang vừa được tải lại. Vui lòng mở lại liên kết trong
+            hộp thư hoặc yêu cầu liên kết mới.
           </CardDescription>
         </CardHeader>
 
@@ -310,8 +310,8 @@ export function ResetPasswordForm() {
       <CardHeader className="space-y-1 text-center">
         <CardTitle>Tạo mật khẩu mới</CardTitle>
         <CardDescription>
-          Nhập mật khẩu mới dài 12–128 ký tự (không dùng dấu tiếng Việt). Sau khi hoàn tất, mọi
-          thiết bị đang đăng nhập cũ sẽ tự động bị đăng xuất.
+          Nhập mật khẩu mới dài 12–128 ký tự (không dấu tiếng Việt). Sau khi hoàn tất, các thiết bị
+          đang đăng nhập trước đó sẽ tự động được đăng xuất.
         </CardDescription>
       </CardHeader>
 
@@ -321,7 +321,7 @@ export function ResetPasswordForm() {
             <Alert variant="warning">
               <Clock aria-hidden="true" />
               <div>
-                <AlertTitle>Tạm giới hạn tần suất thao tác</AlertTitle>
+                <AlertTitle>Vui lòng chờ một lát</AlertTitle>
                 <AlertDescription>
                   {bannerMessage}
                   {retryAfterSeconds > 0 ? (

@@ -172,16 +172,19 @@ describe('Unit M3: Device Info Parser, Auth Policy (Deny-by-default), Login Sche
     });
   });
 
-  it('sanitizeRedirectPath chặn Open Redirect và getCsrfTokenFromDocumentCookie ưu tiên __Host-tomato_csrf', () => {
+  it('sanitizeRedirectPath chặn Open Redirect (mặc định về "/") và getCsrfTokenFromDocumentCookie ưu tiên __Host-tomato_csrf', () => {
     expect(sanitizeRedirectPath('/settings/security')).toBe('/settings/security');
     expect(sanitizeRedirectPath('/settings/security?tab=devices')).toBe(
       '/settings/security?tab=devices',
     );
-    expect(sanitizeRedirectPath('https://evil.invalid/phish')).toBe('/settings/security');
-    expect(sanitizeRedirectPath('//evil.invalid/phish')).toBe('/settings/security');
-    expect(sanitizeRedirectPath('/\\evil.invalid')).toBe('/settings/security');
-    expect(sanitizeRedirectPath('javascript:alert(1)')).toBe('/settings/security');
-    expect(sanitizeRedirectPath('')).toBe('/settings/security');
+    expect(sanitizeRedirectPath('https://evil.invalid/phish')).toBe('/');
+    expect(sanitizeRedirectPath('//evil.invalid/phish')).toBe('/');
+    expect(sanitizeRedirectPath('/\\evil.invalid')).toBe('/');
+    expect(sanitizeRedirectPath('javascript:alert(1)')).toBe('/');
+    expect(sanitizeRedirectPath('')).toBe('/');
+    expect(sanitizeRedirectPath('https://evil.invalid/phish', '/settings/account')).toBe(
+      '/settings/account',
+    );
 
     expect(
       getCsrfTokenFromDocumentCookie('tomato_csrf=local-token; __Host-tomato_csrf=prod-token'),

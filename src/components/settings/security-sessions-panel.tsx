@@ -6,29 +6,20 @@ import {
   AlertCircle,
   CheckCircle2,
   Globe,
+  History,
   Laptop,
   Loader2,
   LogOut,
+  MonitorSmartphone,
   RefreshCw,
   ShieldAlert,
-  ShieldCheck,
   Smartphone,
-  UserCheck,
 } from 'lucide-react';
 
-import { ChangePasswordCard } from '@/components/settings/change-password-card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { authFetch } from '@/lib/auth-client';
-
-interface UserProfilePayload {
-  readonly public_id: string;
-  readonly username: string;
-  readonly fullName: string;
-  readonly gender: string;
-  readonly status: string;
-}
 
 interface SessionItemPayload {
   readonly public_id: string;
@@ -38,10 +29,22 @@ interface SessionItemPayload {
   readonly lastUsedAt: string;
   readonly expiresAt: string;
   readonly isCurrent: boolean;
+  readonly activityStatus?: 'online' | 'offline';
+}
+
+interface SessionHistoryItemPayload {
+  readonly public_id: string;
+  readonly deviceInfo: string;
+  readonly ipAddress: string;
+  readonly createdAt: string;
+  readonly lastUsedAt: string;
+  readonly endedAt: string;
+  readonly historyStatus: 'logged_out' | 'expired';
 }
 
 interface SessionsResponsePayload {
   readonly sessions: readonly SessionItemPayload[];
+  readonly history?: readonly SessionHistoryItemPayload[];
 }
 
 interface ApiErrorPayload {
@@ -63,16 +66,17 @@ function formatVietnameseDateTime(isoString: string): string {
 }
 
 function formatDisplayIp(ipAddress: string): string {
-  if (!ipAddress || ipAddress === '0.0.0.0') {
-    return 'Không xác định (Local)';
+  if (!ipAddress || ipAddress === '0.0.0.0' || ipAddress === '::' || ipAddress === '::1') {
+    return 'Mạng cục bộ';
   }
   return ipAddress;
 }
 
-function renderDeviceIcon(deviceInfo: string) {
+function renderDeviceIcon(deviceInfo: string, muted = false) {
+  const colorClass = muted ? 'size-5 text-muted-foreground' : 'size-5 text-primary';
   const lower = deviceInfo.toLowerCase();
   if (lower.includes('ios') || lower.includes('android') || lower.includes('ipados')) {
-    return <Smartphone className="size-5 text-primary" aria-hidden="true" />;
+    return <Smartphone className={colorClass} aria-hidden="true" />;
   }
   if (
     lower.includes('windows') ||
@@ -80,23 +84,22 @@ function renderDeviceIcon(deviceInfo: string) {
     lower.includes('linux') ||
     lower.includes('chromeos')
   ) {
-    return <Laptop className="size-5 text-primary" aria-hidden="true" />;
+    return <Laptop className={colorClass} aria-hidden="true" />;
   }
-  return <Globe className="size-5 text-primary" aria-hidden="true" />;
+  return <Globe className={colorClass} aria-hidden="true" />;
 }
 
 export function SecuritySessionsPanel() {
   const router = useRouter();
 
-  const [profile, setProfile] = React.useState<UserProfilePayload | null>(null);
   const [sessions, setSessions] = React.useState<readonly SessionItemPayload[]>([]);
+  const [history, setHistory] = React.useState<readonly SessionHistoryItemPayload[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
 
   const [revokingSessionId, setRevokingSessionId] = React.useState<string | null>(null);
   const [confirmRevokeAll, setConfirmRevokeAll] = React.useState(false);
   const [revokingAll, setRevokingAll] = React.useState(false);
-  const [loggingOutCurrent, setLoggingOutCurrent] = React.useState(false);
 
   const [notice, setNotice] = React.useState<{
     readonly variant: 'success' | 'destructive';
@@ -104,35 +107,26 @@ export function SecuritySessionsPanel() {
     readonly message: string;
   } | null>(null);
 
-  const fetchAccountAndSessions = React.useCallback(async () => {
-    // Cả 2 request đều dùng `authFetch` có khóa Single-Flight Refresh nên nếu Access Token
-    // vừa hết hạn 15 phút, chỉ 1 lời gọi `/refresh` duy nhất được thực hiện.
-    const [meRes, sessionsRes] = await Promise.all([
-      authFetch('/api/v1/auth/me', { method: 'GET' }),
-      authFetch('/api/v1/auth/sessions', { method: 'GET' }),
-    ]);
+  const fetchSessions = React.useCallback(async () => {
+    const sessionsRes = await authFetch('/api/v1/auth/sessions', { method: 'GET' });
 
-    if (meRes.status === 401 || sessionsRes.status === 401) {
+    if (sessionsRes.status === 401) {
       return { kind: 'unauthorized' as const };
     }
 
-    if (!meRes.ok || !sessionsRes.ok) {
-      const errJson = (await (meRes.ok ? sessionsRes : meRes)
-        .json()
-        .catch(() => ({}))) as ApiErrorPayload;
+    if (!sessionsRes.ok) {
+      const errJson = (await sessionsRes.json().catch(() => ({}))) as ApiErrorPayload;
       return {
         kind: 'error' as const,
-        message: errJson.error?.message ?? 'Đã có lỗi xảy ra khi tải dữ liệu bảo mật.',
+        message: errJson.error?.message ?? 'Đã có lỗi xảy ra khi tải danh sách thiết bị.',
       };
     }
 
-    const meData = (await meRes.json()) as UserProfilePayload;
     const sessionsData = (await sessionsRes.json()) as SessionsResponsePayload;
-
     return {
       kind: 'ok' as const,
-      profile: meData,
       sessions: sessionsData.sessions,
+      history: sessionsData.history ?? [],
     };
   }, []);
 
@@ -141,12 +135,12 @@ export function SecuritySessionsPanel() {
 
     async function loadInitial() {
       try {
-        const result = await fetchAccountAndSessions();
+        const result = await fetchSessions();
         if (!active) {
           return;
         }
         if (result.kind === 'unauthorized') {
-          router.replace('/login?next=/settings/security');
+          router.replace('/login?next=/settings/devices');
           return;
         }
         if (result.kind === 'error') {
@@ -157,14 +151,14 @@ export function SecuritySessionsPanel() {
           });
           return;
         }
-        setProfile(result.profile);
         setSessions(result.sessions);
+        setHistory(result.history);
       } catch {
         if (active) {
           setNotice({
             variant: 'destructive',
             title: 'Lỗi kết nối máy chủ',
-            message: 'Không thể tải thông tin phiên đăng nhập. Vui lòng thử lại.',
+            message: 'Không thể tải danh sách thiết bị. Vui lòng thử lại.',
           });
         }
       } finally {
@@ -178,17 +172,17 @@ export function SecuritySessionsPanel() {
     return () => {
       active = false;
     };
-  }, [fetchAccountAndSessions, router]);
+  }, [fetchSessions, router]);
 
   async function handleRefreshSessions() {
-    if (refreshing || revokingAll || loggingOutCurrent) {
+    if (refreshing || revokingAll) {
       return;
     }
     setRefreshing(true);
     try {
-      const result = await fetchAccountAndSessions();
+      const result = await fetchSessions();
       if (result.kind === 'unauthorized') {
-        router.replace('/login?next=/settings/security');
+        router.replace('/login?next=/settings/devices');
         return;
       }
       if (result.kind === 'error') {
@@ -199,58 +193,21 @@ export function SecuritySessionsPanel() {
         });
         return;
       }
-      setProfile(result.profile);
       setSessions(result.sessions);
+      setHistory(result.history);
     } catch {
       setNotice({
         variant: 'destructive',
         title: 'Lỗi kết nối máy chủ',
-        message: 'Không thể tải thông tin phiên đăng nhập. Vui lòng thử lại.',
+        message: 'Không thể tải danh sách thiết bị. Vui lòng thử lại.',
       });
     } finally {
       setRefreshing(false);
     }
   }
 
-  async function handleLogoutCurrent() {
-    if (loggingOutCurrent) {
-      return;
-    }
-    setLoggingOutCurrent(true);
-    setNotice(null);
-
-    try {
-      const response = await authFetch(
-        '/api/v1/auth/logout',
-        { method: 'POST' },
-        { retryOnUnauthorized: false },
-      );
-
-      if (response.ok || response.status === 401) {
-        router.replace('/login');
-        router.refresh();
-        return;
-      }
-
-      const errJson = (await response.json().catch(() => ({}))) as ApiErrorPayload;
-      setNotice({
-        variant: 'destructive',
-        title: 'Đăng xuất chưa thành công',
-        message: errJson.error?.message ?? 'Không thể đăng xuất phiên hiện tại.',
-      });
-    } catch {
-      setNotice({
-        variant: 'destructive',
-        title: 'Lỗi kết nối máy chủ',
-        message: 'Không thể kết nối đến máy chủ để đăng xuất.',
-      });
-    } finally {
-      setLoggingOutCurrent(false);
-    }
-  }
-
   async function handleRevokeSession(sessionItem: SessionItemPayload) {
-    if (revokingSessionId || revokingAll || loggingOutCurrent) {
+    if (revokingSessionId || revokingAll) {
       return;
     }
 
@@ -264,26 +221,30 @@ export function SecuritySessionsPanel() {
       );
 
       if (response.status === 401) {
-        router.replace('/login?next=/settings/security');
+        router.replace('/login?next=/settings/devices');
         return;
       }
 
       if (response.ok) {
         if (sessionItem.isCurrent) {
-          router.replace('/login');
+          router.replace('/');
           router.refresh();
           return;
         }
 
         const data = (await response.json()) as { message?: string };
-        setSessions((prev) => prev.filter((item) => item.public_id !== sessionItem.public_id));
         setNotice({
           variant: 'success',
-          title: 'Đã thu hồi thiết bị',
+          title: 'Đã đăng xuất thiết bị',
           message:
-            data.message ??
-            `Đã đăng xuất thiết bị "${sessionItem.deviceInfo}". Phiên này không còn hiệu lực.`,
+            data.message ?? `Đã đăng xuất "${sessionItem.deviceInfo}" khỏi tài khoản của bạn.`,
         });
+        // Tải lại danh sách để thiết bị vừa đăng xuất chuyển ngay sang mục Lịch sử đăng nhập gần đây.
+        const refreshed = await fetchSessions();
+        if (refreshed.kind === 'ok') {
+          setSessions(refreshed.sessions);
+          setHistory(refreshed.history);
+        }
         return;
       }
 
@@ -291,13 +252,14 @@ export function SecuritySessionsPanel() {
       setNotice({
         variant: 'destructive',
         title: 'Không thể đăng xuất thiết bị',
-        message: errJson.error?.message ?? 'Phiên không tồn tại hoặc đã bị thu hồi trước đó.',
+        message:
+          errJson.error?.message ?? 'Thiết bị không còn hoạt động hoặc đã đăng xuất trước đó.',
       });
     } catch {
       setNotice({
         variant: 'destructive',
         title: 'Lỗi kết nối máy chủ',
-        message: 'Không thể thực hiện yêu cầu thu hồi thiết bị. Vui lòng thử lại.',
+        message: 'Không thể đăng xuất thiết bị lúc này. Vui lòng thử lại.',
       });
     } finally {
       setRevokingSessionId(null);
@@ -305,7 +267,7 @@ export function SecuritySessionsPanel() {
   }
 
   async function handleRevokeAllOtherSessions() {
-    if (revokingAll || revokingSessionId || loggingOutCurrent) {
+    if (revokingAll || revokingSessionId) {
       return;
     }
 
@@ -322,22 +284,26 @@ export function SecuritySessionsPanel() {
       });
 
       if (response.status === 401) {
-        router.replace('/login?next=/settings/security');
+        router.replace('/login?next=/settings/devices');
         return;
       }
 
       if (response.ok) {
         const data = (await response.json()) as { revokedCount: number; message: string };
         setConfirmRevokeAll(false);
-        setSessions((prev) => prev.filter((item) => item.isCurrent));
         setNotice({
           variant: 'success',
           title: 'Đã đăng xuất tất cả thiết bị khác',
           message:
             data.revokedCount > 0
-              ? `${data.message} (${data.revokedCount} phiên đã bị thu hồi ngay lập tức).`
+              ? `${data.message} (${data.revokedCount} thiết bị đã được đăng xuất).`
               : 'Không có thiết bị nào khác đang đăng nhập ngoài thiết bị hiện tại.',
         });
+        const refreshed = await fetchSessions();
+        if (refreshed.kind === 'ok') {
+          setSessions(refreshed.sessions);
+          setHistory(refreshed.history);
+        }
         return;
       }
 
@@ -363,7 +329,7 @@ export function SecuritySessionsPanel() {
       <Card className="shadow-sm">
         <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
           <Loader2 className="size-6 animate-spin text-primary" aria-hidden="true" />
-          <p className="text-sm text-muted-foreground">Đang tải thông tin bảo mật và thiết bị...</p>
+          <p className="text-sm text-muted-foreground">Đang tải danh sách thiết bị...</p>
         </CardContent>
       </Card>
     );
@@ -373,46 +339,6 @@ export function SecuritySessionsPanel() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Bảo mật &amp; Thiết bị</h1>
-          <p className="text-sm text-muted-foreground">
-            Kiểm soát toàn bộ thiết bị đang đăng nhập vào tài khoản TOMATO của bạn.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void handleRefreshSessions()}
-            disabled={refreshing || revokingAll || loggingOutCurrent}
-          >
-            <RefreshCw
-              className={refreshing ? 'size-4 animate-spin' : 'size-4'}
-              aria-hidden="true"
-            />
-            Làm mới
-          </Button>
-
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleLogoutCurrent}
-            disabled={loggingOutCurrent || revokingAll}
-          >
-            {loggingOutCurrent ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <LogOut className="size-4" aria-hidden="true" />
-            )}
-            Đăng xuất
-          </Button>
-        </div>
-      </div>
-
       <div aria-live="polite">
         {notice ? (
           <Alert variant={notice.variant}>
@@ -429,86 +355,86 @@ export function SecuritySessionsPanel() {
         ) : null}
       </div>
 
-      {profile ? (
-        <Card className="shadow-sm">
-          <CardHeader className="pb-3">
-            <div className="flex items-center gap-2">
-              <UserCheck className="size-5 text-primary" aria-hidden="true" />
-              <CardTitle className="text-base">Tài khoản đang đăng nhập</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="font-semibold text-foreground">{profile.fullName}</p>
-              <p className="font-mono text-xs text-muted-foreground">@{profile.username}</p>
-            </div>
-            <span className="inline-flex w-fit items-center gap-1.5 rounded-full border border-emerald-600/30 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
-              <ShieldCheck className="size-3.5" aria-hidden="true" />
-              Đang hoạt động ({profile.status})
-            </span>
-          </CardContent>
-        </Card>
-      ) : null}
-
       <Card className="shadow-sm">
-        <CardHeader className="flex flex-col gap-4 border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
+        <CardHeader className="flex flex-col gap-4 border-b pb-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <CardTitle className="text-lg">Thiết bị đang đăng nhập ({sessions.length})</CardTitle>
-            <CardDescription>
-              Nếu thấy thiết bị lạ, hãy đăng xuất thiết bị đó ngay lập tức để bảo vệ tài khoản.
+            <div className="flex items-center gap-2">
+              <MonitorSmartphone className="size-5 text-primary" aria-hidden="true" />
+              <CardTitle className="text-lg">Thiết bị đang đăng nhập ({sessions.length})</CardTitle>
+            </div>
+            <CardDescription className="mt-1">
+              Nếu bạn thấy thiết bị không quen thuộc, hãy đăng xuất thiết bị đó ngay để bảo vệ tài
+              khoản.
             </CardDescription>
           </div>
 
-          {!confirmRevokeAll ? (
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
-              variant="destructive"
+              variant="outline"
               size="sm"
-              disabled={otherSessionsCount === 0 || revokingAll || loggingOutCurrent}
-              onClick={() => setConfirmRevokeAll(true)}
+              onClick={() => void handleRefreshSessions()}
+              disabled={refreshing || revokingAll}
             >
-              <ShieldAlert className="size-4" aria-hidden="true" />
-              Đăng xuất tất cả thiết bị khác
+              <RefreshCw
+                className={refreshing ? 'size-4 animate-spin' : 'size-4'}
+                aria-hidden="true"
+              />
+              Làm mới
             </Button>
-          ) : (
-            <div className="flex flex-wrap items-center gap-2">
+
+            {!confirmRevokeAll ? (
               <Button
                 type="button"
                 variant="destructive"
                 size="sm"
-                disabled={revokingAll}
-                onClick={handleRevokeAllOtherSessions}
+                disabled={otherSessionsCount === 0 || revokingAll}
+                onClick={() => setConfirmRevokeAll(true)}
               >
-                {revokingAll ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                    Đang thu hồi...
-                  </>
-                ) : (
-                  `Xác nhận đăng xuất ${otherSessionsCount} thiết bị khác`
-                )}
+                <ShieldAlert className="size-4" aria-hidden="true" />
+                Đăng xuất tất cả thiết bị khác
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={revokingAll}
-                onClick={() => setConfirmRevokeAll(false)}
-              >
-                Hủy
-              </Button>
-            </div>
-          )}
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  disabled={revokingAll}
+                  onClick={handleRevokeAllOtherSessions}
+                >
+                  {revokingAll ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      Đang đăng xuất...
+                    </>
+                  ) : (
+                    `Xác nhận (${otherSessionsCount} thiết bị)`
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={revokingAll}
+                  onClick={() => setConfirmRevokeAll(false)}
+                >
+                  Hủy
+                </Button>
+              </div>
+            )}
+          </div>
         </CardHeader>
 
         <CardContent className="divide-y pt-2">
           {sessions.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              Không có phiên đăng nhập nào đang hoạt động.
+              Hiện chưa có thiết bị nào đang đăng nhập.
             </p>
           ) : (
             sessions.map((item) => {
               const isItemRevoking = revokingSessionId === item.public_id;
+              const isOnline = item.isCurrent || item.activityStatus !== 'offline';
               return (
                 <div
                   key={item.public_id}
@@ -522,15 +448,36 @@ export function SecuritySessionsPanel() {
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="font-medium text-foreground">{item.deviceInfo}</p>
                         {item.isCurrent ? (
-                          <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
+                          <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
                             Thiết bị hiện tại
                           </span>
                         ) : null}
+                        {isOnline ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
+                            <span
+                              aria-hidden="true"
+                              className="size-1.5 rounded-full bg-emerald-600"
+                            />
+                            Đang hoạt động
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                            <span
+                              aria-hidden="true"
+                              className="size-1.5 rounded-full bg-muted-foreground/60"
+                            />
+                            Ngoại tuyến
+                          </span>
+                        )}
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                         <span>IP: {formatDisplayIp(item.ipAddress)}</span>
                         <span>Đăng nhập: {formatVietnameseDateTime(item.createdAt)}</span>
-                        <span>Hoạt động gần nhất: {formatVietnameseDateTime(item.lastUsedAt)}</span>
+                        <span>
+                          {isOnline
+                            ? `Hoạt động gần nhất: ${formatVietnameseDateTime(item.lastUsedAt)}`
+                            : `Hoạt động lần cuối: ${formatVietnameseDateTime(item.lastUsedAt)}`}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -540,7 +487,7 @@ export function SecuritySessionsPanel() {
                       type="button"
                       variant={item.isCurrent ? 'outline' : 'secondary'}
                       size="sm"
-                      disabled={isItemRevoking || revokingAll || loggingOutCurrent}
+                      disabled={isItemRevoking || revokingAll}
                       onClick={() => void handleRevokeSession(item)}
                     >
                       {isItemRevoking ? (
@@ -563,7 +510,54 @@ export function SecuritySessionsPanel() {
         </CardContent>
       </Card>
 
-      <ChangePasswordCard onPasswordChanged={handleRefreshSessions} />
+      <Card className="shadow-sm">
+        <CardHeader className="border-b pb-4">
+          <div className="flex items-center gap-2">
+            <History className="size-5 text-muted-foreground" aria-hidden="true" />
+            <CardTitle className="text-lg">Lịch sử đăng nhập gần đây ({history.length})</CardTitle>
+          </div>
+          <CardDescription>
+            Các thiết bị đã đăng xuất hoặc hết thời hạn truy cập trước đó.
+          </CardDescription>
+        </CardHeader>
+
+        <CardContent className="divide-y pt-2">
+          {history.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Chưa có lịch sử đăng nhập nào khác.
+            </p>
+          ) : (
+            history.map((item) => (
+              <div
+                key={item.public_id}
+                className="flex flex-col gap-2 py-4 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                    {renderDeviceIcon(item.deviceInfo, true)}
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium text-foreground">{item.deviceInfo}</p>
+                      <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                        {item.historyStatus === 'logged_out' ? 'Đã đăng xuất' : 'Đã hết hạn'}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span>IP: {formatDisplayIp(item.ipAddress)}</span>
+                      <span>Đăng nhập: {formatVietnameseDateTime(item.createdAt)}</span>
+                      <span>
+                        {item.historyStatus === 'logged_out' ? 'Đăng xuất lúc:' : 'Hết hạn lúc:'}{' '}
+                        {formatVietnameseDateTime(item.endedAt)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

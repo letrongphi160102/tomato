@@ -4,7 +4,7 @@ import { VerifyEmailForm } from '@/components/auth/verify-email-form';
 
 export const metadata: Metadata = {
   title: 'Xác minh email — TOMATO',
-  description: 'Nhập mã OTP 6 chữ số để xác minh địa chỉ email và kích hoạt tài khoản TOMATO.',
+  description: 'Nhập mã xác nhận 6 chữ số để hoàn tất tạo tài khoản TOMATO.',
 };
 
 export default function VerifyEmailPage() {

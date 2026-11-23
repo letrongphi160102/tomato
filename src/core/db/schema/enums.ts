@@ -28,6 +28,7 @@ export const VERIFICATION_TOKEN_PURPOSES = [
   'email_verify',
   'password_reset',
   'password_change',
+  'password_change_ticket',
 ] as const;
 
 export type VerificationTokenPurpose = (typeof VERIFICATION_TOKEN_PURPOSES)[number];
