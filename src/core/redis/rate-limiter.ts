@@ -176,6 +176,48 @@ export const SOCIAL_RATE_LIMITS = Object.freeze({
   }),
 } satisfies Record<string, RateLimitRule>);
 
+/**
+ * Các ngưỡng Rate Limit chuẩn hóa cho phân hệ Realtime, Thông báo & Trạng thái Hoạt động (Giai đoạn 2 — M8).
+ */
+export const REALTIME_RATE_LIMITS = Object.freeze({
+  issueTokenByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  openStreamByUser: Object.freeze({
+    limit: 20,
+    windowSeconds: 5 * 60,
+    strategy: 'sliding_window',
+  }),
+} satisfies Record<string, RateLimitRule>);
+
+export const NOTIFICATION_RATE_LIMITS = Object.freeze({
+  listByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  markReadByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+} satisfies Record<string, RateLimitRule>);
+
+export const PRESENCE_RATE_LIMITS = Object.freeze({
+  heartbeatByUser: Object.freeze({
+    limit: 6,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  queryByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+} satisfies Record<string, RateLimitRule>);
+
 // Lua script nguyên tử cho Fixed Window: kiểm tra giới hạn, chỉ tăng bộ đếm khi còn hạn mức
 // và gán PEXPIRE ngay trong cùng 1 thao tác để tránh race condition hoặc key không có TTL.
 const FIXED_WINDOW_LUA = `

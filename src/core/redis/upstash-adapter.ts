@@ -27,6 +27,14 @@ export class UpstashRedisAdapter implements RedisClient {
     return value === null ? null : String(value);
   }
 
+  async mget(...keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) {
+      return [];
+    }
+    const values = await this.client.mget<(string | null)[]>(...keys);
+    return values.map((value) => (value === null || value === undefined ? null : String(value)));
+  }
+
   async set(key: string, value: string, options?: RedisSetOptions): Promise<'OK' | null> {
     let result: string | null;
 

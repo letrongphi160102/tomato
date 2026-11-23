@@ -36,6 +36,13 @@
       "when": 1795432130752,
       "tag": "0004_add_social_follows_and_blocks",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795438120835,
+      "tag": "0005_add_notifications",
+      "breakpoints": true
     }
   ]
 }

@@ -43,3 +43,14 @@ export const FOLLOW_STATUSES = ['requested', 'following'] as const;
 export type FollowStatus = (typeof FOLLOW_STATUSES)[number];
 
 export const followStatusEnum = pgEnum('follow_status', FOLLOW_STATUSES);
+
+export const NOTIFICATION_TYPES = [
+  'follow_request',
+  'follow_accepted',
+  'new_follower',
+  'message_request',
+] as const;
+
+export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
+
+export const notificationTypeEnum = pgEnum('notification_type', NOTIFICATION_TYPES);

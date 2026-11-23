@@ -20,10 +20,13 @@ import {
 } from 'lucide-react';
 
 import { TomatoLogo } from '@/components/brand/tomato-logo';
+import { NotificationBell } from '@/components/layout/notification-bell';
 import { UserSearchBar } from '@/components/layout/user-search-bar';
 import { UserAvatar } from '@/components/profile/user-avatar';
+import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { Button } from '@/components/ui/button';
 import { authFetch } from '@/lib/auth-client';
+import { disconnectAllRealtimeConnections } from '@/lib/realtime-client';
 import { cn } from '@/lib/utils';
 import type { PublicUserProfile } from '@/modules/auth/session.service';
 
@@ -36,6 +39,7 @@ export interface AppTopBarProps {
 export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const realtime = useRealtimePresence();
 
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = React.useState(false);
@@ -79,6 +83,9 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
       return;
     }
     setLoggingOut(true);
+    // Đóng kết nối Realtime (Ably/EventSource) và dừng heartbeat ngay lập tức khi đăng xuất.
+    realtime?.disconnectAll();
+    disconnectAllRealtimeConnections();
     try {
       await authFetch('/api/v1/auth/logout', { method: 'POST' }, { retryOnUnauthorized: false });
     } finally {
@@ -167,6 +174,8 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
               <Search className="size-4" aria-hidden="true" />
             )}
           </Button>
+
+          <NotificationBell />
 
           <div ref={menuContainerRef} className="relative">
             <Button

@@ -21,7 +21,7 @@ const MAX_ARRAY_ITEMS = 50;
 
 // Danh sách mẫu tên khóa nhạy cảm bắt buộc loại bỏ/che hoàn toàn trước khi gửi sự kiện sang Sentry.
 const SENSITIVE_KEY_PATTERN =
-  /(password|passwd|pwd|pass|token|otp|ticket|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url)/i;
+  /(password|passwd|pwd|pass|token|otp|ticket|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url|^mac$)/i;
 
 const SENSITIVE_HEADER_KEYS = new Set([
   'authorization',

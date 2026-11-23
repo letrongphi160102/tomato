@@ -134,6 +134,9 @@ const rawEnvSchema = z
     STORAGE_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['local', 'vercel_blob']).optional()),
     LOCAL_STORAGE_DIR: optionalString(),
     BLOB_READ_WRITE_TOKEN: optionalString(),
+
+    REALTIME_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['local', 'ably']).optional()),
+    ABLY_API_KEY: optionalString(),
   })
   .superRefine((data, ctx) => {
     const isProduction = data.NODE_ENV === 'production';
@@ -323,6 +326,37 @@ const rawEnvSchema = z
         message: 'BLOB_READ_WRITE_TOKEN là bắt buộc khi STORAGE_PROVIDER=vercel_blob',
       });
     }
+
+    // Kiểm tra cấu hình hạ tầng Realtime theo từng adapter (`local` | `ably`).
+    // Ở môi trường test (`NODE_ENV=test`), mặc định chọn `'local'` nếu không chỉ định tường minh
+    // để ngăn test cục bộ vô tình gọi mạng ra Ably dù `.env.local` có sẵn `ABLY_API_KEY`.
+    const effectiveRealtimeProvider =
+      data.REALTIME_PROVIDER ?? (data.NODE_ENV !== 'test' && data.ABLY_API_KEY ? 'ably' : 'local');
+    if (effectiveRealtimeProvider === 'ably') {
+      if (!data.ABLY_API_KEY) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['ABLY_API_KEY'],
+          message: 'ABLY_API_KEY là bắt buộc khi REALTIME_PROVIDER=ably',
+        });
+      } else {
+        const separatorIdx = data.ABLY_API_KEY.indexOf(':');
+        const keyNamePart = separatorIdx > 0 ? data.ABLY_API_KEY.slice(0, separatorIdx) : '';
+        const keySecretPart = separatorIdx > 0 ? data.ABLY_API_KEY.slice(separatorIdx + 1) : '';
+        if (
+          separatorIdx <= 0 ||
+          !keyNamePart.includes('.') ||
+          keySecretPart.trim().length < 8 ||
+          /\s/.test(data.ABLY_API_KEY)
+        ) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['ABLY_API_KEY'],
+            message: 'ABLY_API_KEY không đúng định dạng chuẩn <appId>.<keyId>:<secret>',
+          });
+        }
+      }
+    }
   });
 
 export interface Env {
@@ -355,6 +389,8 @@ export interface Env {
   readonly STORAGE_PROVIDER: 'local' | 'vercel_blob';
   readonly LOCAL_STORAGE_DIR: string;
   readonly BLOB_READ_WRITE_TOKEN?: string;
+  readonly REALTIME_PROVIDER: 'local' | 'ably';
+  readonly ABLY_API_KEY?: string;
 }
 
 export class EnvValidationError extends Error {
@@ -407,6 +443,9 @@ export function parseEnv(rawEnv: Record<string, string | undefined>): Env {
   const effectiveStorageProvider: Env['STORAGE_PROVIDER'] =
     data.STORAGE_PROVIDER ?? (data.BLOB_READ_WRITE_TOKEN ? 'vercel_blob' : 'local');
 
+  const effectiveRealtimeProvider: Env['REALTIME_PROVIDER'] =
+    data.REALTIME_PROVIDER ?? (data.NODE_ENV !== 'test' && data.ABLY_API_KEY ? 'ably' : 'local');
+
   return Object.freeze({
     NODE_ENV: data.NODE_ENV,
     APP_URL: data.APP_URL,
@@ -437,6 +476,8 @@ export function parseEnv(rawEnv: Record<string, string | undefined>): Env {
     STORAGE_PROVIDER: effectiveStorageProvider,
     LOCAL_STORAGE_DIR: data.LOCAL_STORAGE_DIR ?? '.tomato-storage',
     BLOB_READ_WRITE_TOKEN: data.BLOB_READ_WRITE_TOKEN,
+    REALTIME_PROVIDER: effectiveRealtimeProvider,
+    ABLY_API_KEY: data.ABLY_API_KEY,
   });
 }
 

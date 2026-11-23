@@ -3,6 +3,7 @@ export * from './auth-identities';
 export * from './blocks';
 export * from './enums';
 export * from './follows';
+export * from './notifications';
 export * from './sessions';
 export * from './user-handle-history';
 export * from './users';

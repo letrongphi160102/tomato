@@ -1,9 +1,10 @@
 'use client';
 
 import * as React from 'react';
-import { Ban, CheckCircle2, Loader2, Lock, UserPlus } from 'lucide-react';
+import { Activity, Ban, CheckCircle2, Loader2, Lock, UserPlus } from 'lucide-react';
 
 import { UserAvatar } from '@/components/profile/user-avatar';
+import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
 import { FollowRequestsModal } from '@/components/social/follow-requests-modal';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -26,13 +27,20 @@ export function PrivacySettingsPanel({
   initialBlockedItems,
   initialBlockedNextCursor,
 }: PrivacySettingsPanelProps) {
+  const realtime = useRealtimePresence();
+
   const [isPrivate, setIsPrivate] = React.useState(initialPrivacy.isPrivate);
+  const [showActiveStatus, setShowActiveStatus] = React.useState(initialPrivacy.showActiveStatus);
+  const [showReadReceipts, setShowReadReceipts] = React.useState(initialPrivacy.showReadReceipts);
   const [pendingRequestsCount, setPendingRequestsCount] = React.useState(
     initialPrivacy.pendingFollowRequestsCount,
   );
   const [savingPrivacy, setSavingPrivacy] = React.useState(false);
+  const [savingActivity, setSavingActivity] = React.useState(false);
   const [privacyMessage, setPrivacyMessage] = React.useState<string | null>(null);
   const [privacyError, setPrivacyError] = React.useState<string | null>(null);
+  const [activityMessage, setActivityMessage] = React.useState<string | null>(null);
+  const [activityError, setActivityError] = React.useState<string | null>(null);
 
   const [confirmPublicOpen, setConfirmPublicOpen] = React.useState(false);
   const [acceptPendingOnPublic, setAcceptPendingOnPublic] = React.useState(true);
@@ -113,6 +121,62 @@ export function PrivacySettingsPanel({
       return;
     }
     void submitPrivacyChange(true);
+  }
+
+  async function submitActivitySettingChange(patch: {
+    readonly showActiveStatus?: boolean;
+    readonly showReadReceipts?: boolean;
+  }) {
+    if (savingActivity) {
+      return;
+    }
+    const prevActive = showActiveStatus;
+    const prevReadReceipts = showReadReceipts;
+
+    if (patch.showActiveStatus !== undefined) {
+      setShowActiveStatus(patch.showActiveStatus);
+    }
+    if (patch.showReadReceipts !== undefined) {
+      setShowReadReceipts(patch.showReadReceipts);
+    }
+
+    setSavingActivity(true);
+    setActivityError(null);
+    setActivityMessage(null);
+
+    try {
+      const response = await authFetch('/api/v1/users/me/privacy', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+
+      if (!response.ok) {
+        setShowActiveStatus(prevActive);
+        setShowReadReceipts(prevReadReceipts);
+        const body = (await response.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        setActivityError(body?.error?.message ?? 'Không thể cập nhật cài đặt quyền riêng tư.');
+        return;
+      }
+
+      const data = (await response.json()) as {
+        readonly privacy: PrivacySettingsDto;
+        readonly message: string;
+      };
+
+      setShowActiveStatus(data.privacy.showActiveStatus);
+      setShowReadReceipts(data.privacy.showReadReceipts);
+      realtime?.setActiveStatusEnabled(data.privacy.showActiveStatus);
+      setActivityMessage(data.message);
+    } catch {
+      setShowActiveStatus(prevActive);
+      setShowReadReceipts(prevReadReceipts);
+      setActivityError('Không thể kết nối. Vui lòng thử lại.');
+    } finally {
+      setSavingActivity(false);
+    }
   }
 
   async function handleLoadMoreBlocks() {
@@ -279,6 +343,112 @@ export function PrivacySettingsPanel({
             {privacyError ? (
               <Alert variant="destructive">
                 <AlertDescription>{privacyError}</AlertDescription>
+              </Alert>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="shadow-sm">
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Activity className="size-5 text-primary" aria-hidden="true" />
+              <CardTitle className="text-lg">Hoạt động &amp; Tương tác</CardTitle>
+            </div>
+            <CardDescription>
+              Kiểm soát việc hiển thị trạng thái trực tuyến và trạng thái đã đọc tin nhắn của bạn.
+            </CardDescription>
+          </CardHeader>
+
+          <CardContent className="space-y-4">
+            <div className="flex items-start justify-between gap-4 rounded-xl border bg-muted/20 p-4">
+              <div className="space-y-1">
+                <p id="active-status-label" className="text-sm font-semibold text-foreground">
+                  Hiển thị trạng thái hoạt động
+                </p>
+                <p
+                  id="active-status-description"
+                  className="text-xs leading-relaxed text-muted-foreground"
+                >
+                  Cho phép người theo dõi lẫn nhau và người từng nhắn tin biết khi bạn đang hoạt
+                  động hoặc hoạt động gần đây. Khi tắt, bạn cũng sẽ không nhìn thấy trạng thái hoạt
+                  động của người khác.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showActiveStatus}
+                aria-labelledby="active-status-label"
+                aria-describedby="active-status-description"
+                disabled={savingActivity}
+                onClick={() =>
+                  void submitActivitySettingChange({ showActiveStatus: !showActiveStatus })
+                }
+                className={cn(
+                  'relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60',
+                  showActiveStatus ? 'bg-primary' : 'bg-input',
+                )}
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    'pointer-events-none inline-block size-5 rounded-full bg-background shadow-sm transition-transform',
+                    showActiveStatus ? 'translate-x-5' : 'translate-x-0',
+                  )}
+                />
+              </button>
+            </div>
+
+            <div className="flex items-start justify-between gap-4 rounded-xl border bg-muted/20 p-4">
+              <div className="space-y-1">
+                <p id="read-receipts-label" className="text-sm font-semibold text-foreground">
+                  Hiển thị trạng thái đã xem
+                </p>
+                <p
+                  id="read-receipts-description"
+                  className="text-xs leading-relaxed text-muted-foreground"
+                >
+                  Cho phép đối phương biết khi bạn đã đọc tin nhắn trong cuộc trò chuyện. Khi tắt,
+                  bạn cũng sẽ không nhìn thấy trạng thái đã xem của người khác.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={showReadReceipts}
+                aria-labelledby="read-receipts-label"
+                aria-describedby="read-receipts-description"
+                disabled={savingActivity}
+                onClick={() =>
+                  void submitActivitySettingChange({ showReadReceipts: !showReadReceipts })
+                }
+                className={cn(
+                  'relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60',
+                  showReadReceipts ? 'bg-primary' : 'bg-input',
+                )}
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    'pointer-events-none inline-block size-5 rounded-full bg-background shadow-sm transition-transform',
+                    showReadReceipts ? 'translate-x-5' : 'translate-x-0',
+                  )}
+                />
+              </button>
+            </div>
+
+            {activityMessage ? (
+              <Alert>
+                <CheckCircle2 className="size-4 text-primary" aria-hidden="true" />
+                <AlertDescription>{activityMessage}</AlertDescription>
+              </Alert>
+            ) : null}
+
+            {activityError ? (
+              <Alert variant="destructive">
+                <AlertDescription>{activityError}</AlertDescription>
               </Alert>
             ) : null}
           </CardContent>

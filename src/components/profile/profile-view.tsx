@@ -18,11 +18,13 @@ import {
 } from 'lucide-react';
 
 import { UserAvatar } from '@/components/profile/user-avatar';
+import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
 import { FollowListModal, type FollowListType } from '@/components/social/follow-list-modal';
 import { FollowRequestsModal } from '@/components/social/follow-requests-modal';
 import { Button } from '@/components/ui/button';
 import { authFetch } from '@/lib/auth-client';
+import type { PresenceStatusDto } from '@/modules/presence/presence.service';
 import type { UserProfileDto } from '@/modules/profile';
 import type { SocialFollowStatus } from '@/modules/social/social.policy';
 
@@ -36,7 +38,9 @@ function formatCompactCount(value: number): string {
 }
 
 export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }: ProfileViewProps) {
+  const realtime = useRealtimePresence();
   const [profile, setProfile] = React.useState<UserProfileDto>(initialProfile);
+  const [presence, setPresence] = React.useState<PresenceStatusDto | null>(null);
   const [pendingRequestsCount, setPendingRequestsCount] = React.useState<number>(
     initialPendingRequestsCount,
   );
@@ -52,6 +56,44 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
   const [requestsModalOpen, setRequestsModalOpen] = React.useState(false);
 
   const menuRef = React.useRef<HTMLDivElement | null>(null);
+
+  const isMutualFollow =
+    !profile.isOwnProfile && profile.followStatus === 'following' && profile.followedBy;
+  const viewerActiveStatusEnabled = realtime?.activeStatusEnabled ?? true;
+  const canDisplayPresence = isMutualFollow && viewerActiveStatusEnabled && !blockedLocally;
+  const effectivePresence = canDisplayPresence ? presence : null;
+
+  React.useEffect(() => {
+    if (!canDisplayPresence) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    void authFetch('/api/v1/presence/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userPublicIds: [profile.public_id] }),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (controller.signal.aborted || !response.ok) {
+          return;
+        }
+        const data = (await response.json()) as {
+          readonly presences?: Record<string, PresenceStatusDto | null>;
+        };
+        const status = data.presences?.[profile.public_id.toLowerCase()] ?? null;
+        setPresence(status);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setPresence(null);
+        }
+      });
+
+    return () => controller.abort();
+  }, [canDisplayPresence, profile.public_id]);
 
   React.useEffect(() => {
     if (!menuOpen) {
@@ -231,13 +273,19 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
           className="rounded-2xl border bg-background p-6 shadow-sm sm:p-8"
         >
           <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-start sm:gap-10">
-            <div className="shrink-0">
+            <div className="relative shrink-0">
               <UserAvatar
                 fullName={profile.fullName}
                 avatarUrl={profile.avatarUrl}
                 size="2xl"
                 className="ring-2 ring-border/80"
               />
+              {effectivePresence?.isOnline ? (
+                <span
+                  aria-hidden="true"
+                  className="absolute bottom-1.5 right-1.5 size-4 rounded-full bg-emerald-500 ring-2 ring-background"
+                />
+              ) : null}
             </div>
 
             <div className="flex min-w-0 flex-1 flex-col items-center text-center sm:items-start sm:text-left">
@@ -398,9 +446,19 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
               </dl>
 
               <div className="mt-4 max-w-xl space-y-1.5">
-                <p className="text-sm font-semibold text-foreground sm:text-base">
-                  {profile.fullName}
-                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+                  <p className="text-sm font-semibold text-foreground sm:text-base">
+                    {profile.fullName}
+                  </p>
+                  {effectivePresence ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                      {effectivePresence.isOnline ? (
+                        <span aria-hidden="true" className="size-2 rounded-full bg-emerald-500" />
+                      ) : null}
+                      <span>{effectivePresence.label}</span>
+                    </span>
+                  ) : null}
+                </div>
                 {profile.bio ? (
                   <p className="whitespace-pre-line break-words text-sm leading-relaxed text-foreground/90">
                     {profile.bio}

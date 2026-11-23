@@ -397,21 +397,40 @@ export class SocialRepository {
     return rows[0] ?? null;
   }
 
+  async updateUserPrivacyFlags(
+    userId: string,
+    flags: {
+      readonly isPrivate?: boolean;
+      readonly showActiveStatus?: boolean;
+      readonly showReadReceipts?: boolean;
+    },
+    now: Date,
+    tx: DatabaseTransaction,
+  ): Promise<UserRow | null> {
+    const patch: Partial<typeof users.$inferInsert> = {
+      updatedAt: now,
+    };
+    if (flags.isPrivate !== undefined) {
+      patch.isPrivate = flags.isPrivate;
+    }
+    if (flags.showActiveStatus !== undefined) {
+      patch.showActiveStatus = flags.showActiveStatus;
+    }
+    if (flags.showReadReceipts !== undefined) {
+      patch.showReadReceipts = flags.showReadReceipts;
+    }
+
+    const rows = await tx.update(users).set(patch).where(eq(users.id, userId)).returning();
+    return rows[0] ?? null;
+  }
+
   async setUserPrivacyFlag(
     userId: string,
     isPrivate: boolean,
     now: Date,
     tx: DatabaseTransaction,
   ): Promise<UserRow | null> {
-    const rows = await tx
-      .update(users)
-      .set({
-        isPrivate,
-        updatedAt: now,
-      })
-      .where(eq(users.id, userId))
-      .returning();
-    return rows[0] ?? null;
+    return this.updateUserPrivacyFlags(userId, { isPrivate }, now, tx);
   }
 
   async fetchPendingRequesterBatch(

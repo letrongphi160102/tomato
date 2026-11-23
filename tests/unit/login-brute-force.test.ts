@@ -36,6 +36,9 @@ function createInMemoryBruteForceRedis(now: () => number): RedisClient {
     async get(key) {
       return getAlive(key);
     },
+    async mget(...keys) {
+      return keys.map((key) => getAlive(key));
+    },
     async set(key, value, options) {
       const expiresAtMs =
         options?.px !== undefined

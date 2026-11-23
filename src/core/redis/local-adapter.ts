@@ -48,6 +48,14 @@ export class LocalRedisAdapter implements RedisClient {
     return this.client.get(key);
   }
 
+  async mget(...keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) {
+      return [];
+    }
+    await this.ensureConnected();
+    return this.client.mget(...keys);
+  }
+
   async set(key: string, value: string, options?: RedisSetOptions): Promise<'OK' | null> {
     await this.ensureConnected();
 

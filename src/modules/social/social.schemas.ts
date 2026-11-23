@@ -148,12 +148,35 @@ export type SocialSimpleListQuery = z.infer<typeof socialSimpleListQuerySchema>;
 
 /**
  * Schema cập nhật cài đặt Quyền riêng tư (`PATCH /api/v1/users/me/privacy`), từ chối field lạ (`.strict()`).
+ * Hỗ trợ cập nhật riêng lẻ hoặc đồng thời `isPrivate`, `showActiveStatus` và `showReadReceipts`.
  */
 export const updatePrivacyInputSchema = z
   .object({
-    isPrivate: z.boolean({ error: SOCIAL_MESSAGES.validationFailed }),
+    isPrivate: z.boolean({ error: SOCIAL_MESSAGES.validationFailed }).optional(),
     acceptPendingRequests: z.boolean({ error: SOCIAL_MESSAGES.validationFailed }).optional(),
+    showActiveStatus: z.boolean({ error: SOCIAL_MESSAGES.validationFailed }).optional(),
+    showReadReceipts: z.boolean({ error: SOCIAL_MESSAGES.validationFailed }).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((data, ctx) => {
+    if (
+      data.isPrivate === undefined &&
+      data.showActiveStatus === undefined &&
+      data.showReadReceipts === undefined
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['isPrivate'],
+        message: SOCIAL_MESSAGES.validationFailed,
+      });
+    }
+    if (data.acceptPendingRequests !== undefined && data.isPrivate === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['acceptPendingRequests'],
+        message: SOCIAL_MESSAGES.validationFailed,
+      });
+    }
+  });
 
 export type UpdatePrivacyInput = z.infer<typeof updatePrivacyInputSchema>;

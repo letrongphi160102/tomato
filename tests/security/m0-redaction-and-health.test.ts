@@ -117,6 +117,8 @@ describe('Security M0: Pino redact chống rò rỉ dữ liệu nhạy cảm', (
       'https://tomato.example.com/reset-password?token=synthetic-reset-token-256bit',
       'synthetic-brevo-api-key-header-value',
       'synthetic-raw-ticket-256bit-value',
+      'syntheticApp.syntheticKey:syntheticSecretValueNotReal',
+      'synthetic-ably-hmac-mac-value',
     ];
 
     testLogger.error(
@@ -124,6 +126,10 @@ describe('Security M0: Pino redact chống rò rỉ dữ liệu nhạy cảm', (
         csrfToken: extraSecrets[0],
         resetUrl: extraSecrets[6],
         rawTicket: extraSecrets[8],
+        ABLY_API_KEY: extraSecrets[9],
+        tokenRequest: {
+          mac: extraSecrets[10],
+        },
         session: {
           refreshTokenHash: extraSecrets[1],
           otpTokenHash: extraSecrets[2],

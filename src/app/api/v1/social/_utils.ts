@@ -13,6 +13,8 @@ import {
 } from '@/core/security/http-response';
 import { AuthDomainError } from '@/modules/auth/auth.errors';
 import { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
+import { NotificationDomainError } from '@/modules/notifications/notification.errors';
+import { PresenceDomainError } from '@/modules/presence/presence.errors';
 import { ProfileDomainError } from '@/modules/profile';
 import { SOCIAL_MESSAGES, SocialDomainError } from '@/modules/social';
 
@@ -122,7 +124,11 @@ export function handleSocialRouteError(
   error: unknown,
   endpoint: string,
 ): NextResponse<ApiErrorPayload> {
-  if (error instanceof SocialDomainError) {
+  if (
+    error instanceof SocialDomainError ||
+    error instanceof NotificationDomainError ||
+    error instanceof PresenceDomainError
+  ) {
     return createErrorResponse({
       status: error.status,
       code: error.code,

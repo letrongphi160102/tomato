@@ -13,6 +13,14 @@ export const API_CSP_VALUE = "default-src 'none'; frame-ancestors 'none'";
 
 const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 const VERCEL_BLOB_IMAGE_ORIGIN = 'https://*.public.blob.vercel-storage.com';
+const ABLY_CONNECT_ORIGINS = [
+  'https://*.ably.io',
+  'wss://*.ably.io',
+  'https://*.ably-realtime.com',
+  'wss://*.ably-realtime.com',
+  'https://*.ably.net',
+  'wss://*.ably.net',
+] as const;
 
 export interface SecurityHeadersContext {
   readonly nonce: string;
@@ -24,6 +32,8 @@ export interface SecurityHeadersContext {
   readonly isSensitiveTokenPage?: boolean;
   /** Origin HTTPS duy nhất của Sentry ingest (trích từ `NEXT_PUBLIC_SENTRY_DSN`) để cho phép trong CSP `connect-src`. */
   readonly sentryDsnOrigin?: string | null;
+  /** Chỉ mở các origin WSS/HTTPS chính thức của Ably trong `connect-src` khi Ably Realtime được kích hoạt. */
+  readonly allowAblyRealtime?: boolean;
 }
 
 /**
@@ -43,7 +53,7 @@ export function generateCspNonce(): string {
 export function buildContentSecurityPolicy(
   context: Pick<
     SecurityHeadersContext,
-    'nonce' | 'isProduction' | 'isHttps' | 'isApiRoute' | 'sentryDsnOrigin'
+    'nonce' | 'isProduction' | 'isHttps' | 'isApiRoute' | 'sentryDsnOrigin' | 'allowAblyRealtime'
   >,
 ): string {
   if (context.isApiRoute) {
@@ -69,6 +79,9 @@ export function buildContentSecurityPolicy(
   const safeSentryOrigin = extractSentryIngestOrigin(context.sentryDsnOrigin);
   if (safeSentryOrigin) {
     connectSources.push(safeSentryOrigin);
+  }
+  if (context.allowAblyRealtime) {
+    connectSources.push(...ABLY_CONNECT_ORIGINS);
   }
   if (!context.isProduction) {
     // Cho phép WebSocket HMR của Next.js khi phát triển cục bộ.

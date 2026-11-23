@@ -5,6 +5,12 @@ import { getAuditLogService, type AuditLogService } from '@/core/security/audit-
 import type { RequestClientContext } from '@/core/security/client-context';
 import { formatZodErrorDetails } from '@/core/security/http-response';
 import type { AuthenticatedPrincipal } from '@/modules/auth/auth.policy';
+import {
+  getNotificationService,
+  type NotificationService,
+  type PendingRealtimeDispatch,
+} from '@/modules/notifications';
+import { getPresenceService, type PresenceService } from '@/modules/presence';
 import { SocialDomainError } from '@/modules/social/social.errors';
 import { SOCIAL_MESSAGES } from '@/modules/social/social.messages';
 import {
@@ -82,6 +88,8 @@ export interface BlockMutationResult {
 
 export interface PrivacySettingsDto {
   readonly isPrivate: boolean;
+  readonly showActiveStatus: boolean;
+  readonly showReadReceipts: boolean;
   readonly pendingFollowRequestsCount: number;
 }
 
@@ -105,6 +113,8 @@ export interface SocialServiceDependencies {
   readonly repository?: SocialRepository;
   readonly rateLimiter?: RateLimiter;
   readonly auditLogService?: AuditLogService;
+  readonly notificationService?: NotificationService | null;
+  readonly presenceService?: Pick<PresenceService, 'clearUserPresence'> | null;
   readonly now?: () => Date;
   readonly privacyBatchSize?: number;
 }
@@ -125,6 +135,8 @@ export class SocialService {
   private readonly repository: SocialRepository;
   private readonly rateLimiter: RateLimiter;
   private readonly auditLogService: AuditLogService;
+  private readonly notificationService: NotificationService | null;
+  private readonly presenceService: Pick<PresenceService, 'clearUserPresence'> | null;
   private readonly now: () => Date;
   private readonly privacyBatchSize: number;
 
@@ -132,6 +144,18 @@ export class SocialService {
     this.repository = deps.repository ?? new SocialRepository();
     this.rateLimiter = deps.rateLimiter ?? getRateLimiter();
     this.auditLogService = deps.auditLogService ?? getAuditLogService();
+    this.notificationService =
+      deps.notificationService !== undefined
+        ? deps.notificationService
+        : deps.repository === undefined
+          ? getNotificationService()
+          : null;
+    this.presenceService =
+      deps.presenceService !== undefined
+        ? deps.presenceService
+        : deps.repository === undefined
+          ? getPresenceService()
+          : null;
     this.now = deps.now ?? (() => new Date());
     this.privacyBatchSize = Math.max(1, deps.privacyBatchSize ?? PRIVACY_PENDING_BATCH_SIZE);
   }
@@ -185,8 +209,9 @@ export class SocialService {
     }
 
     const currentTime = this.now();
+    const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
 
-    return this.repository.getDb().transaction(async (tx) => {
+    const result = await this.repository.getDb().transaction(async (tx) => {
       const lockedUsers = await this.repository.lockUsersInCanonicalOrder(
         [actor.user.id, targetCandidate.id],
         tx,
@@ -216,7 +241,7 @@ export class SocialService {
       if (existing) {
         if (existing.status === 'following') {
           return {
-            followStatus: 'following',
+            followStatus: 'following' as const,
             followersCount: lockedTarget.followersCount,
             followingCount: lockedActor.followingCount,
             message: SOCIAL_MESSAGES.followed,
@@ -227,7 +252,7 @@ export class SocialService {
         // nếu target đã chuyển sang công khai thì nâng cấp lên `following` và cộng bộ đếm.
         if (lockedTarget.isPrivate) {
           return {
-            followStatus: 'requested',
+            followStatus: 'requested' as const,
             followersCount: lockedTarget.followersCount,
             followingCount: lockedActor.followingCount,
             message: SOCIAL_MESSAGES.followRequested,
@@ -255,8 +280,26 @@ export class SocialService {
               tx,
             ),
           ]);
+          if (this.notificationService) {
+            pendingDispatches.push(
+              await this.notificationService.removeFollowRequestNotificationsInTx(tx, {
+                recipientId: lockedTarget.id,
+                recipientPublicId: lockedTarget.publicId,
+                actorIds: [lockedActor.id],
+              }),
+            );
+            pendingDispatches.push(
+              await this.notificationService.recordNotificationInTx(tx, {
+                recipient: lockedTarget,
+                actor: lockedActor,
+                type: 'new_follower',
+                entityPublicId: lockedActor.publicId,
+                now: currentTime,
+              }),
+            );
+          }
           return {
-            followStatus: 'following',
+            followStatus: 'following' as const,
             followersCount: updatedTarget?.followersCount ?? lockedTarget.followersCount + 1,
             followingCount: updatedActor?.followingCount ?? lockedActor.followingCount + 1,
             message: SOCIAL_MESSAGES.followed,
@@ -290,21 +333,50 @@ export class SocialService {
             tx,
           ),
         ]);
+        if (this.notificationService) {
+          pendingDispatches.push(
+            await this.notificationService.recordNotificationInTx(tx, {
+              recipient: lockedTarget,
+              actor: lockedActor,
+              type: 'new_follower',
+              entityPublicId: lockedActor.publicId,
+              now: currentTime,
+            }),
+          );
+        }
         return {
-          followStatus: 'following',
+          followStatus: 'following' as const,
           followersCount: updatedTarget?.followersCount ?? lockedTarget.followersCount + 1,
           followingCount: updatedActor?.followingCount ?? lockedActor.followingCount + 1,
           message: SOCIAL_MESSAGES.followed,
         };
       }
 
+      if (this.notificationService) {
+        pendingDispatches.push(
+          await this.notificationService.recordNotificationInTx(tx, {
+            recipient: lockedTarget,
+            actor: lockedActor,
+            type: 'follow_request',
+            entityPublicId: lockedActor.publicId,
+            now: currentTime,
+          }),
+        );
+      }
+
       return {
-        followStatus: 'requested',
+        followStatus: 'requested' as const,
         followersCount: lockedTarget.followersCount,
         followingCount: lockedActor.followingCount,
         message: SOCIAL_MESSAGES.followRequested,
       };
     });
+
+    if (this.notificationService && pendingDispatches.length > 0) {
+      await this.notificationService.dispatchRealtimeEvents(pendingDispatches);
+    }
+
+    return result;
   }
 
   /**
@@ -339,8 +411,9 @@ export class SocialService {
     }
 
     const currentTime = this.now();
+    const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
 
-    return this.repository.getDb().transaction(async (tx) => {
+    const result = await this.repository.getDb().transaction(async (tx) => {
       const lockedUsers = await this.repository.lockUsersInCanonicalOrder(
         [actor.user.id, targetCandidate.id],
         tx,
@@ -388,7 +461,7 @@ export class SocialService {
           ),
         ]);
         return {
-          followStatus: 'none',
+          followStatus: 'none' as const,
           followersCount:
             updatedTarget?.followersCount ?? Math.max(0, lockedTarget.followersCount - 1),
           followingCount:
@@ -397,8 +470,18 @@ export class SocialService {
         };
       }
 
+      if (deletedStatus === 'requested' && this.notificationService) {
+        pendingDispatches.push(
+          await this.notificationService.removeFollowRequestNotificationsInTx(tx, {
+            recipientId: lockedTarget.id,
+            recipientPublicId: lockedTarget.publicId,
+            actorIds: [lockedActor.id],
+          }),
+        );
+      }
+
       return {
-        followStatus: 'none',
+        followStatus: 'none' as const,
         followersCount: lockedTarget.followersCount,
         followingCount: lockedActor.followingCount,
         message:
@@ -407,6 +490,12 @@ export class SocialService {
             : SOCIAL_MESSAGES.unfollowed,
       };
     });
+
+    if (this.notificationService && pendingDispatches.length > 0) {
+      await this.notificationService.dispatchRealtimeEvents(pendingDispatches);
+    }
+
+    return result;
   }
 
   async listFollowRequests(
@@ -479,8 +568,9 @@ export class SocialService {
     }
 
     const currentTime = this.now();
+    const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
 
-    return this.repository.getDb().transaction(async (tx) => {
+    const result = await this.repository.getDb().transaction(async (tx) => {
       const lockedUsers = await this.repository.lockUsersInCanonicalOrder(
         [actor.user.id, requesterCandidate.id],
         tx,
@@ -535,12 +625,37 @@ export class SocialService {
         ),
       ]);
 
+      if (this.notificationService) {
+        pendingDispatches.push(
+          await this.notificationService.removeFollowRequestNotificationsInTx(tx, {
+            recipientId: lockedActor.id,
+            recipientPublicId: lockedActor.publicId,
+            actorIds: [lockedRequester.id],
+          }),
+        );
+        pendingDispatches.push(
+          await this.notificationService.recordNotificationInTx(tx, {
+            recipient: lockedRequester,
+            actor: lockedActor,
+            type: 'follow_accepted',
+            entityPublicId: lockedActor.publicId,
+            now: currentTime,
+          }),
+        );
+      }
+
       return {
-        followStatus: 'following',
+        followStatus: 'following' as const,
         followersCount: updatedActor?.followersCount ?? lockedActor.followersCount + 1,
         message: SOCIAL_MESSAGES.followRequestAccepted,
       };
     });
+
+    if (this.notificationService && pendingDispatches.length > 0) {
+      await this.notificationService.dispatchRealtimeEvents(pendingDispatches);
+    }
+
+    return result;
   }
 
   async declineFollowRequest(
@@ -563,7 +678,9 @@ export class SocialService {
       });
     }
 
-    return this.repository.getDb().transaction(async (tx) => {
+    const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
+
+    const result = await this.repository.getDb().transaction(async (tx) => {
       const lockedUsers = await this.repository.lockUsersInCanonicalOrder(
         [actor.user.id, requesterCandidate.id],
         tx,
@@ -603,11 +720,28 @@ export class SocialService {
         });
       }
 
+      if (this.notificationService) {
+        // Chỉ gỡ yêu cầu khỏi chuông của người từ chối; không gửi thông báo cho người bị từ chối.
+        pendingDispatches.push(
+          await this.notificationService.removeFollowRequestNotificationsInTx(tx, {
+            recipientId: lockedActor.id,
+            recipientPublicId: lockedActor.publicId,
+            actorIds: [lockedRequester.id],
+          }),
+        );
+      }
+
       return {
-        followStatus: 'none',
+        followStatus: 'none' as const,
         message: SOCIAL_MESSAGES.followRequestDeclined,
       };
     });
+
+    if (this.notificationService && pendingDispatches.length > 0) {
+      await this.notificationService.dispatchRealtimeEvents(pendingDispatches);
+    }
+
+    return result;
   }
 
   async removeFollower(
@@ -883,8 +1017,9 @@ export class SocialService {
     }
 
     const currentTime = this.now();
+    const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
 
-    return this.repository.getDb().transaction(async (tx) => {
+    const result = await this.repository.getDb().transaction(async (tx) => {
       const lockedUsers = await this.repository.lockUsersInCanonicalOrder(
         [actor.user.id, targetCandidate.id],
         tx,
@@ -923,6 +1058,17 @@ export class SocialService {
         lockedTarget.id,
         tx,
       );
+
+      // Xóa sạch toàn bộ thông báo hai chiều giữa A và B trong DB; im lặng tuyệt đối với B.
+      if (this.notificationService) {
+        pendingDispatches.push(
+          await this.notificationService.purgeNotificationsOnBlockInTx(tx, {
+            blockerId: lockedActor.id,
+            blockerPublicId: lockedActor.publicId,
+            blockedId: lockedTarget.id,
+          }),
+        );
+      }
 
       let actorFollowersDelta = 0;
       let actorFollowingDelta = 0;
@@ -980,6 +1126,12 @@ export class SocialService {
         message: SOCIAL_MESSAGES.userBlocked,
       };
     });
+
+    if (this.notificationService && pendingDispatches.length > 0) {
+      await this.notificationService.dispatchRealtimeEvents(pendingDispatches);
+    }
+
+    return result;
   }
 
   /**
@@ -1083,17 +1235,20 @@ export class SocialService {
     return {
       privacy: {
         isPrivate: freshUser.isPrivate,
+        showActiveStatus: freshUser.showActiveStatus,
+        showReadReceipts: freshUser.showReadReceipts,
         pendingFollowRequestsCount,
       },
     };
   }
 
   /**
-   * Bật/tắt chế độ Tài khoản riêng tư:
+   * Cập nhật cài đặt Quyền riêng tư (`isPrivate`, `showActiveStatus`, `showReadReceipts`):
    * - Khi chuyển từ Riêng tư -> Công khai:
    *   1. Giao dịch đầu tiên khóa chính `actor` và đặt `is_private = false` ngay để chấm dứt phát sinh yêu cầu `'requested'` mới.
    *   2. Sau đó xử lý toàn bộ yêu cầu đang chờ theo từng lô nhỏ (`privacyBatchSize`, mặc định 100 dòng/transaction),
    *      mỗi lô khóa theo đúng thứ tự `id ASC FOR UPDATE` để tránh lock contention / deadlock.
+   * - Khi tắt `showActiveStatus`: xóa ngay key Redis `presence:{userId}` để ẩn trạng thái tức thì.
    */
   async updateOwnPrivacySettings(
     actor: AuthenticatedPrincipal,
@@ -1116,11 +1271,13 @@ export class SocialService {
       });
     }
 
-    const { isPrivate } = parsed.data;
+    const requestedIsPrivate = parsed.data.isPrivate;
+    const requestedShowActiveStatus = parsed.data.showActiveStatus;
+    const requestedShowReadReceipts = parsed.data.showReadReceipts;
     const acceptPendingRequests = parsed.data.acceptPendingRequests ?? true;
     const currentTime = this.now();
 
-    // Bước 1: Cập nhật cờ `is_private` trước (chấm dứt tạo yêu cầu mới khi chuyển sang công khai).
+    // Bước 1: Cập nhật các cờ riêng tư nguyên tử trong 1 transaction.
     const step1 = await this.repository.getDb().transaction(async (tx) => {
       const lockedUsers = await this.repository.lockUsersInCanonicalOrder([actor.user.id], tx);
       const lockedActor = lockedUsers.get(actor.user.id);
@@ -1132,9 +1289,30 @@ export class SocialService {
         });
       }
 
-      const changed = lockedActor.isPrivate !== isPrivate;
+      const nextIsPrivate = requestedIsPrivate ?? lockedActor.isPrivate;
+      const nextShowActiveStatus = requestedShowActiveStatus ?? lockedActor.showActiveStatus;
+      const nextShowReadReceipts = requestedShowReadReceipts ?? lockedActor.showReadReceipts;
+
+      const changed =
+        lockedActor.isPrivate !== nextIsPrivate ||
+        lockedActor.showActiveStatus !== nextShowActiveStatus ||
+        lockedActor.showReadReceipts !== nextShowReadReceipts;
+
       const updatedUser = changed
-        ? await this.repository.setUserPrivacyFlag(lockedActor.id, isPrivate, currentTime, tx)
+        ? await this.repository.updateUserPrivacyFlags(
+            lockedActor.id,
+            {
+              ...(requestedIsPrivate !== undefined ? { isPrivate: nextIsPrivate } : {}),
+              ...(requestedShowActiveStatus !== undefined
+                ? { showActiveStatus: nextShowActiveStatus }
+                : {}),
+              ...(requestedShowReadReceipts !== undefined
+                ? { showReadReceipts: nextShowReadReceipts }
+                : {}),
+            },
+            currentTime,
+            tx,
+          )
         : lockedActor;
 
       if (!updatedUser) {
@@ -1153,8 +1331,18 @@ export class SocialService {
             ipAddress: context.ipAddress,
             userAgent: context.userAgent,
             metadata: {
-              isPrivate,
-              acceptPendingRequests: !isPrivate ? acceptPendingRequests : undefined,
+              ...(requestedIsPrivate !== undefined
+                ? {
+                    isPrivate: nextIsPrivate,
+                    acceptPendingRequests: !nextIsPrivate ? acceptPendingRequests : undefined,
+                  }
+                : {}),
+              ...(requestedShowActiveStatus !== undefined
+                ? { showActiveStatus: nextShowActiveStatus }
+                : {}),
+              ...(requestedShowReadReceipts !== undefined
+                ? { showReadReceipts: nextShowReadReceipts }
+                : {}),
             },
           },
           tx,
@@ -1162,15 +1350,23 @@ export class SocialService {
       }
 
       return {
+        isPrivate: updatedUser.isPrivate,
+        showActiveStatus: updatedUser.showActiveStatus,
+        showReadReceipts: updatedUser.showReadReceipts,
         followersCount: updatedUser.followersCount,
       };
     });
 
-    // Bước 2: Khi đang ở chế độ Công khai, xử lý các yêu cầu `'requested'` còn tồn theo từng lô nhỏ.
+    // Nếu người dùng vừa tắt Trạng thái hoạt động -> xóa ngay key Redis `presence:{userId}`.
+    if (requestedShowActiveStatus === false && this.presenceService) {
+      await this.presenceService.clearUserPresence(actor.user.id);
+    }
+
+    // Bước 2: Khi chuyển sang chế độ Công khai, xử lý các yêu cầu `'requested'` còn tồn theo từng lô nhỏ.
     let acceptedRequestsCount = 0;
     let latestFollowersCount = step1.followersCount;
 
-    if (!isPrivate) {
+    if (requestedIsPrivate === false) {
       while (true) {
         const batchFollowerIds = await this.repository.fetchPendingRequesterBatch(
           actor.user.id,
@@ -1179,6 +1375,8 @@ export class SocialService {
         if (batchFollowerIds.length === 0) {
           break;
         }
+
+        const batchDispatches: (PendingRealtimeDispatch | null)[] = [];
 
         const batchOutcome = await this.repository.getDb().transaction(async (tx) => {
           if (!acceptPendingRequests) {
@@ -1195,6 +1393,15 @@ export class SocialService {
               batchFollowerIds,
               tx,
             );
+            if (this.notificationService) {
+              batchDispatches.push(
+                await this.notificationService.removeFollowRequestNotificationsInTx(tx, {
+                  recipientId: lockedActor.id,
+                  recipientPublicId: lockedActor.publicId,
+                  actorIds: batchFollowerIds,
+                }),
+              );
+            }
             return { stop: false, accepted: 0, followersCount: lockedActor.followersCount };
           }
 
@@ -1227,6 +1434,15 @@ export class SocialService {
 
           if (staleIds.length > 0) {
             await this.repository.deletePendingRequestsForFollowers(lockedActor.id, staleIds, tx);
+            if (this.notificationService) {
+              batchDispatches.push(
+                await this.notificationService.removeFollowRequestNotificationsInTx(tx, {
+                  recipientId: lockedActor.id,
+                  recipientPublicId: lockedActor.publicId,
+                  actorIds: staleIds,
+                }),
+              );
+            }
           }
 
           if (validActiveIds.length === 0) {
@@ -1252,6 +1468,30 @@ export class SocialService {
             tx,
           );
 
+          if (this.notificationService) {
+            batchDispatches.push(
+              await this.notificationService.removeFollowRequestNotificationsInTx(tx, {
+                recipientId: lockedActor.id,
+                recipientPublicId: lockedActor.publicId,
+                actorIds: acceptedIds,
+              }),
+            );
+            for (const acceptedId of acceptedIds) {
+              const acceptedUser = lockedUsers.get(acceptedId);
+              if (acceptedUser) {
+                batchDispatches.push(
+                  await this.notificationService.recordNotificationInTx(tx, {
+                    recipient: acceptedUser,
+                    actor: lockedActor,
+                    type: 'follow_accepted',
+                    entityPublicId: lockedActor.publicId,
+                    now: currentTime,
+                  }),
+                );
+              }
+            }
+          }
+
           return {
             stop: false,
             accepted: acceptedIds.length,
@@ -1260,6 +1500,10 @@ export class SocialService {
               lockedActor.followersCount + acceptedIds.length,
           };
         });
+
+        if (this.notificationService && batchDispatches.length > 0) {
+          await this.notificationService.dispatchRealtimeEvents(batchDispatches);
+        }
 
         acceptedRequestsCount += batchOutcome.accepted;
         latestFollowersCount = batchOutcome.followersCount;
@@ -1275,14 +1519,26 @@ export class SocialService {
       this.repository.countPendingFollowRequests(actor.user.id),
     ]);
 
+    const finalIsPrivate = freshUser?.isPrivate ?? step1.isPrivate;
+    const onlyPrivateChanged =
+      requestedIsPrivate !== undefined &&
+      requestedShowActiveStatus === undefined &&
+      requestedShowReadReceipts === undefined;
+
     return {
       privacy: {
-        isPrivate: freshUser?.isPrivate ?? isPrivate,
+        isPrivate: finalIsPrivate,
+        showActiveStatus: freshUser?.showActiveStatus ?? step1.showActiveStatus,
+        showReadReceipts: freshUser?.showReadReceipts ?? step1.showReadReceipts,
         pendingFollowRequestsCount,
       },
       acceptedRequestsCount,
       followersCount: freshUser?.followersCount ?? latestFollowersCount,
-      message: isPrivate ? SOCIAL_MESSAGES.privacyEnabled : SOCIAL_MESSAGES.privacyDisabled,
+      message: onlyPrivateChanged
+        ? finalIsPrivate
+          ? SOCIAL_MESSAGES.privacyEnabled
+          : SOCIAL_MESSAGES.privacyDisabled
+        : SOCIAL_MESSAGES.privacyUpdated,
     };
   }
 }

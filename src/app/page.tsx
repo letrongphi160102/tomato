@@ -12,7 +12,11 @@ export default async function HomePage() {
 
   if (authState.status === 'authenticated') {
     return (
-      <AppShell user={authState.user} profile={authState.profile}>
+      <AppShell
+        user={authState.user}
+        profile={authState.profile}
+        initialShowActiveStatus={authState.principal.user.showActiveStatus}
+      >
         <AuthenticatedHome user={authState.user} profile={authState.profile} />
       </AppShell>
     );

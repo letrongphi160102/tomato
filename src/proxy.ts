@@ -33,8 +33,25 @@ function isNoStoreApiRoute(pathname: string): boolean {
     pathname === '/api/v1/users' ||
     pathname.startsWith('/api/v1/users/') ||
     pathname === '/api/v1/social' ||
-    pathname.startsWith('/api/v1/social/')
+    pathname.startsWith('/api/v1/social/') ||
+    pathname === '/api/v1/notifications' ||
+    pathname.startsWith('/api/v1/notifications/') ||
+    pathname === '/api/v1/realtime' ||
+    pathname.startsWith('/api/v1/realtime/') ||
+    pathname === '/api/v1/presence' ||
+    pathname.startsWith('/api/v1/presence/')
   );
+}
+
+function isAblyRealtimeEnabledInEnv(): boolean {
+  const configured = process.env.REALTIME_PROVIDER?.trim();
+  if (configured === 'ably') {
+    return true;
+  }
+  if (configured === 'local') {
+    return false;
+  }
+  return process.env.NODE_ENV !== 'test' && Boolean(process.env.ABLY_API_KEY?.trim());
 }
 
 function isSensitiveTokenPageRoute(pathname: string): boolean {
@@ -69,6 +86,7 @@ export function proxy(request: NextRequest): NextResponse {
     isAuthApiRoute,
     isSensitiveTokenPage,
     sentryDsnOrigin: extractSentryIngestOrigin(process.env.NEXT_PUBLIC_SENTRY_DSN),
+    allowAblyRealtime: isAblyRealtimeEnabledInEnv(),
   });
 
   // Lọc chặt đường dẫn hiện tại chống Open Redirect trước khi đưa vào `?next=` hoặc header nội bộ.

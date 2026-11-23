@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
   // - sharp chứa native libvips C++ binary bắt buộc chạy ngoài bundler trên Node.js Runtime.
   // - pino & pino-pretty sử dụng worker thread (thread-stream) cần đường dẫn file gốc trên đĩa.
   // - nodemailer dùng giao thức socket/TLS thuần Node.js, tránh cảnh báo/lỗi đóng gói trên Turbopack.
-  serverExternalPackages: ['@node-rs/argon2', 'sharp', 'pino', 'pino-pretty', 'nodemailer'],
+  serverExternalPackages: ['@node-rs/argon2', 'sharp', 'pino', 'pino-pretty', 'nodemailer', 'ably'],
 };
 
 const hasSentryUploadAuth = Boolean(

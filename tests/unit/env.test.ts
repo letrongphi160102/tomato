@@ -237,4 +237,51 @@ describe('parseEnv (fail-fast Zod validation)', () => {
       ),
     ).toThrow(EnvValidationError);
   });
+
+  it('M8: hỗ trợ REALTIME_PROVIDER=local|ably, tự chọn local ở NODE_ENV=test và fail-fast khi ably thiếu/sai key', () => {
+    const defaultLocal = parseEnv(createBaseEnv());
+    expect(defaultLocal.REALTIME_PROVIDER).toBe('local');
+
+    // Ở development khi có ABLY_API_KEY hợp lệ -> tự động kích hoạt ably.
+    const autoAblyDev = parseEnv(
+      createBaseEnv({
+        NODE_ENV: 'development',
+        ABLY_API_KEY: 'syntheticApp.syntheticKey:syntheticSecretValueNotReal',
+      }),
+    );
+    expect(autoAblyDev.REALTIME_PROVIDER).toBe('ably');
+
+    // Ở NODE_ENV=test dù có ABLY_API_KEY trong .env.local -> mặc định chọn local để tránh gọi mạng.
+    const testDefaultLocal = parseEnv(
+      createBaseEnv({
+        NODE_ENV: 'test',
+        ABLY_API_KEY: 'syntheticApp.syntheticKey:syntheticSecretValueNotReal',
+      }),
+    );
+    expect(testDefaultLocal.REALTIME_PROVIDER).toBe('local');
+
+    // Chỉ định tường minh REALTIME_PROVIDER=ably nhưng thiếu hoặc sai định dạng -> fail-fast và không lộ giá trị key.
+    expect(() =>
+      parseEnv(
+        createBaseEnv({
+          REALTIME_PROVIDER: 'ably',
+          ABLY_API_KEY: '',
+        }),
+      ),
+    ).toThrow(EnvValidationError);
+
+    const malformedKey = 'malformed-key-without-colon';
+    try {
+      parseEnv(
+        createBaseEnv({
+          REALTIME_PROVIDER: 'ably',
+          ABLY_API_KEY: malformedKey,
+        }),
+      );
+      expect.unreachable('Phải ném EnvValidationError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(EnvValidationError);
+      expect((error as EnvValidationError).message).not.toContain(malformedKey);
+    }
+  });
 });

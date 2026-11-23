@@ -15,7 +15,11 @@ export default async function DashboardLayout({ children }: Readonly<{ children:
 
   if (authState.status === 'authenticated') {
     return (
-      <AppShell user={authState.user} profile={authState.profile}>
+      <AppShell
+        user={authState.user}
+        profile={authState.profile}
+        initialShowActiveStatus={authState.principal.user.showActiveStatus}
+      >
         {children}
       </AppShell>
     );

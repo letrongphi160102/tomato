@@ -17,6 +17,7 @@ export interface RedisClient {
   readonly provider: RedisProviderType;
   ping(): Promise<string>;
   get(key: string): Promise<string | null>;
+  mget(...keys: string[]): Promise<(string | null)[]>;
   set(key: string, value: string, options?: RedisSetOptions): Promise<'OK' | null>;
   del(...keys: string[]): Promise<number>;
   incr(key: string): Promise<number>;

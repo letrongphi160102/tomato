@@ -286,4 +286,28 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     const usersApiRes = proxy(usersApiReq);
     expect(usersApiRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
   });
+
+  it('M8: CSP connect-src chỉ mở đúng các origin Ably chính thức khi allowAblyRealtime=true', () => {
+    const withAbly = buildContentSecurityPolicy({
+      nonce: 'nonce-m8',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      allowAblyRealtime: true,
+    });
+    expect(withAbly).toContain('https://*.ably.io');
+    expect(withAbly).toContain('wss://*.ably.io');
+    expect(withAbly).toContain('https://*.ably-realtime.com');
+    expect(withAbly).toContain('wss://*.ably-realtime.com');
+    expect(withAbly).not.toContain('unsafe-eval');
+
+    const withoutAbly = buildContentSecurityPolicy({
+      nonce: 'nonce-m8',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      allowAblyRealtime: false,
+    });
+    expect(withoutAbly).not.toContain('ably.io');
+  });
 });

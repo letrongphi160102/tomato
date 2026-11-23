@@ -19,6 +19,7 @@ export const SOCIAL_MESSAGES = Object.freeze({
   userUnblocked: 'Đã bỏ chặn tài khoản này.',
   privacyEnabled: 'Đã chuyển sang tài khoản riêng tư.',
   privacyDisabled: 'Đã chuyển sang tài khoản công khai.',
+  privacyUpdated: 'Đã cập nhật cài đặt quyền riêng tư.',
   validationFailed: 'Thông tin yêu cầu chưa hợp lệ. Vui lòng kiểm tra lại.',
   invalidCursor: 'Thông tin phân trang không hợp lệ.',
   invalidLimit: 'Số lượng mục yêu cầu không hợp lệ.',

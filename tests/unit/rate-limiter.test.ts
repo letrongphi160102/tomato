@@ -8,6 +8,7 @@ function createMockRedisForRateLimiter(evalImpl: RedisClient['eval']): RedisClie
     provider: 'local',
     ping: vi.fn(async () => 'PONG'),
     get: vi.fn(async () => null),
+    mget: vi.fn(async (...keys: string[]) => keys.map(() => null)),
     set: vi.fn(async () => 'OK' as const),
     del: vi.fn(async () => 1),
     incr: vi.fn(async () => 1),
