@@ -1,4 +1,4 @@
-import type { TokenRequest } from 'ably';
+import type { TokenRequest } from '@ably/pubsub-server';
 
 export const REALTIME_PROVIDER_TYPES = ['local', 'ably'] as const;
 

@@ -170,4 +170,88 @@ describe('Core Realtime Provider (Port & Adapter)', () => {
     expect(adapter.getListenerCount(USER_A_PUBLIC_ID)).toBe(0);
     expect(adapter.getListenerCount(USER_B_PUBLIC_ID)).toBe(0);
   });
+
+  it('connectUserRealtime dùng @ably/pubsub-device (truyền clientId) và không để lọt Unhandled Rejection khi disconnect đóng kết nối đang attach', async () => {
+    let rejectSubscribe: ((reason?: unknown) => void) | null = null;
+    const closeMock = vi.fn(() => {
+      rejectSubscribe?.(new Error('Connection closed'));
+    });
+    const unsubscribeMock = vi.fn();
+    const subscribeMock = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSubscribe = reject;
+        }),
+    );
+    const createClientMock = vi.fn(() => ({
+      channels: {
+        get: vi.fn(() => ({
+          subscribe: subscribeMock,
+          unsubscribe: unsubscribeMock,
+        })),
+      },
+      close: closeMock,
+    }));
+
+    vi.resetModules();
+    vi.doMock('@ably/pubsub-device', () => ({
+      createClient: createClientMock,
+    }));
+    vi.doMock('@/lib/auth-client', () => ({
+      authFetch: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              provider: 'ably',
+              channel: `user:${USER_A_PUBLIC_ID}`,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+              ttlMs: 900_000,
+              tokenRequest: {
+                keyName: 'syntheticApp.syntheticKey',
+                ttl: 900_000,
+                timestamp: Date.now(),
+                capability: JSON.stringify({ [`user:${USER_A_PUBLIC_ID}`]: ['subscribe'] }),
+                clientId: USER_A_PUBLIC_ID,
+                nonce: 'synthetic-nonce',
+                mac: 'synthetic-mac',
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+      ),
+    }));
+
+    const unhandledRejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const { connectUserRealtime } = await import('@/lib/realtime-client');
+      const conn = connectUserRealtime({ onEvent: vi.fn() });
+
+      // Chờ dynamic import & khởi tạo client hoàn tất.
+      await vi.waitFor(() => {
+        expect(createClientMock).toHaveBeenCalledTimes(1);
+        expect(subscribeMock).toHaveBeenCalledTimes(1);
+      });
+
+      const firstCallArg = (createClientMock.mock.calls[0] as unknown[] | undefined)?.[0] as
+        { clientId?: string } | undefined;
+      expect(firstCallArg?.clientId).toBe(USER_A_PUBLIC_ID);
+
+      // Gọi disconnect kích hoạt `close()` làm Promise của `channel.subscribe` reject 'Connection closed'.
+      conn.disconnect();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(unsubscribeMock).toHaveBeenCalledTimes(1);
+      expect(closeMock).toHaveBeenCalledTimes(1);
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      vi.doUnmock('@ably/pubsub-device');
+      vi.doUnmock('@/lib/auth-client');
+    }
+  });
 });

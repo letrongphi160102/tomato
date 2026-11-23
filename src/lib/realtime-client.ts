@@ -1,4 +1,4 @@
-import type { InboundMessage, RealtimeClient, TokenRequest } from 'ably';
+import type { InboundMessage, PubSubClient, TokenRequest } from '@ably/pubsub-device';
 
 import { authFetch } from '@/lib/auth-client';
 import type { RealtimeEventName, RealtimeSubscribeTokenDto } from '@/core/realtime/types';
@@ -68,12 +68,13 @@ export interface ConnectRealtimeOptions {
 
 /**
  * Thiết lập kết nối Realtime chỉ-nghe (subscribe-only) tới kênh cá nhân `user:{publicId}`:
- * - Production / có `ABLY_API_KEY`: dùng Ably WSS + `authCallback` tự gia hạn mỗi 15 phút qua `/api/v1/realtime/token`.
+ * - Production / có `ABLY_API_KEY`: dùng `@ably/pubsub-device` v3 (tương thích tài khoản MAU)
+ *   + `authCallback` tự gia hạn mỗi 15 phút qua `/api/v1/realtime/token`.
  * - Local fallback: dùng `EventSource('/api/v1/realtime/stream')` qua SSE.
  */
 export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeClientConnection {
   let disposed = false;
-  let ablyClient: RealtimeClient | null = null;
+  let ablyClient: PubSubClient | null = null;
   let eventSource: EventSource | null = null;
   let channelUnsubscribe: (() => void) | null = null;
 
@@ -154,16 +155,19 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
     }
 
     if (initialToken.provider === 'ably' && initialToken.tokenRequest) {
-      const { Realtime: RealtimeCtor } = await import('ably');
-      if (disposed || !RealtimeCtor) {
+      const { createClient } = await import('@ably/pubsub-device');
+      if (disposed || typeof createClient !== 'function') {
         return;
       }
 
       let cachedInitialTokenRequest: TokenRequest | null =
         initialToken.tokenRequest as TokenRequest;
 
-      const client = new RealtimeCtor({
+      const client = createClient({
         autoConnect: true,
+        ...(initialToken.tokenRequest.clientId
+          ? { clientId: initialToken.tokenRequest.clientId }
+          : {}),
         authCallback: (_tokenParams, callback) => {
           if (disposed) {
             callback('Kết nối đã đóng.', null);
@@ -205,12 +209,14 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
         }
       };
 
-      void channel.subscribe(handleInbound);
+      // Bắt rõ rejection từ Promise của `channel.subscribe` (ví dụ `Connection closed` khi
+      // người dùng chuyển trang hoặc đăng xuất trong lúc kênh đang gắn) để không gây Unhandled Rejection.
+      void Promise.resolve(channel.subscribe(handleInbound)).catch(() => undefined);
       channelUnsubscribe = () => {
         channel.unsubscribe(handleInbound);
       };
     }
-  })();
+  })().catch(() => undefined);
 
   return { disconnect };
 }

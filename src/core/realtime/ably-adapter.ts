@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { Rest, type RestClient, type TokenRequest } from 'ably';
+import { createHttpClient, type PubSubHttpClient, type TokenRequest } from '@ably/pubsub-server';
 
 import {
   assertRealtimePayloadSafe,
@@ -18,7 +18,7 @@ import {
 
 export interface AblyRealtimeAdapterOptions {
   readonly apiKey: string;
-  readonly client?: Pick<RestClient, 'auth' | 'channels'>;
+  readonly client?: Pick<PubSubHttpClient, 'auth' | 'channels'>;
   readonly ttlMs?: number;
   readonly now?: () => number;
 }
@@ -36,14 +36,14 @@ function toSafeTokenRequestDto(tokenRequest: TokenRequest): AblyTokenRequestDto 
 }
 
 /**
- * Adapter Production 0đ dùng Ably REST SDK (`Ably.Rest`):
- * - Stateless HTTP phù hợp hoàn hảo với Vercel Serverless.
+ * Adapter Production 0đ dùng Ably v3 Server HTTP SDK (`@ably/pubsub-server` — tương thích tài khoản MAU):
+ * - Stateless HTTP phù hợp hoàn hảo với Vercel Serverless và được miễn tính MAU phía Server.
  * - Ký `TokenRequest` ngắn hạn (15 phút) bằng HMAC trên Server; `ABLY_API_KEY` tuyệt đối không rời Server.
- * - Khóa cứng `capability` chỉ có `["subscribe"]` trên đúng 1 kênh `user:{actor.publicId}`.
+ * - Khóa cứng `capability` chỉ có `["subscribe"]` trên đúng 1 kênh `user:{actor.publicId}` kèm `clientId`.
  */
 export class AblyRealtimeAdapter implements RealtimeProvider {
   public readonly provider = 'ably' as const;
-  private readonly client: Pick<RestClient, 'auth' | 'channels'>;
+  private readonly client: Pick<PubSubHttpClient, 'auth' | 'channels'>;
   private readonly ttlMs: number;
   private readonly now: () => number;
 
@@ -51,7 +51,7 @@ export class AblyRealtimeAdapter implements RealtimeProvider {
     if (!options.client && !options.apiKey.trim()) {
       throw new Error('Thiếu ABLY_API_KEY khi khởi tạo AblyRealtimeAdapter');
     }
-    this.client = options.client ?? new Rest({ key: options.apiKey });
+    this.client = options.client ?? createHttpClient({ key: options.apiKey });
     this.ttlMs = options.ttlMs ?? REALTIME_TOKEN_TTL_MS;
     this.now = options.now ?? (() => Date.now());
   }
