@@ -1,3 +1,4 @@
+import '@/core/validation/zod-config';
 import { z } from 'zod';
 
 import { NOTIFICATION_MESSAGES } from '@/modules/notifications/notification.messages';

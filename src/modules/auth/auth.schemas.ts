@@ -1,3 +1,4 @@
+import '@/core/validation/zod-config';
 import { z } from 'zod';
 
 import { normalizeEmail, normalizePassword, normalizeUsername } from '@/core/crypto/normalize';

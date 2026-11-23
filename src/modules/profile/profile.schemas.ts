@@ -1,3 +1,4 @@
+import '@/core/validation/zod-config';
 import { z } from 'zod';
 
 import { FULL_NAME_MAX_LENGTH, FULL_NAME_MIN_LENGTH } from '@/modules/auth/auth.schemas';

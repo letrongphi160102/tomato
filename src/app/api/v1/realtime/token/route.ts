@@ -1,3 +1,4 @@
+import '@/core/validation/zod-config';
 import { z } from 'zod';
 
 import { handleSocialRouteError } from '@/app/api/v1/social/_utils';

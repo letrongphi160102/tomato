@@ -1,3 +1,4 @@
+import '@/core/validation/zod-config';
 import { z } from 'zod';
 
 import { PRESENCE_MESSAGES } from '@/modules/presence/presence.messages';

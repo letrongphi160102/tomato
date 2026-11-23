@@ -1,5 +1,6 @@
 import 'server-only';
 
+import '@/core/validation/zod-config';
 import { z } from 'zod';
 
 // Các dummy key test công khai chính thức của Cloudflare Turnstile — chỉ cho phép ở dev/test.

@@ -1,3 +1,4 @@
+import '@/core/validation/zod-config';
 import * as Sentry from '@sentry/nextjs';
 
 import {
