@@ -22,6 +22,7 @@ export function AppShell({
 }: AppShellProps) {
   return (
     <RealtimePresenceProvider
+      currentUserPublicId={user.public_id}
       initialShowActiveStatus={initialShowActiveStatus}
       initialAccessTokenRemainingMs={initialAccessTokenRemainingMs}
     >

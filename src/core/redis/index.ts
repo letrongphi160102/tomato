@@ -19,6 +19,7 @@ import {
 } from '@/core/redis/login-brute-force';
 import {
   AUTH_RATE_LIMITS,
+  CHAT_RATE_LIMITS,
   NOTIFICATION_RATE_LIMITS,
   PRESENCE_RATE_LIMITS,
   PROFILE_RATE_LIMITS,
@@ -35,6 +36,7 @@ import { UpstashRedisAdapter } from '@/core/redis/upstash-adapter';
 
 export {
   AUTH_RATE_LIMITS,
+  CHAT_RATE_LIMITS,
   NOTIFICATION_RATE_LIMITS,
   PRESENCE_RATE_LIMITS,
   PROFILE_RATE_LIMITS,

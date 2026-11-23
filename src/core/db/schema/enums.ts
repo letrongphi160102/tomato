@@ -54,3 +54,24 @@ export const NOTIFICATION_TYPES = [
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
 export const notificationTypeEnum = pgEnum('notification_type', NOTIFICATION_TYPES);
+
+export const CONVERSATION_TYPES = ['direct'] as const;
+
+export type ConversationType = (typeof CONVERSATION_TYPES)[number];
+
+export const conversationTypeEnum = pgEnum('conversation_type', CONVERSATION_TYPES);
+
+export const CONVERSATION_INBOX_STATES = ['primary', 'pending', 'declined'] as const;
+
+export type ConversationInboxState = (typeof CONVERSATION_INBOX_STATES)[number];
+
+export const conversationInboxStateEnum = pgEnum(
+  'conversation_inbox_state',
+  CONVERSATION_INBOX_STATES,
+);
+
+export const MESSAGE_TYPES = ['text', 'image', 'voice', 'call_event'] as const;
+
+export type MessageType = (typeof MESSAGE_TYPES)[number];
+
+export const messageTypeEnum = pgEnum('message_type', MESSAGE_TYPES);

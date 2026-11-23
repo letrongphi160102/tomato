@@ -15,6 +15,8 @@ export const REALTIME_EVENT_NAMES = [
   'notification.read',
   'notification.removed',
   'notification.deleted',
+  'chat.message.created',
+  'chat.conversation.updated',
 ] as const;
 
 export type RealtimeEventName = (typeof REALTIME_EVENT_NAMES)[number];

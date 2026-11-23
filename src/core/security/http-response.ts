@@ -21,6 +21,9 @@ export type ApiErrorCode =
   | 'CAPTCHA_INVALID'
   | 'TOKEN_INVALID'
   | 'TOKEN_EXPIRED'
+  | 'CHAT_PENDING_TEXT_ONLY'
+  | 'CHAT_PENDING_LIMIT_REACHED'
+  | 'CHAT_SELF_CONVERSATION_FORBIDDEN'
   | 'INTERNAL_ERROR';
 
 export interface ApiErrorDetail {

@@ -19,6 +19,7 @@ export {
   extractPostgresErrorCode,
   isPostgresUniqueViolation,
 } from '@/core/db/errors';
+export { applyRlsSessionContext, withRlsContext } from '@/core/db/rls';
 
 const globalForDb = globalThis as typeof globalThis & {
   __tomatoPgPool?: Pool;

@@ -22,7 +22,9 @@ function isProtectedAppRoute(pathname: string): boolean {
     pathname === '/settings' ||
     pathname.startsWith('/settings/') ||
     pathname === '/u' ||
-    pathname.startsWith('/u/')
+    pathname.startsWith('/u/') ||
+    pathname === '/messages' ||
+    pathname.startsWith('/messages/')
   );
 }
 
@@ -39,7 +41,11 @@ function isNoStoreApiRoute(pathname: string): boolean {
     pathname === '/api/v1/realtime' ||
     pathname.startsWith('/api/v1/realtime/') ||
     pathname === '/api/v1/presence' ||
-    pathname.startsWith('/api/v1/presence/')
+    pathname.startsWith('/api/v1/presence/') ||
+    pathname === '/api/v1/e2ee' ||
+    pathname.startsWith('/api/v1/e2ee/') ||
+    pathname === '/api/v1/conversations' ||
+    pathname.startsWith('/api/v1/conversations/')
   );
 }
 

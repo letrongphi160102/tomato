@@ -4,10 +4,12 @@ import * as React from 'react';
 
 import {
   RealtimePresenceContext,
+  type ChatRealtimeListener,
   type DeleteNotificationOutcome,
   type RealtimePresenceContextValue,
 } from '@/components/realtime/realtime-presence-context';
 import { authFetch, seedAccessTokenFreshness } from '@/lib/auth-client';
+import { getOrCreatePrimaryDeviceKeyMaterial, saveDeviceKeyMaterial } from '@/lib/e2ee/keystore';
 import {
   connectUserRealtime,
   disconnectAllRealtimeConnections,
@@ -20,6 +22,7 @@ import type { NotificationItemDto } from '@/modules/notifications/notification.s
 export const PRESENCE_CLIENT_HEARTBEAT_INTERVAL_MS = 60_000;
 
 export interface RealtimePresenceProviderProps {
+  readonly currentUserPublicId?: string;
   readonly initialShowActiveStatus: boolean;
   readonly initialAccessTokenRemainingMs?: number;
   readonly children: React.ReactNode;
@@ -43,6 +46,7 @@ function isNotificationItemDto(value: unknown): value is NotificationItemDto {
 }
 
 export function RealtimePresenceProvider({
+  currentUserPublicId,
   initialShowActiveStatus,
   initialAccessTokenRemainingMs,
   children,
@@ -55,11 +59,14 @@ export function RealtimePresenceProvider({
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [deletingIds, setDeletingIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [activeStatusEnabled, setActiveStatusEnabled] = React.useState(initialShowActiveStatus);
+  const [e2eeReady, setE2eeReady] = React.useState(false);
 
   const notificationsRef = React.useRef<readonly NotificationItemDto[]>(notifications);
   const deletingIdsRef = React.useRef<Set<string>>(new Set());
   const inFlightUnreadDeleteIdsRef = React.useRef<Set<string>>(new Set());
   const exitTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const chatListenersRef = React.useRef<Set<ChatRealtimeListener>>(new Set());
+  const e2eeBootstrapPromiseRef = React.useRef<Promise<boolean> | null>(null);
   const connectionRef = React.useRef<RealtimeClientConnection | null>(null);
   const heartbeatIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const loggedOutRef = React.useRef(false);
@@ -474,8 +481,83 @@ export function RealtimePresenceProvider({
           Math.max(0, incoming.data.unreadCount - inFlightUnreadDeleteIdsRef.current.size),
         );
       }
+      return;
+    }
+
+    if (
+      incoming.event === 'chat.message.created' ||
+      incoming.event === 'chat.conversation.updated'
+    ) {
+      for (const listener of Array.from(chatListenersRef.current)) {
+        try {
+          listener(incoming);
+        } catch {
+          // Không để lỗi ở 1 subscriber ảnh hưởng tới subscriber khác.
+        }
+      }
     }
   }, []);
+
+  const subscribeChatEvents = React.useCallback((listener: ChatRealtimeListener) => {
+    chatListenersRef.current.add(listener);
+    return () => {
+      chatListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const ensureE2eeDeviceRegistered = React.useCallback(async (): Promise<boolean> => {
+    if (!currentUserPublicId || loggedOutRef.current) {
+      return false;
+    }
+    if (e2eeBootstrapPromiseRef.current) {
+      return e2eeBootstrapPromiseRef.current;
+    }
+
+    const promise = (async () => {
+      try {
+        const material = await getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId);
+        const response = await authFetch('/api/v1/e2ee/devices', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            identityPublicKeyJwk: material.identityPublicKeyJwk,
+            signingPublicKeyJwk: material.signingPublicKeyJwk,
+            keyFingerprint: material.keyFingerprint,
+            deviceLabel: 'Trình duyệt web',
+          }),
+        });
+        if (!response.ok || loggedOutRef.current) {
+          return false;
+        }
+        const data = (await response.json()) as {
+          readonly device?: { readonly devicePublicId?: string };
+        };
+        if (
+          typeof data.device?.devicePublicId === 'string' &&
+          data.device.devicePublicId !== material.devicePublicId
+        ) {
+          await saveDeviceKeyMaterial(
+            {
+              ...material,
+              devicePublicId: data.device.devicePublicId,
+            },
+            'primary',
+          );
+        }
+        if (!loggedOutRef.current) {
+          setE2eeReady(true);
+        }
+        return true;
+      } catch {
+        return false;
+      } finally {
+        e2eeBootstrapPromiseRef.current = null;
+      }
+    })();
+
+    e2eeBootstrapPromiseRef.current = promise;
+    return promise;
+  }, [currentUserPublicId]);
 
   const disconnectAll = React.useCallback(() => {
     loggedOutRef.current = true;
@@ -497,6 +579,14 @@ export function RealtimePresenceProvider({
       seedAccessTokenFreshness(initialAccessTokenRemainingMs);
     }
   }, [initialAccessTokenRemainingMs]);
+
+  // Tự động khởi tạo & đăng ký khóa thiết bị ngay khi người dùng đăng nhập vào Dashboard.
+  React.useEffect(() => {
+    if (!currentUserPublicId || loggedOutRef.current) {
+      return;
+    }
+    void ensureE2eeDeviceRegistered();
+  }, [currentUserPublicId, ensureE2eeDeviceRegistered]);
 
   // Nạp danh sách thông báo ban đầu và thiết lập kênh nhận thông báo trực tiếp.
   React.useEffect(() => {
@@ -600,6 +690,7 @@ export function RealtimePresenceProvider({
       errorMessage,
       deletingIds,
       activeStatusEnabled,
+      e2eeReady,
       setActiveStatusEnabled,
       refreshNotifications,
       loadMoreNotifications,
@@ -607,6 +698,8 @@ export function RealtimePresenceProvider({
       markAllAsRead,
       deleteNotification,
       removeNotificationLocally,
+      subscribeChatEvents,
+      ensureE2eeDeviceRegistered,
       disconnectAll,
     }),
     [
@@ -614,6 +707,8 @@ export function RealtimePresenceProvider({
       deleteNotification,
       deletingIds,
       disconnectAll,
+      e2eeReady,
+      ensureE2eeDeviceRegistered,
       errorMessage,
       loadMoreNotifications,
       loadingInitial,
@@ -624,6 +719,7 @@ export function RealtimePresenceProvider({
       notifications,
       refreshNotifications,
       removeNotificationLocally,
+      subscribeChatEvents,
       unreadCount,
     ],
   );

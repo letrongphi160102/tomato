@@ -406,6 +406,35 @@ export class NotificationService {
     };
   }
 
+  async removeMessageRequestNotificationsInTx(
+    tx: DatabaseTransaction,
+    params: {
+      readonly recipientId: string;
+      readonly recipientPublicId: string;
+      readonly actorIds: readonly string[];
+    },
+  ): Promise<PendingRealtimeDispatch | null> {
+    const deletedPublicIds = await this.repository.deleteByRecipientActorsAndType(
+      params.recipientId,
+      params.actorIds,
+      'message_request',
+      tx,
+    );
+    if (deletedPublicIds.length === 0) {
+      return null;
+    }
+
+    const unreadCount = await this.repository.countUnreadForRecipient(params.recipientId, tx);
+    return {
+      recipientPublicId: params.recipientPublicId,
+      eventName: 'notification.removed',
+      payload: {
+        notificationPublicIds: deletedPublicIds,
+        unreadCount,
+      },
+    };
+  }
+
   /**
    * Khi A chặn B:
    * - Xóa sạch thông báo của cả 2 phía trong PostgreSQL ngay trong transaction.

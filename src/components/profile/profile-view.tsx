@@ -9,6 +9,7 @@ import {
   Grid3X3,
   Loader2,
   Lock,
+  MessageCircle,
   MoreHorizontal,
   Pencil,
   Shield,
@@ -351,6 +352,15 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
                       ) : (
                         <span>{followButtonLabel}</span>
                       )}
+                    </Button>
+
+                    <Button asChild variant="outline" size="sm" className="h-8 rounded-lg">
+                      <Link
+                        href={`/messages?to=${encodeURIComponent(profile.public_id)}&handle=${encodeURIComponent(profile.handle)}`}
+                      >
+                        <MessageCircle className="size-3.5" aria-hidden="true" />
+                        <span>Nhắn tin</span>
+                      </Link>
                     </Button>
 
                     <div ref={menuRef} className="relative">

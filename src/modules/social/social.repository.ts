@@ -6,6 +6,8 @@ import { generateUuidV7 } from '@/core/crypto/id';
 import { getDb, type Database, type DatabaseTransaction, type DbExecutor } from '@/core/db';
 import {
   blocks,
+  conversationParticipants,
+  conversations,
   follows,
   users,
   type FollowRow,
@@ -749,5 +751,49 @@ export class SocialRepository {
       .limit(params.limit + 1);
 
     return rows;
+  }
+
+  /**
+   * Khi `blockerId` chặn `blockedId`: nếu tồn tại hội thoại 1-1 giữa 2 người,
+   * tự động chuyển trạng thái hộp thư của người chặn sang `'declined'` và ẩn hội thoại.
+   */
+  async declineDirectConversationOnBlock(
+    blockerId: string,
+    blockedId: string,
+    now: Date,
+    tx: DatabaseTransaction,
+  ): Promise<string | null> {
+    const pairKey =
+      blockerId < blockedId ? `${blockerId}:${blockedId}` : `${blockedId}:${blockerId}`;
+    const convRows = await tx
+      .select({
+        id: conversations.id,
+        publicId: conversations.publicId,
+        lastSeq: conversations.lastSeq,
+      })
+      .from(conversations)
+      .where(eq(conversations.directPairKey, pairKey))
+      .limit(1);
+
+    const conv = convRows[0];
+    if (!conv) {
+      return null;
+    }
+
+    await tx
+      .update(conversationParticipants)
+      .set({
+        inboxState: 'declined',
+        clearedBeforeSeq: conv.lastSeq,
+        hiddenAt: now,
+      })
+      .where(
+        and(
+          eq(conversationParticipants.conversationId, conv.id),
+          eq(conversationParticipants.userId, blockerId),
+        ),
+      );
+
+    return conv.publicId;
   }
 }

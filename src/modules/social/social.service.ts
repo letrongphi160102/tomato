@@ -1059,7 +1059,17 @@ export class SocialService {
         tx,
       );
 
-      // Xóa sạch toàn bộ thông báo hai chiều giữa A và B trong DB; im lặng tuyệt đối với B.
+      // Ẩn & chuyển trạng thái hội thoại chờ (nếu có) ở phía người chặn.
+      if (typeof this.repository.declineDirectConversationOnBlock === 'function') {
+        await this.repository.declineDirectConversationOnBlock(
+          lockedActor.id,
+          lockedTarget.id,
+          currentTime,
+          tx,
+        );
+      }
+
+      // Xóa sạch toàn bộ thông báo hai chiều (bao gồm cả follow_request và message_request) giữa A và B trong DB; im lặng tuyệt đối với B.
       if (this.notificationService) {
         pendingDispatches.push(
           await this.notificationService.purgeNotificationsOnBlockInTx(tx, {

@@ -17,6 +17,8 @@ const SUPPORTED_EVENT_NAMES: ReadonlySet<string> = new Set<RealtimeEventName>([
   'notification.read',
   'notification.removed',
   'notification.deleted',
+  'chat.message.created',
+  'chat.conversation.updated',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -135,6 +137,8 @@ export function connectUserRealtime(options: ConnectRealtimeOptions): RealtimeCl
         'notification.read',
         'notification.removed',
         'notification.deleted',
+        'chat.message.created',
+        'chat.conversation.updated',
       ];
 
       for (const eventName of eventNames) {

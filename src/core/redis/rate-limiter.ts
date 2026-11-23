@@ -223,6 +223,63 @@ export const PRESENCE_RATE_LIMITS = Object.freeze({
   }),
 } satisfies Record<string, RateLimitRule>);
 
+/**
+ * Các ngưỡng Rate Limit chuẩn hóa cho phân hệ Nhắn tin 1-1 E2EE & Tin nhắn đang chờ (Giai đoạn 2 — M9).
+ */
+export const CHAT_RATE_LIMITS = Object.freeze({
+  registerDeviceByUser: Object.freeze({
+    limit: 20,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  readKeysByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  writeKeyBackupByUser: Object.freeze({
+    limit: 5,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  readKeyBackupByUser: Object.freeze({
+    limit: 10,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  listConversationsByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  createConversationByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  /** Giới hạn tối đa 5 người lạ mới/ngày/user khi khởi tạo hội thoại chờ (Pending Message Request). */
+  newPendingConversationDailyByUser: Object.freeze({
+    limit: 5,
+    windowSeconds: 24 * 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  conversationActionByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  listMessagesByUser: Object.freeze({
+    limit: 120,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  sendMessageByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+} satisfies Record<string, RateLimitRule>);
+
 // Lua script nguyên tử cho Fixed Window: kiểm tra giới hạn, chỉ tăng bộ đếm khi còn hạn mức
 // và gán PEXPIRE ngay trong cùng 1 thao tác để tránh race condition hoặc key không có TTL.
 const FIXED_WINDOW_LUA = `

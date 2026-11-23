@@ -286,6 +286,12 @@ export function NotificationBell() {
                   const isDeleting = deletingIds.has(item.public_id);
                   const isMenuOpen = openMenuId === item.public_id;
                   const actorHref = `/u/${encodeURIComponent(item.actor.handle)}`;
+                  const primaryHref =
+                    item.type === 'message_request'
+                      ? item.entityPublicId
+                        ? `/messages?tab=pending&conversation=${encodeURIComponent(item.entityPublicId)}`
+                        : '/messages?tab=pending'
+                      : actorHref;
 
                   return (
                     <li
@@ -298,7 +304,7 @@ export function NotificationBell() {
                     >
                       <div className="flex items-start gap-3">
                         <Link
-                          href={actorHref}
+                          href={primaryHref}
                           onClick={() => handleItemNavigate(item)}
                           className="shrink-0"
                         >
@@ -311,7 +317,7 @@ export function NotificationBell() {
 
                         <div className="min-w-0 flex-1">
                           <Link
-                            href={actorHref}
+                            href={primaryHref}
                             onClick={() => handleItemNavigate(item)}
                             className="block text-sm leading-snug text-foreground"
                           >

@@ -10,6 +10,7 @@ import {
   Loader2,
   Lock,
   LogOut,
+  MessageCircle,
   MonitorSmartphone,
   Pencil,
   Search,
@@ -98,6 +99,7 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
   }
 
   const isHomeActive = pathname === '/';
+  const isMessagesActive = pathname.startsWith('/messages');
   const isOwnProfileActive = pathname === profilePath;
   const isSettingsActive = pathname.startsWith('/settings');
 
@@ -125,6 +127,19 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
             >
               <Home className="size-4" aria-hidden="true" />
               <span>Trang chủ</span>
+            </Link>
+
+            <Link
+              href="/messages"
+              className={cn(
+                'inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
+                isMessagesActive
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+              )}
+            >
+              <MessageCircle className="size-4" aria-hidden="true" />
+              <span>Tin nhắn</span>
             </Link>
 
             <Link
@@ -232,6 +247,16 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
                   >
                     <Home className="size-4 text-muted-foreground" aria-hidden="true" />
                     <span>Trang chủ</span>
+                  </Link>
+
+                  <Link
+                    href="/messages"
+                    role="menuitem"
+                    onClick={() => setMenuOpen(false)}
+                    className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted"
+                  >
+                    <MessageCircle className="size-4 text-muted-foreground" aria-hidden="true" />
+                    <span>Tin nhắn</span>
                   </Link>
 
                   <Link

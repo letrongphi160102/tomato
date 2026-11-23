@@ -3,7 +3,7 @@ import 'server-only';
 import { and, eq, inArray, or } from 'drizzle-orm';
 
 import { getDb, type Database, type DbExecutor } from '@/core/db';
-import { blocks, follows, users, type UserRow } from '@/core/db/schema';
+import { blocks, conversationParticipants, follows, users, type UserRow } from '@/core/db/schema';
 
 export type PresenceUserRecord = Pick<
   UserRow,
@@ -135,15 +135,49 @@ export class PresenceRepository {
   }
 
   /**
-   * Điểm mở rộng sẵn sàng cho M9 (Nhắn tin 1-1): trả tập người dùng có hội thoại ở Hộp thư chính (`primary`).
-   * Ở M8 bảng `conversations` chưa tồn tại nên mặc định trả tập rỗng.
+   * Trả tập người dùng có chung hội thoại 1-1 với `viewerId` mà CẢ HAI BÊN đều đang ở trạng thái Hộp thư chính (`primary`).
+   * Nếu hội thoại còn ở `pending` hoặc `declined`, tuyệt đối không cấp quyền xem trạng thái hoạt động.
    */
   async findPrimaryConversationPeerIds(
     viewerId: string,
     candidateIds: readonly string[],
+    executor: DbExecutor = this.getDefaultDb(),
   ): Promise<Set<string>> {
-    void viewerId;
-    void candidateIds;
-    return new Set();
+    const uniqueCandidates = Array.from(new Set(candidateIds)).filter((id) => id !== viewerId);
+    if (uniqueCandidates.length === 0) {
+      return new Set();
+    }
+
+    const viewerRows = await executor
+      .select({
+        conversationId: conversationParticipants.conversationId,
+      })
+      .from(conversationParticipants)
+      .where(
+        and(
+          eq(conversationParticipants.userId, viewerId),
+          eq(conversationParticipants.inboxState, 'primary'),
+        ),
+      );
+
+    if (viewerRows.length === 0) {
+      return new Set();
+    }
+
+    const convIds = viewerRows.map((r) => r.conversationId);
+    const peerRows = await executor
+      .select({
+        userId: conversationParticipants.userId,
+      })
+      .from(conversationParticipants)
+      .where(
+        and(
+          inArray(conversationParticipants.conversationId, convIds),
+          inArray(conversationParticipants.userId, uniqueCandidates),
+          eq(conversationParticipants.inboxState, 'primary'),
+        ),
+      );
+
+    return new Set(peerRows.map((r) => r.userId));
   }
 }
