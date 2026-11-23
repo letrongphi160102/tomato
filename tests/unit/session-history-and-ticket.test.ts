@@ -3,12 +3,12 @@ import { Writable } from 'node:stream';
 import type { ErrorEvent } from '@sentry/nextjs';
 import { describe, expect, it } from 'vitest';
 
-import { getUserInitials } from '@/components/layout/app-top-bar';
 import { generateSecureToken, hashScopedTokenSha256 } from '@/core/crypto/token';
 import type { SessionRow } from '@/core/db/schema';
 import { createLogger } from '@/core/logger';
 import { scrubSensitiveString, scrubSentryEvent } from '@/core/monitoring/sentry-scrub';
 import { sanitizeAuditMetadata } from '@/core/security/audit-log.service';
+import { getUserInitials } from '@/lib/user-display';
 import { SESSION_ONLINE_THRESHOLD_MS, classifyDeviceSessions } from '@/modules/auth';
 
 function makeSessionRow(overrides: Partial<SessionRow> = {}): SessionRow {

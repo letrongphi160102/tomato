@@ -16,27 +16,12 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { authFetch } from '@/lib/auth-client';
+import { getUserInitials } from '@/lib/user-display';
 import { cn } from '@/lib/utils';
 import type { PublicUserProfile } from '@/modules/auth/session.service';
 
 export interface AppTopBarProps {
   readonly user: PublicUserProfile;
-}
-
-export function getUserInitials(fullName: string): string {
-  const parts = fullName
-    .trim()
-    .split(/\s+/)
-    .filter((part) => part.length > 0);
-  if (parts.length === 0) {
-    return 'T';
-  }
-  if (parts.length === 1) {
-    return (parts[0] ?? 'T').slice(0, 2).toUpperCase();
-  }
-  const first = parts[0]?.[0] ?? '';
-  const last = parts[parts.length - 1]?.[0] ?? '';
-  return `${first}${last}`.toUpperCase() || 'T';
 }
 
 export function AppTopBar({ user }: AppTopBarProps) {

@@ -1,10 +1,15 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { POST as changePasswordPost } from '@/app/api/v1/auth/change-password/route';
 import { POST as verifyOtpPost } from '@/app/api/v1/auth/change-password/verify-otp/route';
+import { AuthenticatedHome } from '@/components/home/authenticated-home';
 import { LandingHero } from '@/components/home/landing-hero';
+import { AccountOverviewCard } from '@/components/settings/account-overview-card';
 import { getEnv, resetEnvCacheForTesting } from '@/core/config/env';
 import { hashPassword } from '@/core/crypto/password';
 import { generateSecureToken, hashScopedTokenSha256 } from '@/core/crypto/token';
@@ -400,5 +405,56 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
       React.createElement(LandingHero, { showDevHealthLink: true }),
     );
     expect(devHtml).toContain('/api/health');
+  });
+
+  it('AuthenticatedHome và AccountOverviewCard render sạch trên Server (không lộ "(active)", không gọi hàm tiện ích từ file "use client")', () => {
+    const sampleUser = {
+      public_id: '8a6f2d8b-c71b-4239-898a-b88f9f03c601',
+      username: 'minh_anh',
+      fullName: 'Nguyễn Minh Anh',
+      gender: 'female' as const,
+      status: 'active' as const,
+    };
+
+    const homeHtml = renderToStaticMarkup(
+      React.createElement(AuthenticatedHome, { user: sampleUser }),
+    );
+    expect(homeHtml).toContain('Nguyễn Minh Anh');
+    expect(homeHtml).toContain('NA');
+    expect(homeHtml).toContain('Kết nối và khám phá cùng nhau');
+
+    const accountHtml = renderToStaticMarkup(
+      React.createElement(AccountOverviewCard, { user: sampleUser }),
+    );
+    expect(accountHtml).toContain('Đang hoạt động');
+    expect(accountHtml).not.toContain('(active)');
+    expect(accountHtml).toContain('Nữ');
+
+    // Chống tái phát React #441: không file `'use client'` nào được export hàm helper thường (chữ đầu viết thường).
+    const walkTsFiles = (dir: string): string[] => {
+      const results: string[] = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...walkTsFiles(full));
+        } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+          results.push(full);
+        }
+      }
+      return results;
+    };
+
+    const clientHelperExports: string[] = [];
+    for (const filePath of walkTsFiles(join(process.cwd(), 'src'))) {
+      const content = readFileSync(filePath, 'utf8');
+      if (!/^['"]use client['"];?/m.test(content.trimStart())) {
+        continue;
+      }
+      const matches = content.matchAll(/^export\s+(?:async\s+)?function\s+([a-z][A-Za-z0-9_]*)/gm);
+      for (const match of matches) {
+        clientHelperExports.push(`${filePath}:${match[1]}`);
+      }
+    }
+    expect(clientHelperExports).toEqual([]);
   });
 });

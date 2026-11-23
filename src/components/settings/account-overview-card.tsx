@@ -1,9 +1,9 @@
 import Link from 'next/link';
 import { ArrowRight, CheckCircle2, KeyRound, MonitorSmartphone } from 'lucide-react';
 
-import { getUserInitials } from '@/components/layout/app-top-bar';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { getUserInitials } from '@/lib/user-display';
 import type { PublicUserProfile } from '@/modules/auth/session.service';
 
 export interface AccountOverviewCardProps {
