@@ -45,7 +45,7 @@ export function AccountOverviewCard({ user }: AccountOverviewCardProps) {
         <CardHeader className="border-b pb-4">
           <CardTitle className="text-lg">Tổng quan tài khoản</CardTitle>
           <CardDescription>
-            Thông tin cơ bản hiển thị trên tài khoản TOMATO của bạn.
+            Thông tin cơ bản hiển thị trên tài khoản Tomato của bạn.
           </CardDescription>
         </CardHeader>
 

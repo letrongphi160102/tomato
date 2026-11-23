@@ -278,7 +278,7 @@ export function VerifyEmailForm() {
               <Link href="/login">Đăng nhập ngay</Link>
             </Button>
             <Button asChild variant="outline" className="w-full">
-              <Link href="/">Về trang chủ TOMATO</Link>
+              <Link href="/">Về trang chủ Tomato</Link>
             </Button>
           </div>
         </CardContent>

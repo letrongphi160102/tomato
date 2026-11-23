@@ -8,6 +8,7 @@ import type { SessionRow } from '@/core/db/schema';
 import { createLogger } from '@/core/logger';
 import { scrubSensitiveString, scrubSentryEvent } from '@/core/monitoring/sentry-scrub';
 import { sanitizeAuditMetadata } from '@/core/security/audit-log.service';
+import { groupDevicesForDisplay } from '@/lib/device-groups';
 import { getUserInitials } from '@/lib/user-display';
 import { SESSION_ONLINE_THRESHOLD_MS, classifyDeviceSessions } from '@/modules/auth';
 
@@ -205,5 +206,102 @@ describe('Unit: Session Classification (Online/Offline/History), Scoped Ticket H
     expect(getUserInitials('Nguyễn Minh Anh')).toBe('NA');
     expect(getUserInitials('An')).toBe('AN');
     expect(getUserInitials('   ')).toBe('T');
+  });
+
+  it('groupDevicesForDisplay gom gọn thiết bị trùng (deviceInfo + ipAddress) kiểu Facebook nhưng giữ tách biệt khi khác IP', () => {
+    const grouped = groupDevicesForDisplay(
+      [
+        {
+          public_id: 'win-active-1',
+          deviceInfo: 'Chrome 157 / Windows 10/11',
+          ipAddress: '42.118.76.117',
+          createdAt: '2026-11-23T06:50:00.000Z',
+          lastUsedAt: '2026-11-23T06:50:00.000Z',
+          expiresAt: '2026-12-23T06:50:00.000Z',
+          isCurrent: true,
+          activityStatus: 'online',
+        },
+        {
+          public_id: 'win-active-2',
+          deviceInfo: 'Chrome 157 / Windows 10/11',
+          ipAddress: '42.118.76.117',
+          createdAt: '2026-11-23T06:40:00.000Z',
+          lastUsedAt: '2026-11-23T06:45:00.000Z',
+          expiresAt: '2026-12-23T06:40:00.000Z',
+          isCurrent: false,
+          activityStatus: 'offline',
+        },
+      ],
+      [
+        {
+          public_id: 'win-hist-1',
+          deviceInfo: 'Chrome 157 / Windows 10/11',
+          ipAddress: '42.118.76.117',
+          createdAt: '2026-11-23T06:34:00.000Z',
+          lastUsedAt: '2026-11-23T06:49:00.000Z',
+          endedAt: '2026-11-23T06:49:00.000Z',
+          historyStatus: 'logged_out',
+        },
+        {
+          public_id: 'win-hist-2',
+          deviceInfo: 'Chrome 157 / Windows 10/11',
+          ipAddress: '42.118.76.117',
+          createdAt: '2026-11-23T04:47:00.000Z',
+          lastUsedAt: '2026-11-23T06:34:00.000Z',
+          endedAt: '2026-11-23T06:34:00.000Z',
+          historyStatus: 'logged_out',
+        },
+        {
+          public_id: 'android-hist-1',
+          deviceInfo: 'Chrome 157 / Android 10',
+          ipAddress: '42.118.76.117',
+          createdAt: '2026-11-22T20:08:00.000Z',
+          lastUsedAt: '2026-11-22T20:10:00.000Z',
+          endedAt: '2026-11-22T20:10:00.000Z',
+          historyStatus: 'logged_out',
+        },
+        {
+          public_id: 'android-hist-2',
+          deviceInfo: 'Chrome 157 / Android 10',
+          ipAddress: '42.118.76.117',
+          createdAt: '2026-11-22T20:04:00.000Z',
+          lastUsedAt: '2026-11-22T20:07:00.000Z',
+          endedAt: '2026-11-22T20:07:00.000Z',
+          historyStatus: 'logged_out',
+        },
+        {
+          public_id: 'android-other-ip',
+          deviceInfo: 'Chrome 157 / Android 10',
+          ipAddress: '198.51.100.99',
+          createdAt: '2026-11-22T18:00:00.000Z',
+          lastUsedAt: '2026-11-22T18:10:00.000Z',
+          endedAt: '2026-11-22T18:10:00.000Z',
+          historyStatus: 'expired',
+        },
+      ],
+    );
+
+    // 2 phiên active cùng máy Windows gom thành 1 nhóm, đính kèm luôn 2 lần đăng nhập trước đó của máy Windows.
+    expect(grouped.activeGroups).toHaveLength(1);
+    expect(grouped.activeGroups[0]?.hasCurrent).toBe(true);
+    expect(grouped.activeGroups[0]?.activityStatus).toBe('online');
+    expect(grouped.activeGroups[0]?.sessions.map((s) => s.public_id)).toEqual([
+      'win-active-1',
+      'win-active-2',
+    ]);
+    expect(grouped.activeGroups[0]?.pastLogins.map((p) => p.public_id)).toEqual([
+      'win-hist-1',
+      'win-hist-2',
+    ]);
+
+    // Lịch sử thiết bị khác gom 2 lần Android cùng IP thành 1 nhóm và giữ riêng Android ở IP lạ (198.51.100.99).
+    expect(grouped.historyGroups).toHaveLength(2);
+    expect(grouped.historyGroups[0]?.ipAddress).toBe('42.118.76.117');
+    expect(grouped.historyGroups[0]?.entries.map((e) => e.public_id)).toEqual([
+      'android-hist-1',
+      'android-hist-2',
+    ]);
+    expect(grouped.historyGroups[1]?.ipAddress).toBe('198.51.100.99');
+    expect(grouped.historyGroups[1]?.latest.historyStatus).toBe('expired');
   });
 });

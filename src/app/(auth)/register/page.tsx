@@ -8,8 +8,8 @@ import { getEnv } from '@/core/config/env';
 import { resolveServerAuthState } from '@/modules/auth/server-session';
 
 export const metadata: Metadata = {
-  title: 'Đăng ký tài khoản — TOMATO',
-  description: 'Tạo tài khoản mới để kết nối và khám phá cùng nhau trên TOMATO.',
+  title: 'Đăng ký tài khoản — Tomato',
+  description: 'Tạo tài khoản mới để kết nối và khám phá cùng nhau trên Tomato.',
 };
 
 export const dynamic = 'force-dynamic';

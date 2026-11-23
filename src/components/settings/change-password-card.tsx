@@ -4,7 +4,6 @@ import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import {
   AlertCircle,
-  ArrowLeft,
   CheckCircle2,
   Clock,
   KeyRound,
@@ -20,7 +19,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { authFetch } from '@/lib/auth-client';
-import { cn } from '@/lib/utils';
 import {
   changePasswordInputSchema,
   verifyPasswordChangeOtpInputSchema,
@@ -52,7 +50,7 @@ interface ChangePasswordSuccessPayload {
   readonly message: string;
 }
 
-type WizardStep = 'verify_otp' | 'change_password';
+type ChangePasswordPhase = 'verify_otp' | 'update_password';
 type SubmitStatus = 'idle' | 'loading' | 'success' | 'error' | 'rate_limited';
 type FieldErrors = Partial<
   Record<'otpCode' | 'currentPassword' | 'newPassword' | 'confirmPassword', string>
@@ -75,9 +73,9 @@ function formatCountdown(totalSeconds: number): string {
 export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProps) {
   const router = useRouter();
 
-  const [step, setStep] = React.useState<WizardStep>('verify_otp');
+  const [phase, setPhase] = React.useState<ChangePasswordPhase>('verify_otp');
 
-  // Trạng thái Bước 1: Gửi & Xác minh mã 6 chữ số qua email
+  // Giai đoạn xác nhận email qua mã 6 chữ số
   const [otpCode, setOtpCode] = React.useState('');
   const [otpRequesting, setOtpRequesting] = React.useState(false);
   const [otpCooldownSeconds, setOtpCooldownSeconds] = React.useState(0);
@@ -86,7 +84,7 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
     readonly text: string;
   } | null>(null);
 
-  // Trạng thái Bước 2: Đổi mật khẩu (chỉ mở khóa sau khi server cấp HttpOnly ticket ở Bước 1)
+  // Giai đoạn đặt mật khẩu mới (chỉ mở sau khi server cấp HttpOnly ticket dùng một lần)
   const [ticketRemainingSeconds, setTicketRemainingSeconds] = React.useState(0);
   const [currentPassword, setCurrentPassword] = React.useState('');
   const [newPassword, setNewPassword] = React.useState('');
@@ -96,6 +94,23 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
   const [bannerMessage, setBannerMessage] = React.useState('');
   const [fieldErrors, setFieldErrors] = React.useState<FieldErrors>({});
   const [submitRetryAfterSeconds, setSubmitRetryAfterSeconds] = React.useState(0);
+
+  const resetToVerification = React.useCallback((warningMessage?: string) => {
+    setPhase('verify_otp');
+    setTicketRemainingSeconds(0);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setOtpCode('');
+    setFieldErrors({});
+    if (warningMessage) {
+      setStatus('error');
+      setBannerMessage(warningMessage);
+    } else {
+      setStatus('idle');
+      setBannerMessage('');
+    }
+  }, []);
 
   React.useEffect(() => {
     if (otpCooldownSeconds <= 0) {
@@ -124,14 +139,22 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
   }, [submitRetryAfterSeconds]);
 
   React.useEffect(() => {
-    if (step !== 'change_password' || ticketRemainingSeconds <= 0) {
+    if (phase !== 'update_password' || ticketRemainingSeconds <= 0) {
       return;
     }
     const timer = window.setInterval(() => {
-      setTicketRemainingSeconds((prev) => (prev <= 1 ? 0 : prev - 1));
+      setTicketRemainingSeconds((prev) => {
+        if (prev <= 1) {
+          resetToVerification(
+            'Thời gian xác nhận đã hết hạn. Vui lòng yêu cầu mã xác nhận mới qua email.',
+          );
+          return 0;
+        }
+        return prev - 1;
+      });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [step, ticketRemainingSeconds]);
+  }, [phase, ticketRemainingSeconds, resetToVerification]);
 
   const clearFieldError = React.useCallback((field: keyof FieldErrors) => {
     setFieldErrors((prev) => {
@@ -143,23 +166,6 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
       return next;
     });
   }, []);
-
-  function resetToStepOne(warningMessage?: string) {
-    setStep('verify_otp');
-    setTicketRemainingSeconds(0);
-    setCurrentPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
-    setOtpCode('');
-    setFieldErrors({});
-    if (warningMessage) {
-      setStatus('error');
-      setBannerMessage(warningMessage);
-    } else {
-      setStatus('idle');
-      setBannerMessage('');
-    }
-  }
 
   async function handleRequestOtp() {
     if (otpRequesting || otpCooldownSeconds > 0 || status === 'loading') {
@@ -266,7 +272,7 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
         setBannerMessage('');
         setStatus('idle');
         setTicketRemainingSeconds(ttlMinutes * 60);
-        setStep('change_password');
+        setPhase('update_password');
         return;
       }
 
@@ -361,7 +367,7 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
         setOtpCode('');
         setOtpNotice(null);
         setTicketRemainingSeconds(0);
-        setStep('verify_otp');
+        setPhase('verify_otp');
         setStatus('success');
         setBannerMessage(
           data.revokedOtherSessionsCount > 0
@@ -387,9 +393,9 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
         return;
       }
 
-      // Nếu ticket Bước 1 hết hạn, không hợp lệ hoặc đã vượt số lần sai mật khẩu hiện tại -> quay về Bước 1.
+      // Nếu ticket hết hạn, không hợp lệ hoặc đã vượt số lần sai mật khẩu hiện tại -> yêu cầu xác nhận email lại.
       if (response.status === 403) {
-        resetToStepOne(serverMessage);
+        resetToVerification(serverMessage);
         return;
       }
 
@@ -412,7 +418,7 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
 
   const isSubmitting = status === 'loading';
   const isBlocked = isSubmitting || submitRetryAfterSeconds > 0;
-  const isStepTwo = step === 'change_password';
+  const isUpdatingPassword = phase === 'update_password';
 
   return (
     <Card className="shadow-sm">
@@ -425,35 +431,6 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
           Xác nhận qua email trước khi đặt mật khẩu mới. Sau khi cập nhật, các thiết bị khác sẽ tự
           động được đăng xuất.
         </CardDescription>
-
-        <ol aria-label="Các bước đổi mật khẩu" className="mt-3 grid grid-cols-2 gap-2 pt-1">
-          <li
-            className={cn(
-              'flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium',
-              !isStepTwo
-                ? 'border-primary/40 bg-primary/10 text-primary'
-                : 'border-emerald-600/30 bg-emerald-50 text-emerald-800',
-            )}
-          >
-            <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-current/15 text-[11px] font-bold">
-              {isStepTwo ? '✓' : '1'}
-            </span>
-            <span className="truncate">Bước 1: Xác nhận email</span>
-          </li>
-          <li
-            className={cn(
-              'flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium',
-              isStepTwo
-                ? 'border-primary/40 bg-primary/10 text-primary'
-                : 'border-border bg-muted/40 text-muted-foreground',
-            )}
-          >
-            <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-current/15 text-[11px] font-bold">
-              2
-            </span>
-            <span className="truncate">Bước 2: Đặt mật khẩu mới</span>
-          </li>
-        </ol>
       </CardHeader>
 
       <CardContent className="space-y-5 pt-5">
@@ -503,7 +480,7 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
               <AlertCircle aria-hidden="true" />
               <div>
                 <AlertTitle>
-                  {isStepTwo ? 'Đổi mật khẩu chưa thành công' : 'Xác nhận chưa thành công'}
+                  {isUpdatingPassword ? 'Đổi mật khẩu chưa thành công' : 'Xác nhận chưa thành công'}
                 </AlertTitle>
                 <AlertDescription>{bannerMessage}</AlertDescription>
               </div>
@@ -511,7 +488,7 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
           ) : null}
         </div>
 
-        {!isStepTwo ? (
+        {!isUpdatingPassword ? (
           <div className="space-y-5">
             <div className="flex flex-col gap-3 rounded-xl border bg-muted/30 p-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-0.5 text-sm">
@@ -600,34 +577,12 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
           </div>
         ) : (
           <div className="space-y-5">
-            <div className="flex flex-col gap-2 rounded-xl border border-emerald-600/30 bg-emerald-50/80 p-3.5 text-sm text-emerald-900 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="size-4 shrink-0 text-emerald-700" aria-hidden="true" />
-                <span>
-                  {ticketRemainingSeconds > 0 ? (
-                    <>
-                      Đã xác nhận email. Thời gian còn lại để đổi mật khẩu:{' '}
-                      <strong className="font-mono">
-                        {formatCountdown(ticketRemainingSeconds)}
-                      </strong>
-                    </>
-                  ) : (
-                    'Thời gian xác nhận đã hết. Vui lòng quay lại Bước 1 để lấy mã mới.'
-                  )}
-                </span>
-              </div>
-
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => resetToStepOne()}
-                disabled={isSubmitting}
-                className="w-fit shrink-0 text-emerald-900 hover:bg-emerald-100"
-              >
-                <ArrowLeft className="size-3.5" aria-hidden="true" />
-                Quay lại Bước 1
-              </Button>
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-600/30 bg-emerald-50/80 p-3.5 text-sm text-emerald-900">
+              <CheckCircle2 className="size-4 shrink-0 text-emerald-700" aria-hidden="true" />
+              <span>
+                Đã xác nhận email. Thời gian còn lại để cập nhật mật khẩu:{' '}
+                <strong className="font-mono">{formatCountdown(ticketRemainingSeconds)}</strong>
+              </span>
             </div>
 
             <form onSubmit={handleChangePasswordSubmit} noValidate className="space-y-4">
@@ -730,7 +685,7 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
               </div>
 
               <div className="flex justify-end pt-1">
-                <Button type="submit" disabled={isBlocked || ticketRemainingSeconds === 0}>
+                <Button type="submit" disabled={isBlocked}>
                   {isSubmitting ? (
                     <>
                       <Loader2 className="size-4 animate-spin" aria-hidden="true" />

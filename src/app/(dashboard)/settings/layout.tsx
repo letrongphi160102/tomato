@@ -10,7 +10,7 @@ export default function SettingsLayout({ children }: Readonly<{ children: ReactN
           Cài đặt &amp; Quyền riêng tư
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Quản lý thông tin tài khoản, mật khẩu và các thiết bị đã đăng nhập vào TOMATO.
+          Quản lý thông tin tài khoản, mật khẩu và các thiết bị đã đăng nhập vào Tomato.
         </p>
       </div>
 

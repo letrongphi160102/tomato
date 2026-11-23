@@ -5,8 +5,8 @@ import type { ReactNode } from 'react';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'TOMATO — Mạng xã hội',
-  description: 'TOMATO — Kết nối và khám phá cùng nhau.',
+  title: 'Tomato - Kết nối và khám phá cùng nhau',
+  description: 'Tomato - Kết nối và khám phá cùng nhau.',
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

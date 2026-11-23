@@ -221,7 +221,7 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
   return (
     <Card className="w-full shadow-md">
       <CardHeader className="space-y-1 text-center">
-        <CardTitle>Đăng nhập vào TOMATO</CardTitle>
+        <CardTitle>Đăng nhập vào Tomato</CardTitle>
       </CardHeader>
 
       <CardContent>
@@ -383,7 +383,7 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
 
       <CardFooter className="flex flex-col gap-2 border-t pt-4 text-center text-sm text-muted-foreground">
         <p>
-          Chưa có tài khoản TOMATO?{' '}
+          Chưa có tài khoản Tomato?{' '}
           <Link href="/register" className="font-medium text-primary hover:underline">
             Đăng ký ngay
           </Link>

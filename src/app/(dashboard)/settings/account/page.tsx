@@ -5,8 +5,8 @@ import { AccountOverviewCard } from '@/components/settings/account-overview-card
 import { resolveServerAuthState } from '@/modules/auth/server-session';
 
 export const metadata: Metadata = {
-  title: 'Tổng quan tài khoản — TOMATO',
-  description: 'Xem và quản lý thông tin tài khoản TOMATO của bạn.',
+  title: 'Tổng quan tài khoản — Tomato',
+  description: 'Xem và quản lý thông tin tài khoản Tomato của bạn.',
 };
 
 export const dynamic = 'force-dynamic';

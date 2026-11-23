@@ -67,7 +67,7 @@ export function SilentSessionGate({ mode, nextPath = '/', fallback }: SilentSess
         <Loader2 className="size-6 animate-spin text-primary" aria-hidden="true" />
         <p className="text-sm text-muted-foreground">
           {phase === 'redirecting'
-            ? 'Đang đưa bạn vào TOMATO...'
+            ? 'Đang đưa bạn vào Tomato...'
             : 'Đang khôi phục phiên của bạn...'}
         </p>
       </div>

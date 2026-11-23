@@ -1,12 +1,15 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { metadata as loginPageMetadata } from '@/app/(auth)/login/page';
+import { metadata as devicesPageMetadata } from '@/app/(dashboard)/settings/devices/page';
 import { POST as changePasswordPost } from '@/app/api/v1/auth/change-password/route';
 import { POST as verifyOtpPost } from '@/app/api/v1/auth/change-password/verify-otp/route';
+import { metadata as rootMetadata } from '@/app/layout';
 import { AuthenticatedHome } from '@/components/home/authenticated-home';
 import { LandingHero } from '@/components/home/landing-hero';
 import { AccountOverviewCard } from '@/components/settings/account-overview-card';
@@ -390,11 +393,12 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
     expect(ticketCookie).toContain('Max-Age=600');
   });
 
-  it('LandingHero hiển thị đúng slogan "Kết nối và khám phá cùng nhau", không còn văn bản kỹ thuật và ẩn hoàn toàn /api/health khi showDevHealthLink=false (Production)', () => {
+  it('LandingHero dùng logo transparent PNG Tomato, đúng slogan "Kết nối và khám phá cùng nhau", favicon & metadata đúng chuẩn và ẩn /api/health ở Production', () => {
     const prodHtml = renderToStaticMarkup(
       React.createElement(LandingHero, { showDevHealthLink: false }),
     );
-    expect(prodHtml).toContain('TOMATO');
+    expect(prodHtml).toContain('Tomato');
+    expect(prodHtml).toContain('/images/brand/tomato-logo.png');
     expect(prodHtml).toContain('Kết nối và khám phá cùng nhau');
     expect(prodHtml).not.toContain('/api/health');
     expect(prodHtml).not.toContain('Giai đoạn 1');
@@ -405,6 +409,22 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
       React.createElement(LandingHero, { showDevHealthLink: true }),
     );
     expect(devHtml).toContain('/api/health');
+
+    // Tiêu đề tab trang chủ và các trang khác đổi TOMATO -> Tomato, tồn tại icon & logo transparent.
+    expect(rootMetadata.title).toBe('Tomato - Kết nối và khám phá cùng nhau');
+    expect(loginPageMetadata.title).toBe('Đăng nhập — Tomato');
+    expect(devicesPageMetadata.title).toBe('Thiết bị đăng nhập — Tomato');
+    expect(existsSync(join(process.cwd(), 'src/app/icon.png'))).toBe(true);
+    expect(existsSync(join(process.cwd(), 'public/images/brand/tomato-logo.png'))).toBe(true);
+
+    // Giao diện đổi mật khẩu không còn thanh 2 tab Bước 1/Bước 2 hay nút "Quay lại Bước 1".
+    const changePasswordSource = readFileSync(
+      join(process.cwd(), 'src/components/settings/change-password-card.tsx'),
+      'utf8',
+    );
+    expect(changePasswordSource).not.toContain('Bước 1:');
+    expect(changePasswordSource).not.toContain('Bước 2:');
+    expect(changePasswordSource).not.toContain('Quay lại Bước 1');
   });
 
   it('AuthenticatedHome và AccountOverviewCard render sạch trên Server (không lộ "(active)", không gọi hàm tiện ích từ file "use client")', () => {

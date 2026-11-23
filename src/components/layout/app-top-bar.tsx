@@ -14,6 +14,7 @@ import {
   User,
 } from 'lucide-react';
 
+import { TomatoLogo } from '@/components/brand/tomato-logo';
 import { Button } from '@/components/ui/button';
 import { authFetch } from '@/lib/auth-client';
 import { getUserInitials } from '@/lib/user-display';
@@ -86,12 +87,10 @@ export function AppTopBar({ user }: AppTopBarProps) {
         <div className="flex items-center gap-6">
           <Link
             href="/"
-            className="inline-flex items-center gap-2 rounded-md px-1 py-1 text-xl font-bold tracking-tight text-primary transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Trang chủ Tomato"
+            className="inline-flex items-center rounded-md px-1 py-1 transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-xs font-extrabold text-primary-foreground">
-              T
-            </span>
-            <span>TOMATO</span>
+            <TomatoLogo size="sm" priority />
           </Link>
 
           <nav aria-label="Điều hướng chính" className="hidden items-center gap-1 sm:flex">

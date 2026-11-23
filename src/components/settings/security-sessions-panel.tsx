@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Globe,
   History,
   Laptop,
@@ -20,31 +22,16 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { authFetch } from '@/lib/auth-client';
-
-interface SessionItemPayload {
-  readonly public_id: string;
-  readonly deviceInfo: string;
-  readonly ipAddress: string;
-  readonly createdAt: string;
-  readonly lastUsedAt: string;
-  readonly expiresAt: string;
-  readonly isCurrent: boolean;
-  readonly activityStatus?: 'online' | 'offline';
-}
-
-interface SessionHistoryItemPayload {
-  readonly public_id: string;
-  readonly deviceInfo: string;
-  readonly ipAddress: string;
-  readonly createdAt: string;
-  readonly lastUsedAt: string;
-  readonly endedAt: string;
-  readonly historyStatus: 'logged_out' | 'expired';
-}
+import {
+  groupDevicesForDisplay,
+  type ActiveDeviceGroup,
+  type DeviceHistoryRecord,
+  type DeviceSessionRecord,
+} from '@/lib/device-groups';
 
 interface SessionsResponsePayload {
-  readonly sessions: readonly SessionItemPayload[];
-  readonly history?: readonly SessionHistoryItemPayload[];
+  readonly sessions: readonly DeviceSessionRecord[];
+  readonly history?: readonly DeviceHistoryRecord[];
 }
 
 interface ApiErrorPayload {
@@ -92,20 +79,33 @@ function renderDeviceIcon(deviceInfo: string, muted = false) {
 export function SecuritySessionsPanel() {
   const router = useRouter();
 
-  const [sessions, setSessions] = React.useState<readonly SessionItemPayload[]>([]);
-  const [history, setHistory] = React.useState<readonly SessionHistoryItemPayload[]>([]);
+  const [sessions, setSessions] = React.useState<readonly DeviceSessionRecord[]>([]);
+  const [history, setHistory] = React.useState<readonly DeviceHistoryRecord[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
 
-  const [revokingSessionId, setRevokingSessionId] = React.useState<string | null>(null);
+  const [revokingKey, setRevokingKey] = React.useState<string | null>(null);
   const [confirmRevokeAll, setConfirmRevokeAll] = React.useState(false);
   const [revokingAll, setRevokingAll] = React.useState(false);
+  const [expandedKeys, setExpandedKeys] = React.useState<ReadonlySet<string>>(() => new Set());
 
   const [notice, setNotice] = React.useState<{
     readonly variant: 'success' | 'destructive';
     readonly title: string;
     readonly message: string;
   } | null>(null);
+
+  const toggleExpanded = React.useCallback((key: string) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
 
   const fetchSessions = React.useCallback(async () => {
     const sessionsRes = await authFetch('/api/v1/auth/sessions', { method: 'GET' });
@@ -206,12 +206,12 @@ export function SecuritySessionsPanel() {
     }
   }
 
-  async function handleRevokeSession(sessionItem: SessionItemPayload) {
-    if (revokingSessionId || revokingAll) {
+  async function handleRevokeSingleSession(sessionItem: DeviceSessionRecord) {
+    if (revokingKey || revokingAll) {
       return;
     }
 
-    setRevokingSessionId(sessionItem.public_id);
+    setRevokingKey(sessionItem.public_id);
     setNotice(null);
 
     try {
@@ -239,7 +239,6 @@ export function SecuritySessionsPanel() {
           message:
             data.message ?? `Đã đăng xuất "${sessionItem.deviceInfo}" khỏi tài khoản của bạn.`,
         });
-        // Tải lại danh sách để thiết bị vừa đăng xuất chuyển ngay sang mục Lịch sử đăng nhập gần đây.
         const refreshed = await fetchSessions();
         if (refreshed.kind === 'ok') {
           setSessions(refreshed.sessions);
@@ -262,12 +261,78 @@ export function SecuritySessionsPanel() {
         message: 'Không thể đăng xuất thiết bị lúc này. Vui lòng thử lại.',
       });
     } finally {
-      setRevokingSessionId(null);
+      setRevokingKey(null);
+    }
+  }
+
+  async function handleRevokeDeviceGroup(group: ActiveDeviceGroup) {
+    if (revokingKey || revokingAll) {
+      return;
+    }
+
+    // Nếu nhóm chứa thiết bị hiện tại -> chỉ đăng xuất phiên hiện tại (giống nút Đăng xuất trực tiếp).
+    if (group.hasCurrent) {
+      await handleRevokeSingleSession(group.primary);
+      return;
+    }
+
+    // Nếu thiết bị khác có 1 phiên -> gọi đăng xuất phiên đơn.
+    if (group.sessions.length === 1) {
+      await handleRevokeSingleSession(group.primary);
+      return;
+    }
+
+    // Nếu cùng một thiết bị khác mở nhiều phiên song song -> đăng xuất sạch tất cả các phiên trong nhóm.
+    setRevokingKey(group.groupKey);
+    setNotice(null);
+
+    try {
+      let revokedCount = 0;
+      for (const item of group.sessions) {
+        const res = await authFetch(`/api/v1/auth/sessions/${encodeURIComponent(item.public_id)}`, {
+          method: 'DELETE',
+        });
+        if (res.status === 401) {
+          router.replace('/login?next=/settings/devices');
+          return;
+        }
+        if (res.ok) {
+          revokedCount += 1;
+        }
+      }
+
+      if (revokedCount > 0) {
+        setNotice({
+          variant: 'success',
+          title: 'Đã đăng xuất thiết bị',
+          message: `Đã đăng xuất toàn bộ ${revokedCount} phiên trên "${group.deviceInfo}".`,
+        });
+      } else {
+        setNotice({
+          variant: 'destructive',
+          title: 'Không thể đăng xuất thiết bị',
+          message: 'Các phiên trên thiết bị này đã kết thúc trước đó.',
+        });
+      }
+
+      const refreshed = await fetchSessions();
+      if (refreshed.kind === 'ok') {
+        setSessions(refreshed.sessions);
+        setHistory(refreshed.history);
+      }
+    } catch {
+      setNotice({
+        variant: 'destructive',
+        title: 'Lỗi kết nối máy chủ',
+        message: 'Không thể đăng xuất thiết bị lúc này. Vui lòng thử lại.',
+      });
+    } finally {
+      setRevokingKey(null);
     }
   }
 
   async function handleRevokeAllOtherSessions() {
-    if (revokingAll || revokingSessionId) {
+    if (revokingAll || revokingKey) {
       return;
     }
 
@@ -324,6 +389,11 @@ export function SecuritySessionsPanel() {
     }
   }
 
+  const { activeGroups, historyGroups } = React.useMemo(
+    () => groupDevicesForDisplay(sessions, history),
+    [sessions, history],
+  );
+
   if (loading) {
     return (
       <Card className="shadow-sm">
@@ -360,7 +430,9 @@ export function SecuritySessionsPanel() {
           <div>
             <div className="flex items-center gap-2">
               <MonitorSmartphone className="size-5 text-primary" aria-hidden="true" />
-              <CardTitle className="text-lg">Thiết bị đang đăng nhập ({sessions.length})</CardTitle>
+              <CardTitle className="text-lg">
+                Thiết bị đang đăng nhập ({activeGroups.length})
+              </CardTitle>
             </div>
             <CardDescription className="mt-1">
               Nếu bạn thấy thiết bị không quen thuộc, hãy đăng xuất thiết bị đó ngay để bảo vệ tài
@@ -409,7 +481,7 @@ export function SecuritySessionsPanel() {
                       Đang đăng xuất...
                     </>
                   ) : (
-                    `Xác nhận (${otherSessionsCount} thiết bị)`
+                    `Xác nhận (${otherSessionsCount} phiên)`
                   )}
                 </Button>
                 <Button
@@ -427,82 +499,188 @@ export function SecuritySessionsPanel() {
         </CardHeader>
 
         <CardContent className="divide-y pt-2">
-          {sessions.length === 0 ? (
+          {activeGroups.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Hiện chưa có thiết bị nào đang đăng nhập.
             </p>
           ) : (
-            sessions.map((item) => {
-              const isItemRevoking = revokingSessionId === item.public_id;
-              const isOnline = item.isCurrent || item.activityStatus !== 'offline';
+            activeGroups.map((group) => {
+              const expandId = `active:${group.groupKey}`;
+              const isExpanded = expandedKeys.has(expandId);
+              const hasDetails = group.sessions.length > 1 || group.pastLogins.length > 0;
+              const isGroupRevoking =
+                revokingKey === group.groupKey || revokingKey === group.primary.public_id;
+              const isOnline = group.activityStatus === 'online';
+
               return (
-                <div
-                  key={item.public_id}
-                  className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-                      {renderDeviceIcon(item.deviceInfo)}
-                    </div>
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="font-medium text-foreground">{item.deviceInfo}</p>
-                        {item.isCurrent ? (
-                          <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                            Thiết bị hiện tại
+                <div key={group.groupKey} className="py-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                        {renderDeviceIcon(group.deviceInfo)}
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-foreground">{group.deviceInfo}</p>
+                          {group.hasCurrent ? (
+                            <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                              Thiết bị hiện tại
+                            </span>
+                          ) : null}
+                          {group.sessions.length > 1 ? (
+                            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              {group.sessions.length} phiên đang mở
+                            </span>
+                          ) : null}
+                          {isOnline ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
+                              <span
+                                aria-hidden="true"
+                                className="size-1.5 rounded-full bg-emerald-600"
+                              />
+                              Đang hoạt động
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              <span
+                                aria-hidden="true"
+                                className="size-1.5 rounded-full bg-muted-foreground/60"
+                              />
+                              Ngoại tuyến
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                          <span>IP: {formatDisplayIp(group.ipAddress)}</span>
+                          <span>
+                            Đăng nhập: {formatVietnameseDateTime(group.primary.createdAt)}
                           </span>
+                          <span>
+                            {isOnline
+                              ? `Hoạt động gần nhất: ${formatVietnameseDateTime(group.primary.lastUsedAt)}`
+                              : `Hoạt động lần cuối: ${formatVietnameseDateTime(group.primary.lastUsedAt)}`}
+                          </span>
+                        </div>
+
+                        {hasDetails ? (
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(expandId)}
+                            aria-expanded={isExpanded}
+                            className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                          >
+                            {isExpanded ? (
+                              <ChevronDown className="size-3.5" aria-hidden="true" />
+                            ) : (
+                              <ChevronRight className="size-3.5" aria-hidden="true" />
+                            )}
+                            <span>
+                              {group.sessions.length > 1
+                                ? `Xem chi tiết ${group.sessions.length} phiên`
+                                : `Xem ${group.pastLogins.length} lần đăng nhập trước trên thiết bị này`}
+                            </span>
+                          </button>
                         ) : null}
-                        {isOnline ? (
-                          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
-                            <span
-                              aria-hidden="true"
-                              className="size-1.5 rounded-full bg-emerald-600"
-                            />
-                            Đang hoạt động
-                          </span>
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 items-center justify-end">
+                      <Button
+                        type="button"
+                        variant={group.hasCurrent ? 'outline' : 'secondary'}
+                        size="sm"
+                        disabled={isGroupRevoking || revokingAll || Boolean(revokingKey)}
+                        onClick={() => void handleRevokeDeviceGroup(group)}
+                      >
+                        {isGroupRevoking ? (
+                          <>
+                            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                            Đang đăng xuất...
+                          </>
                         ) : (
-                          <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                            <span
-                              aria-hidden="true"
-                              className="size-1.5 rounded-full bg-muted-foreground/60"
-                            />
-                            Ngoại tuyến
-                          </span>
+                          <>
+                            <LogOut className="size-3.5" aria-hidden="true" />
+                            Đăng xuất
+                          </>
                         )}
-                      </div>
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                        <span>IP: {formatDisplayIp(item.ipAddress)}</span>
-                        <span>Đăng nhập: {formatVietnameseDateTime(item.createdAt)}</span>
-                        <span>
-                          {isOnline
-                            ? `Hoạt động gần nhất: ${formatVietnameseDateTime(item.lastUsedAt)}`
-                            : `Hoạt động lần cuối: ${formatVietnameseDateTime(item.lastUsedAt)}`}
-                        </span>
-                      </div>
+                      </Button>
                     </div>
                   </div>
 
-                  <div className="flex shrink-0 items-center justify-end">
-                    <Button
-                      type="button"
-                      variant={item.isCurrent ? 'outline' : 'secondary'}
-                      size="sm"
-                      disabled={isItemRevoking || revokingAll}
-                      onClick={() => void handleRevokeSession(item)}
-                    >
-                      {isItemRevoking ? (
-                        <>
-                          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                          Đang đăng xuất...
-                        </>
-                      ) : (
-                        <>
-                          <LogOut className="size-3.5" aria-hidden="true" />
-                          Đăng xuất
-                        </>
-                      )}
-                    </Button>
-                  </div>
+                  {isExpanded && hasDetails ? (
+                    <div className="mt-3 ml-0 space-y-2 rounded-lg border bg-muted/25 p-3 sm:ml-13">
+                      {group.sessions.length > 1 ? (
+                        <div className="space-y-1.5">
+                          <p className="text-xs font-medium text-foreground">
+                            Các phiên đang hoạt động trên thiết bị này
+                          </p>
+                          {group.sessions.map((sessionItem) => {
+                            const isRowRevoking = revokingKey === sessionItem.public_id;
+                            return (
+                              <div
+                                key={sessionItem.public_id}
+                                className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-background/80 px-2.5 py-2 text-xs"
+                              >
+                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+                                  <span className="font-medium text-foreground">
+                                    {sessionItem.isCurrent ? 'Phiên hiện tại' : 'Phiên khác'}
+                                  </span>
+                                  <span>
+                                    Đăng nhập: {formatVietnameseDateTime(sessionItem.createdAt)}
+                                  </span>
+                                  <span>
+                                    Gần nhất: {formatVietnameseDateTime(sessionItem.lastUsedAt)}
+                                  </span>
+                                </div>
+                                {!sessionItem.isCurrent ? (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={isRowRevoking || revokingAll || Boolean(revokingKey)}
+                                    onClick={() => void handleRevokeSingleSession(sessionItem)}
+                                    className="h-7 px-2 text-xs"
+                                  >
+                                    {isRowRevoking ? (
+                                      <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                                    ) : (
+                                      <LogOut className="size-3" aria-hidden="true" />
+                                    )}
+                                    Đăng xuất
+                                  </Button>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+
+                      {group.pastLogins.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <p className="text-xs font-medium text-foreground">
+                            Lần đăng nhập trước đây trên thiết bị này ({group.pastLogins.length})
+                          </p>
+                          <ul className="space-y-1">
+                            {group.pastLogins.map((entry) => (
+                              <li
+                                key={entry.public_id}
+                                className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-md bg-background/70 px-2.5 py-1.5 text-xs text-muted-foreground"
+                              >
+                                <span>Đăng nhập: {formatVietnameseDateTime(entry.createdAt)}</span>
+                                <span>
+                                  {entry.historyStatus === 'logged_out'
+                                    ? 'Đã đăng xuất:'
+                                    : 'Hết hạn:'}{' '}
+                                  {formatVietnameseDateTime(entry.endedAt)}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               );
             })
@@ -514,47 +692,97 @@ export function SecuritySessionsPanel() {
         <CardHeader className="border-b pb-4">
           <div className="flex items-center gap-2">
             <History className="size-5 text-muted-foreground" aria-hidden="true" />
-            <CardTitle className="text-lg">Lịch sử đăng nhập gần đây ({history.length})</CardTitle>
+            <CardTitle className="text-lg">
+              Lịch sử đăng nhập trên thiết bị khác ({historyGroups.length})
+            </CardTitle>
           </div>
           <CardDescription>
-            Các thiết bị đã đăng xuất hoặc hết thời hạn truy cập trước đó.
+            Các thiết bị khác đã đăng xuất hoặc hết thời hạn truy cập gần đây.
           </CardDescription>
         </CardHeader>
 
         <CardContent className="divide-y pt-2">
-          {history.length === 0 ? (
+          {historyGroups.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              Chưa có lịch sử đăng nhập nào khác.
+              Chưa có lịch sử đăng nhập trên thiết bị nào khác.
             </p>
           ) : (
-            history.map((item) => (
-              <div
-                key={item.public_id}
-                className="flex flex-col gap-2 py-4 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
-                    {renderDeviceIcon(item.deviceInfo, true)}
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-medium text-foreground">{item.deviceInfo}</p>
-                      <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                        {item.historyStatus === 'logged_out' ? 'Đã đăng xuất' : 'Đã hết hạn'}
-                      </span>
+            historyGroups.map((group) => {
+              const expandId = `history:${group.groupKey}`;
+              const isExpanded = expandedKeys.has(expandId);
+              const hasMultiple = group.entries.length > 1;
+              const latest = group.latest;
+
+              return (
+                <div key={group.groupKey} className="py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                        {renderDeviceIcon(group.deviceInfo, true)}
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-foreground">{group.deviceInfo}</p>
+                          <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                            {latest.historyStatus === 'logged_out' ? 'Đã đăng xuất' : 'Đã hết hạn'}
+                          </span>
+                          {hasMultiple ? (
+                            <span className="inline-flex items-center rounded-full bg-muted/80 px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              {group.entries.length} lần
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                          <span>IP: {formatDisplayIp(group.ipAddress)}</span>
+                          <span>Đăng nhập: {formatVietnameseDateTime(latest.createdAt)}</span>
+                          <span>
+                            {latest.historyStatus === 'logged_out'
+                              ? 'Đăng xuất lúc:'
+                              : 'Hết hạn lúc:'}{' '}
+                            {formatVietnameseDateTime(latest.endedAt)}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                      <span>IP: {formatDisplayIp(item.ipAddress)}</span>
-                      <span>Đăng nhập: {formatVietnameseDateTime(item.createdAt)}</span>
-                      <span>
-                        {item.historyStatus === 'logged_out' ? 'Đăng xuất lúc:' : 'Hết hạn lúc:'}{' '}
-                        {formatVietnameseDateTime(item.endedAt)}
-                      </span>
-                    </div>
+
+                    {hasMultiple ? (
+                      <button
+                        type="button"
+                        onClick={() => toggleExpanded(expandId)}
+                        aria-expanded={isExpanded}
+                        aria-label={`Xem ${group.entries.length} lần đăng nhập trên ${group.deviceInfo}`}
+                        className="mt-1 inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      >
+                        {isExpanded ? (
+                          <ChevronDown className="size-4" aria-hidden="true" />
+                        ) : (
+                          <ChevronRight className="size-4" aria-hidden="true" />
+                        )}
+                      </button>
+                    ) : null}
                   </div>
+
+                  {isExpanded && hasMultiple ? (
+                    <ul className="mt-3 ml-0 space-y-1.5 rounded-lg border bg-muted/25 p-3 sm:ml-13">
+                      {group.entries.map((entry) => (
+                        <li
+                          key={entry.public_id}
+                          className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-md bg-background/80 px-2.5 py-1.5 text-xs text-muted-foreground"
+                        >
+                          <span>Đăng nhập: {formatVietnameseDateTime(entry.createdAt)}</span>
+                          <span>
+                            {entry.historyStatus === 'logged_out'
+                              ? 'Đăng xuất lúc:'
+                              : 'Hết hạn lúc:'}{' '}
+                            {formatVietnameseDateTime(entry.endedAt)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </CardContent>
       </Card>

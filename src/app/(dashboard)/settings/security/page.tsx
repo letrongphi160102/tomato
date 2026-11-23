@@ -7,8 +7,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const metadata: Metadata = {
-  title: 'Mật khẩu & Bảo mật — TOMATO',
-  description: 'Cập nhật mật khẩu và giữ an toàn cho tài khoản TOMATO của bạn.',
+  title: 'Mật khẩu & Bảo mật — Tomato',
+  description: 'Cập nhật mật khẩu và giữ an toàn cho tài khoản Tomato của bạn.',
 };
 
 export const dynamic = 'force-dynamic';

@@ -49,7 +49,7 @@ export function AuthenticatedHome({ user }: AuthenticatedHomeProps) {
               <Sparkles className="size-5 text-primary" aria-hidden="true" />
               <CardTitle className="text-lg">Bảng tin của bạn</CardTitle>
             </div>
-            <CardDescription>Kết nối và khám phá cùng nhau trên TOMATO.</CardDescription>
+            <CardDescription>Kết nối và khám phá cùng nhau trên Tomato.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="rounded-xl border border-dashed bg-muted/30 px-6 py-10 text-center">

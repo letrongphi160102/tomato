@@ -9,8 +9,8 @@ import { sanitizeRedirectPath } from '@/lib/auth-client';
 import { resolveServerAuthState } from '@/modules/auth/server-session';
 
 export const metadata: Metadata = {
-  title: 'Đăng nhập — TOMATO',
-  description: 'Đăng nhập vào tài khoản mạng xã hội TOMATO.',
+  title: 'Đăng nhập — Tomato',
+  description: 'Đăng nhập vào tài khoản mạng xã hội Tomato.',
 };
 
 export const dynamic = 'force-dynamic';

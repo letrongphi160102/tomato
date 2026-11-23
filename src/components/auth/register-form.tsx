@@ -223,7 +223,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
   return (
     <Card className="w-full shadow-md">
       <CardHeader className="space-y-1 text-center">
-        <CardTitle>Tạo tài khoản TOMATO</CardTitle>
+        <CardTitle>Tạo tài khoản Tomato</CardTitle>
       </CardHeader>
 
       <CardContent>
@@ -389,7 +389,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
               </p>
             ) : (
               <p id="dateOfBirth-hint" className="text-xs text-muted-foreground">
-                Bạn phải đủ từ 13 tuổi trở lên để sử dụng TOMATO.
+                Bạn phải đủ từ 13 tuổi trở lên để sử dụng Tomato.
               </p>
             )}
           </div>
@@ -483,7 +483,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
                 Tôi đồng ý với{' '}
                 <span className="font-medium text-foreground">Điều khoản sử dụng</span> và{' '}
                 <span className="font-medium text-foreground">Chính sách quyền riêng tư</span> của
-                TOMATO.
+                Tomato.
               </Label>
             </div>
             {fieldErrors.acceptedTerms ? (
@@ -529,7 +529,7 @@ export function RegisterForm({ turnstileSiteKey, cspNonce }: RegisterFormProps) 
 
       <CardFooter className="flex flex-col gap-2 border-t pt-4 text-center text-sm text-muted-foreground">
         <p>
-          Đã có tài khoản TOMATO?{' '}
+          Đã có tài khoản Tomato?{' '}
           <Link href="/login" className="font-medium text-primary hover:underline">
             Đăng nhập ngay
           </Link>

@@ -3,8 +3,8 @@ import type { Metadata } from 'next';
 import { ResetPasswordForm } from '@/components/auth/reset-password-form';
 
 export const metadata: Metadata = {
-  title: 'Đặt lại mật khẩu — TOMATO',
-  description: 'Tạo mật khẩu mới cho tài khoản TOMATO của bạn.',
+  title: 'Đặt lại mật khẩu — Tomato',
+  description: 'Tạo mật khẩu mới cho tài khoản Tomato của bạn.',
   // Lớp phòng thủ bổ sung bên cạnh HTTP header `Referrer-Policy: no-referrer` từ proxy.ts.
   referrer: 'no-referrer',
 };

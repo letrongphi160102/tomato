@@ -212,7 +212,7 @@ export function ForgotPasswordForm() {
       <CardHeader className="space-y-1 text-center">
         <CardTitle>Quên mật khẩu</CardTitle>
         <CardDescription>
-          Nhập địa chỉ email tài khoản TOMATO của bạn để nhận liên kết đặt lại mật khẩu (có hiệu lực
+          Nhập địa chỉ email tài khoản Tomato của bạn để nhận liên kết đặt lại mật khẩu (có hiệu lực
           trong 15 phút).
         </CardDescription>
       </CardHeader>
