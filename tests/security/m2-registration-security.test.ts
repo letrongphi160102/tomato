@@ -696,4 +696,86 @@ describe('Security M2: CSRF/Origin Guard, Anti-Enumeration, Rate-Limit-First & P
         err.details.some((d) => d.field === 'username'),
     );
   });
+
+  it('TOCTOU Race Condition giữa findEmailIdentityWithUser và findUserByUsername: khi request đồng thời cùng (email, username) vừa commit ở giữa 2 lệnh đọc, vẫn trả 202 thay vì 409', async () => {
+    const now = new Date();
+    const pendingWinnerUser = {
+      id: '01950000-0000-7000-8000-000000000999',
+      publicId: 'd5c8043b-4661-4c8b-848f-f520c1adb0f9',
+      username: 'race_handle',
+      handle: 'race_handle',
+      handleNormalized: 'race_handle',
+      fullName: 'Race Winner',
+      gender: 'other' as const,
+      dateOfBirth: '1996-06-15',
+      status: 'pending_verification' as const,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+    };
+
+    // Lần gọi 1 (trước khi request A commit): trả null.
+    // Lần gọi 2 (ngay sau khi findUserByUsername thấy user vừa được request A commit): trả user + identity cùng email.
+    const findEmailSpy = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({
+        user: pendingWinnerUser,
+        identity: {
+          id: '01950000-0000-7000-8000-000000000998',
+          userId: pendingWinnerUser.id,
+          provider: 'email_password',
+          identifierNormalized: 'race@tomato.test',
+          passwordHash: 'hash',
+          pepperVersion: 1,
+          verifiedAt: null,
+          failedLoginAttempts: 0,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+    const service = new AuthService({
+      rateLimiter: {
+        consume: vi.fn().mockResolvedValue({
+          allowed: true,
+          limit: 5,
+          remaining: 4,
+          resetAt: Date.now() + 60_000,
+          retryAfterSeconds: 0,
+        }),
+      } as unknown as RateLimiter,
+      captchaProvider: {
+        provider: 'stub',
+        verify: vi.fn().mockResolvedValue({ success: true, errorCodes: [] }),
+      },
+      repository: {
+        findEmailIdentityWithUser: findEmailSpy,
+        findUserByUsername: vi.fn().mockResolvedValue(pendingWinnerUser),
+      } as unknown as AuthRepository,
+      emailProvider: { provider: 'memory', send: vi.fn() },
+      auditLogService: { record: vi.fn() } as unknown as AuditLogService,
+      appUrl: allowedOrigin,
+    });
+
+    const result = await service.register(
+      {
+        email: 'race@tomato.test',
+        password: 'strong password anti race 2026',
+        fullName: 'Race Winner',
+        username: 'race_handle',
+        gender: 'other',
+        dateOfBirth: '1996-06-15',
+        acceptedTerms: true,
+        captchaToken: 'XXXX.DUMMY.TOKEN.XXXX',
+      },
+      { ipAddress: '198.51.100.55', rateLimitIpKey: '198.51.100.55', userAgent: 'Vitest' },
+    );
+
+    expect(result).toEqual({
+      message: AUTH_MESSAGES.registerAccepted,
+      verificationRequired: true,
+    });
+    expect(findEmailSpy).toHaveBeenCalledTimes(2);
+  });
 });

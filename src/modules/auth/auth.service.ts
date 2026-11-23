@@ -324,6 +324,18 @@ export class AuthService {
 
     const existingUsername = await this.repository.findUserByUsername(input.username);
     if (existingUsername) {
+      // Chống TOCTOU race condition khi 2 request đăng ký cùng (email, username) chạy song song:
+      // nếu request A vừa commit ngay trong khoảng giữa `findEmailIdentityWithUser` và `findUserByUsername`
+      // của request B, kiểm tra lại theo email để xử lý đúng theo luồng đăng ký trùng đồng thời (trả 202 cho pending).
+      const concurrentByEmail = await this.repository.findEmailIdentityWithUser(input.email);
+      if (concurrentByEmail) {
+        await this.handleConcurrentDuplicateRegistration(input.email, context, concurrentByEmail);
+        return {
+          message: AUTH_MESSAGES.registerAccepted,
+          verificationRequired: true,
+        };
+      }
+
       throw new AuthDomainError({
         status: 409,
         code: 'CONFLICT',
@@ -2501,8 +2513,12 @@ export class AuthService {
   private async handleConcurrentDuplicateRegistration(
     emailNormalized: string,
     context: RequestClientContext,
+    preloadedWinner?: IdentityWithUser | null,
   ): Promise<void> {
-    const winner = await this.repository.findEmailIdentityWithUser(emailNormalized);
+    const winner =
+      preloadedWinner !== undefined
+        ? preloadedWinner
+        : await this.repository.findEmailIdentityWithUser(emailNormalized);
 
     await this.auditLogService.record({
       userId: winner?.user.id ?? null,
