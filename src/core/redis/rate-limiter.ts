@@ -114,6 +114,37 @@ export const AUTH_RATE_LIMITS = Object.freeze({
   }),
 } satisfies Record<string, RateLimitRule>);
 
+/**
+ * Các ngưỡng Rate Limit chuẩn hóa cho phân hệ Hồ sơ, Tìm kiếm & Ảnh đại diện (Giai đoạn 2 — M6).
+ */
+export const PROFILE_RATE_LIMITS = Object.freeze({
+  searchByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  getProfileByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  updateProfileByUser: Object.freeze({
+    limit: 20,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  uploadAvatarByUser: Object.freeze({
+    limit: 5,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  deleteAvatarByUser: Object.freeze({
+    limit: 10,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+} satisfies Record<string, RateLimitRule>);
+
 // Lua script nguyên tử cho Fixed Window: kiểm tra giới hạn, chỉ tăng bộ đếm khi còn hạn mức
 // và gán PEXPIRE ngay trong cùng 1 thao tác để tránh race condition hoặc key không có TTL.
 const FIXED_WINDOW_LUA = `

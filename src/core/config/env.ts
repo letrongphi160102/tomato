@@ -130,6 +130,10 @@ const rawEnvSchema = z
 
     SENTRY_DSN: optionalUrl(),
     NEXT_PUBLIC_SENTRY_DSN: optionalUrl(),
+
+    STORAGE_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['local', 'vercel_blob']).optional()),
+    LOCAL_STORAGE_DIR: optionalString(),
+    BLOB_READ_WRITE_TOKEN: optionalString(),
   })
   .superRefine((data, ctx) => {
     const isProduction = data.NODE_ENV === 'production';
@@ -308,6 +312,17 @@ const rawEnvSchema = z
         });
       }
     }
+
+    // Kiểm tra cấu hình lưu trữ Media theo từng adapter (`local` | `vercel_blob`).
+    const effectiveStorageProvider =
+      data.STORAGE_PROVIDER ?? (data.BLOB_READ_WRITE_TOKEN ? 'vercel_blob' : 'local');
+    if (effectiveStorageProvider === 'vercel_blob' && !data.BLOB_READ_WRITE_TOKEN) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['BLOB_READ_WRITE_TOKEN'],
+        message: 'BLOB_READ_WRITE_TOKEN là bắt buộc khi STORAGE_PROVIDER=vercel_blob',
+      });
+    }
   });
 
 export interface Env {
@@ -337,6 +352,9 @@ export interface Env {
   readonly TURNSTILE_SECRET_KEY: string;
   readonly SENTRY_DSN?: string;
   readonly NEXT_PUBLIC_SENTRY_DSN?: string;
+  readonly STORAGE_PROVIDER: 'local' | 'vercel_blob';
+  readonly LOCAL_STORAGE_DIR: string;
+  readonly BLOB_READ_WRITE_TOKEN?: string;
 }
 
 export class EnvValidationError extends Error {
@@ -386,6 +404,9 @@ export function parseEnv(rawEnv: Record<string, string | undefined>): Env {
   const defaultLogLevel: Env['LOG_LEVEL'] =
     data.NODE_ENV === 'test' ? 'silent' : data.NODE_ENV === 'production' ? 'info' : 'debug';
 
+  const effectiveStorageProvider: Env['STORAGE_PROVIDER'] =
+    data.STORAGE_PROVIDER ?? (data.BLOB_READ_WRITE_TOKEN ? 'vercel_blob' : 'local');
+
   return Object.freeze({
     NODE_ENV: data.NODE_ENV,
     APP_URL: data.APP_URL,
@@ -413,6 +434,9 @@ export function parseEnv(rawEnv: Record<string, string | undefined>): Env {
     TURNSTILE_SECRET_KEY: data.TURNSTILE_SECRET_KEY,
     SENTRY_DSN: data.SENTRY_DSN,
     NEXT_PUBLIC_SENTRY_DSN: data.NEXT_PUBLIC_SENTRY_DSN,
+    STORAGE_PROVIDER: effectiveStorageProvider,
+    LOCAL_STORAGE_DIR: data.LOCAL_STORAGE_DIR ?? '.tomato-storage',
+    BLOB_READ_WRITE_TOKEN: data.BLOB_READ_WRITE_TOKEN,
   });
 }
 

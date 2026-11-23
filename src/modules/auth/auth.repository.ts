@@ -7,6 +7,7 @@ import { getDb, type Database, type DatabaseTransaction, type DbExecutor } from 
 import {
   authIdentities,
   sessions,
+  userHandleHistory,
   users,
   verificationTokens,
   type AuthIdentityRow,
@@ -161,6 +162,28 @@ export class AuthRepository {
     return rows[0] ?? null;
   }
 
+  async isHandleReservedByOtherUser(
+    handleNormalized: string,
+    excludeUserId: string | null,
+    now: Date,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<boolean> {
+    const conditions = [
+      eq(userHandleHistory.oldHandleNormalized, handleNormalized),
+      gt(userHandleHistory.reservedUntil, now),
+    ];
+    if (excludeUserId) {
+      conditions.push(ne(userHandleHistory.userId, excludeUserId));
+    }
+
+    const rows = await executor
+      .select({ id: userHandleHistory.id })
+      .from(userHandleHistory)
+      .where(and(...conditions))
+      .limit(1);
+    return rows.length > 0;
+  }
+
   /**
    * Khóa dòng `users` trong DB Transaction theo thứ tự khóa chuẩn (`users` -> `advisory(familyId)`
    * -> `auth_identities`/`verification_tokens`/`sessions`) để triệt tiêu TOCTOU race condition và deadlock:
@@ -238,6 +261,8 @@ export class AuthRepository {
       id: params.userId,
       publicId: params.publicId,
       username: params.username,
+      handle: params.username,
+      handleNormalized: params.username,
       fullName: params.fullName,
       gender: params.gender,
       dateOfBirth: params.dateOfBirth,
@@ -293,6 +318,8 @@ export class AuthRepository {
       .update(users)
       .set({
         username: params.username,
+        handle: params.username,
+        handleNormalized: params.username,
         fullName: params.fullName,
         gender: params.gender,
         dateOfBirth: params.dateOfBirth,

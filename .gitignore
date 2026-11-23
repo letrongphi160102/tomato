@@ -13,6 +13,9 @@ next-env.d.ts
 /coverage
 /.vitest
 
+# Local media storage (dev/test)
+/.tomato-storage/
+
 # Environment secrets (tuyệt đối không commit secret thật)
 .env
 .env.*

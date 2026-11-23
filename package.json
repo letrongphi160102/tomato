@@ -29,9 +29,11 @@
     "@radix-ui/react-slot": "1.5.0",
     "@sentry/nextjs": "11.16.0",
     "@upstash/redis": "1.41.0",
+    "@vercel/blob": "2.9.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "drizzle-orm": "0.45.4",
+    "file-type": "22.3.0",
     "ioredis": "6.0.0",
     "jose": "6.2.18",
     "lucide-react": "1.77.0",
@@ -41,7 +43,9 @@
     "pino": "10.4.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "react-easy-crop": "6.2.5",
     "server-only": "0.0.1",
+    "sharp": "0.35.5",
     "tailwind-merge": "3.7.1",
     "uuidv7": "1.2.1",
     "zod": "4.6.7"
@@ -64,5 +68,10 @@
     "typescript": "6.0.2",
     "vite-tsconfig-paths": "6.1.1",
     "vitest": "5.1.1"
+  },
+  "overrides": {
+    "@vercel/cli-config": {
+      "zod": "$zod"
+    }
   }
 }

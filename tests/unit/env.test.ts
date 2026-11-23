@@ -215,4 +215,26 @@ describe('parseEnv (fail-fast Zod validation)', () => {
       ),
     ).toThrow(EnvValidationError);
   });
+
+  it('M6: hỗ trợ STORAGE_PROVIDER=local|vercel_blob và fail-fast khi vercel_blob thiếu BLOB_READ_WRITE_TOKEN', () => {
+    const defaultLocal = parseEnv(createBaseEnv());
+    expect(defaultLocal.STORAGE_PROVIDER).toBe('local');
+    expect(defaultLocal.LOCAL_STORAGE_DIR).toBe('.tomato-storage');
+
+    const autoBlob = parseEnv(
+      createBaseEnv({
+        BLOB_READ_WRITE_TOKEN: 'synthetic-vercel-blob-token-for-unit-test',
+      }),
+    );
+    expect(autoBlob.STORAGE_PROVIDER).toBe('vercel_blob');
+
+    expect(() =>
+      parseEnv(
+        createBaseEnv({
+          STORAGE_PROVIDER: 'vercel_blob',
+          BLOB_READ_WRITE_TOKEN: '',
+        }),
+      ),
+    ).toThrow(EnvValidationError);
+  });
 });

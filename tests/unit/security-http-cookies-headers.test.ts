@@ -251,4 +251,19 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     });
     expect(withInsecureDsn).toContain("connect-src 'self' https://challenges.cloudflare.com;");
   });
+
+  it('M6: CSP img-src giữ blob: cho crop ảnh cục bộ và chỉ mở CDN ảnh đại diện Vercel Blob', () => {
+    const csp = buildContentSecurityPolicy({
+      nonce: 'nonce-m6',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+    });
+    expect(csp).toContain("img-src 'self' data: blob: https://*.public.blob.vercel-storage.com");
+    expect(csp).not.toContain('img-src https:');
+
+    const usersApiReq = new NextRequest('http://localhost:3000/api/v1/users/search?q=alice');
+    const usersApiRes = proxy(usersApiReq);
+    expect(usersApiRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+  });
 });

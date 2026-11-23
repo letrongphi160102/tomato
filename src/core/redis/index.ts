@@ -19,6 +19,7 @@ import {
 } from '@/core/redis/login-brute-force';
 import {
   AUTH_RATE_LIMITS,
+  PROFILE_RATE_LIMITS,
   RateLimiter,
   type RateLimitResult,
   type RateLimitRule,
@@ -30,6 +31,7 @@ import { UpstashRedisAdapter } from '@/core/redis/upstash-adapter';
 
 export {
   AUTH_RATE_LIMITS,
+  PROFILE_RATE_LIMITS,
   LOGIN_BACKOFF_SCHEDULE_SECONDS,
   LOGIN_BACKOFF_START_ATTEMPT,
   LOGIN_CAPTCHA_REQUIRED_ATTEMPT,

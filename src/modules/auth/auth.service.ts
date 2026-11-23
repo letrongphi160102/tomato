@@ -332,6 +332,18 @@ export class AuthService {
       });
     }
 
+    if (
+      typeof this.repository.isHandleReservedByOtherUser === 'function' &&
+      (await this.repository.isHandleReservedByOtherUser(input.username, null, currentTime))
+    ) {
+      throw new AuthDomainError({
+        status: 409,
+        code: 'CONFLICT',
+        message: AUTH_MESSAGES.usernameAlreadyExists,
+        details: [{ field: 'username', message: AUTH_MESSAGES.usernameAlreadyExists }],
+      });
+    }
+
     // 4. Băm mật khẩu bằng Argon2id + Pepper ngoài transaction DB để không giữ kết nối PG trong lúc tính toán CPU.
     const { hash: passwordHash, pepperVersion } = await hashPassword(
       input.password,
@@ -383,7 +395,10 @@ export class AuthService {
       // Bắt race condition khi 2 request đăng ký đồng thời (PostgreSQL 23505):
       // phân biệt trùng username với email khác (409 username) vs double-submit cùng email.
       if (isPostgresUniqueViolation(error)) {
-        if (isPostgresUniqueViolation(error, 'users_username_unique')) {
+        if (
+          isPostgresUniqueViolation(error, 'users_username_unique') ||
+          isPostgresUniqueViolation(error, 'idx_users_handle_norm')
+        ) {
           const winnerByEmail = await this.repository.findEmailIdentityWithUser(input.email);
           if (!winnerByEmail || winnerByEmail.user.username !== input.username) {
             throw new AuthDomainError({
@@ -2258,7 +2273,15 @@ export class AuthService {
       if (ageMs >= PENDING_VERIFICATION_EXPIRY_MS) {
         if (input.username !== existing.user.username) {
           const usernameOwner = await this.repository.findUserByUsername(input.username);
-          if (usernameOwner && usernameOwner.id !== existing.user.id) {
+          const reservedByOther =
+            typeof this.repository.isHandleReservedByOtherUser === 'function'
+              ? await this.repository.isHandleReservedByOtherUser(
+                  input.username,
+                  existing.user.id,
+                  currentTime,
+                )
+              : false;
+          if ((usernameOwner && usernameOwner.id !== existing.user.id) || reservedByOther) {
             throw new AuthDomainError({
               status: 409,
               code: 'CONFLICT',
@@ -2321,7 +2344,10 @@ export class AuthService {
             return outcome;
           });
         } catch (error) {
-          if (isPostgresUniqueViolation(error, 'users_username_unique')) {
+          if (
+            isPostgresUniqueViolation(error, 'users_username_unique') ||
+            isPostgresUniqueViolation(error, 'idx_users_handle_norm')
+          ) {
             throw new AuthDomainError({
               status: 409,
               code: 'CONFLICT',

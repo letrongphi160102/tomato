@@ -248,6 +248,8 @@ describe('Integration & Security M3: Đăng nhập, Xoay vòng Phiên, Reuse Det
       id: userId,
       publicId,
       username,
+      handle: username,
+      handleNormalized: username,
       fullName,
       gender,
       dateOfBirth: '1998-05-15',

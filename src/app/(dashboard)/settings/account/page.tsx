@@ -17,5 +17,5 @@ export default async function AccountSettingsPage() {
     redirect('/login?next=/settings/account');
   }
 
-  return <AccountOverviewCard user={authState.user} />;
+  return <AccountOverviewCard user={authState.user} avatarUrl={authState.profile.avatarUrl} />;
 }

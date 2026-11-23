@@ -228,10 +228,13 @@ async function seedUserWithPassword(params: {
   const now = new Date();
   const status = params.status ?? 'active';
 
+  const resolvedUsername = params.username ?? makeUniqueUsername('m4user');
   await db.insert(users).values({
     id: userId,
     publicId,
-    username: params.username ?? makeUniqueUsername('m4user'),
+    username: resolvedUsername,
+    handle: resolvedUsername,
+    handleNormalized: resolvedUsername,
     fullName: params.fullName ?? 'Nguyen Van M4',
     gender: params.gender ?? 'male',
     dateOfBirth: '1998-08-15',

@@ -7,9 +7,10 @@ const nextConfig: NextConfig = {
 
   // Bắt buộc giữ nguyên ngoài bundler vì:
   // - @node-rs/argon2 chứa native Rust binary (.node) sẽ hỏng nếu bị đóng gói bởi bundler.
+  // - sharp chứa native libvips C++ binary bắt buộc chạy ngoài bundler trên Node.js Runtime.
   // - pino & pino-pretty sử dụng worker thread (thread-stream) cần đường dẫn file gốc trên đĩa.
   // - nodemailer dùng giao thức socket/TLS thuần Node.js, tránh cảnh báo/lỗi đóng gói trên Turbopack.
-  serverExternalPackages: ['@node-rs/argon2', 'pino', 'pino-pretty', 'nodemailer'],
+  serverExternalPackages: ['@node-rs/argon2', 'sharp', 'pino', 'pino-pretty', 'nodemailer'],
 };
 
 const hasSentryUploadAuth = Boolean(

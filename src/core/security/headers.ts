@@ -12,6 +12,7 @@ export const NO_REFERRER_POLICY_VALUE = 'no-referrer';
 export const API_CSP_VALUE = "default-src 'none'; frame-ancestors 'none'";
 
 const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
+const VERCEL_BLOB_IMAGE_ORIGIN = 'https://*.public.blob.vercel-storage.com';
 
 export interface SecurityHeadersContext {
   readonly nonce: string;
@@ -78,9 +79,10 @@ export function buildContentSecurityPolicy(
     "default-src 'self'",
     `script-src ${scriptSources.join(' ')}`,
     `style-src ${styleSources.join(' ')}`,
-    // Cho phép inline attribute `style="..."` của Radix Primitives / Turnstile mà vẫn khóa thẻ `<style>`.
+    // Cho phép inline attribute `style="..."` của Radix Primitives / Turnstile / react-easy-crop mà vẫn khóa thẻ `<style>`.
     "style-src-attr 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    // Giữ `blob:` cho URL.createObjectURL khi người dùng cắt ảnh cục bộ và chỉ mở CDN ảnh đại diện Vercel Blob.
+    `img-src 'self' data: blob: ${VERCEL_BLOB_IMAGE_ORIGIN}`,
     "font-src 'self'",
     `connect-src ${connectSources.join(' ')}`,
     `frame-src 'self' ${TURNSTILE_ORIGIN}`,

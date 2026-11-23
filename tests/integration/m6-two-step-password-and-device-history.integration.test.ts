@@ -251,10 +251,13 @@ describe('Integration M6: Đổi mật khẩu 2 bước (kèm Silent Refresh gi�
     const hashed = await hashPassword(password);
     const now = currentClock;
 
+    const m6Username = makeUniqueUsername('m6usr');
     await db.insert(users).values({
       id: userId,
       publicId,
-      username: makeUniqueUsername('m6usr'),
+      username: m6Username,
+      handle: m6Username,
+      handleNormalized: m6Username,
       fullName: 'Nguyen Thi M6',
       gender: 'female',
       dateOfBirth: '1997-04-12',

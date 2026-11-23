@@ -24,10 +24,13 @@ describe('Integration M1: Drizzle Schema (5 bảng), AuditLogService & Redis Rat
     const otpHash = hashTokenSha256(`otp-${Date.now()}-${Math.random()}`);
 
     const auditRecord = await (async () => {
+      const m1Username = `m1_${Date.now().toString(36)}`;
       await db.insert(users).values({
         id: userId,
         publicId,
-        username: `m1_${Date.now().toString(36)}`,
+        username: m1Username,
+        handle: m1Username,
+        handleNormalized: m1Username,
         fullName: 'M1 Test User',
         gender: 'other',
         dateOfBirth: '2000-01-15',

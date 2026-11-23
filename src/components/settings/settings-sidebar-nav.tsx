@@ -2,11 +2,17 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { KeyRound, MonitorSmartphone, User } from 'lucide-react';
+import { KeyRound, MonitorSmartphone, Pencil, User } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
 const SETTINGS_NAV_ITEMS = [
+  {
+    href: '/settings/profile',
+    label: 'Chỉnh sửa hồ sơ',
+    description: 'Ảnh đại diện, tên, ID và tiểu sử',
+    icon: Pencil,
+  },
   {
     href: '/settings/account',
     label: 'Tổng quan tài khoản',

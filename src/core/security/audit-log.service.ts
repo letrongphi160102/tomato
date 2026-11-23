@@ -16,6 +16,10 @@ export const AUDIT_ACTIONS = [
   'TOKEN_REUSE_DETECTED',
   'PASSWORD_RESET',
   'PASSWORD_CHANGED',
+  'PROFILE_UPDATED',
+  'PROFILE_HANDLE_CHANGED',
+  'AVATAR_UPDATED',
+  'AVATAR_REMOVED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

@@ -4,7 +4,7 @@ import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 
-import { refreshAuthSession } from '@/lib/auth-client';
+import { refreshAuthSession, sanitizeRedirectPath } from '@/lib/auth-client';
 
 export interface SilentSessionGateProps {
   /**
@@ -19,6 +19,7 @@ export interface SilentSessionGateProps {
 
 export function SilentSessionGate({ mode, nextPath = '/', fallback }: SilentSessionGateProps) {
   const router = useRouter();
+  const safeNextPath = sanitizeRedirectPath(nextPath, '/');
   const [phase, setPhase] = React.useState<'checking' | 'redirecting' | 'fallback'>('checking');
 
   React.useEffect(() => {
@@ -33,7 +34,7 @@ export function SilentSessionGate({ mode, nextPath = '/', fallback }: SilentSess
       if (refreshed) {
         setPhase('redirecting');
         if (mode === 'auth-redirect') {
-          router.replace(nextPath);
+          router.replace(safeNextPath);
           router.refresh();
           return;
         }
@@ -43,7 +44,7 @@ export function SilentSessionGate({ mode, nextPath = '/', fallback }: SilentSess
 
       if (mode === 'protected') {
         const loginTarget =
-          nextPath && nextPath !== '/' ? `/login?next=${encodeURIComponent(nextPath)}` : '/login';
+          safeNextPath !== '/' ? `/login?next=${encodeURIComponent(safeNextPath)}` : '/login';
         router.replace(loginTarget);
         return;
       }
@@ -55,7 +56,7 @@ export function SilentSessionGate({ mode, nextPath = '/', fallback }: SilentSess
     return () => {
       active = false;
     };
-  }, [mode, nextPath, router]);
+  }, [mode, safeNextPath, router]);
 
   if (phase === 'fallback') {
     return <>{fallback ?? null}</>;

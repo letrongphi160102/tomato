@@ -4,6 +4,7 @@ import { normalizeEmail, normalizePassword, normalizeUsername } from '@/core/cry
 import { USER_GENDERS } from '@/core/db/schema/enums';
 import { AUTH_MESSAGES } from '@/modules/auth/auth.messages';
 import { isCommonOrWeakPassword } from '@/modules/auth/common-passwords';
+import { RESERVED_HANDLES } from '@/modules/profile/handle';
 
 export const EMAIL_MAX_LENGTH = 254;
 export const FULL_NAME_MIN_LENGTH = 2;
@@ -24,29 +25,7 @@ const USERNAME_ALLOWED_REGEX = /^[a-z0-9._]+$/;
 // Chặn ký tự có dấu tiếng Việt (dấu thanh/mũ/móc tổ hợp NFD U+0300–U+036F và chữ đ/Đ U+0110–U+0111).
 const VIETNAMESE_DIACRITIC_NFD_REGEX = /[\u0300-\u036f\u0110\u0111\u1EA0-\u1EF9]/;
 
-const RESERVED_USERNAMES: ReadonlySet<string> = new Set([
-  'admin',
-  'administrator',
-  'api',
-  'auth',
-  'login',
-  'logout',
-  'register',
-  'signup',
-  'signin',
-  'settings',
-  'security',
-  'verify-email',
-  'verify_email',
-  'forgot-password',
-  'reset-password',
-  'support',
-  'help',
-  'system',
-  'root',
-  'tomato',
-  'official',
-]);
+const RESERVED_USERNAMES: ReadonlySet<string> = RESERVED_HANDLES;
 
 /**
  * Kiểm tra chuỗi có chứa dấu tiếng Việt hoặc chữ `đ`/`Đ` (hỗ trợ cả NFC dựng sẵn lẫn NFD tổ hợp).

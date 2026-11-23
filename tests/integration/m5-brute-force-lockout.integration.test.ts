@@ -70,10 +70,13 @@ describe('Integration M5: Brute-Force Backoff (1s->2s->4s->8s), Turnstile mốc 
     const hashed = await hashPassword(password);
     const now = new Date(testClockMs);
 
+    const m5Username = `m5_${publicId.replace(/-/g, '').slice(0, 14)}`;
     await db.insert(users).values({
       id: userId,
       publicId,
-      username: `m5_${publicId.replace(/-/g, '').slice(0, 14)}`,
+      username: m5Username,
+      handle: m5Username,
+      handleNormalized: m5Username,
       fullName: 'Nguyễn Bảo Vệ M5',
       gender: 'male',
       dateOfBirth: '1996-06-15',

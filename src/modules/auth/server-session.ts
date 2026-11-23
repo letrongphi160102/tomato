@@ -3,10 +3,21 @@ import 'server-only';
 import { cookies } from 'next/headers';
 
 import { getCookieNames } from '@/core/security/cookies';
-import { getSessionService, toPublicUserProfile, type PublicUserProfile } from '@/modules/auth';
+import {
+  getSessionService,
+  toPublicUserProfile,
+  type AuthenticatedPrincipal,
+  type PublicUserProfile,
+} from '@/modules/auth';
+import { toUserProfileDto, type UserProfileDto } from '@/modules/profile';
 
 export type ServerAuthState =
-  | { readonly status: 'authenticated'; readonly user: PublicUserProfile }
+  | {
+      readonly status: 'authenticated';
+      readonly user: PublicUserProfile;
+      readonly profile: UserProfileDto;
+      readonly principal: AuthenticatedPrincipal;
+    }
   | { readonly status: 'needs_refresh' }
   | { readonly status: 'unauthenticated' };
 
@@ -30,6 +41,8 @@ export async function resolveServerAuthState(): Promise<ServerAuthState> {
       return {
         status: 'authenticated',
         user: toPublicUserProfile(principal.user),
+        profile: toUserProfileDto(principal.user, principal.user.id),
+        principal,
       };
     } catch {
       // Access Token có thể vừa hết hạn 15 phút; rơi xuống kiểm tra Refresh Token bên dưới.

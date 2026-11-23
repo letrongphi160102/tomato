@@ -1,13 +1,14 @@
 import Link from 'next/link';
-import { ArrowRight, CheckCircle2, KeyRound, MonitorSmartphone } from 'lucide-react';
+import { ArrowRight, CheckCircle2, KeyRound, MonitorSmartphone, Pencil } from 'lucide-react';
 
+import { UserAvatar } from '@/components/profile/user-avatar';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { getUserInitials } from '@/lib/user-display';
 import type { PublicUserProfile } from '@/modules/auth/session.service';
 
 export interface AccountOverviewCardProps {
   readonly user: PublicUserProfile;
+  readonly avatarUrl?: string | null;
 }
 
 function formatVietnameseGender(gender: PublicUserProfile['gender']): string {
@@ -36,28 +37,29 @@ function formatVietnameseAccountStatus(status: PublicUserProfile['status']): str
   }
 }
 
-export function AccountOverviewCard({ user }: AccountOverviewCardProps) {
-  const initials = getUserInitials(user.fullName);
-
+export function AccountOverviewCard({ user, avatarUrl = null }: AccountOverviewCardProps) {
   return (
     <div className="space-y-6">
       <Card className="shadow-sm">
-        <CardHeader className="border-b pb-4">
-          <CardTitle className="text-lg">Tổng quan tài khoản</CardTitle>
-          <CardDescription>
-            Thông tin cơ bản hiển thị trên tài khoản Tomato của bạn.
-          </CardDescription>
+        <CardHeader className="flex flex-col gap-3 border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="text-lg">Tổng quan tài khoản</CardTitle>
+            <CardDescription>
+              Thông tin cơ bản hiển thị trên tài khoản Tomato của bạn.
+            </CardDescription>
+          </div>
+          <Button asChild variant="outline" size="sm" className="w-fit shrink-0">
+            <Link href="/settings/profile">
+              <Pencil className="size-3.5" aria-hidden="true" />
+              <span>Chỉnh sửa hồ sơ</span>
+            </Link>
+          </Button>
         </CardHeader>
 
         <CardContent className="space-y-6 pt-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-4">
-              <div
-                aria-hidden="true"
-                className="flex size-14 shrink-0 items-center justify-center rounded-full bg-primary text-lg font-bold text-primary-foreground"
-              >
-                {initials}
-              </div>
+              <UserAvatar fullName={user.fullName} avatarUrl={avatarUrl} size="lg" />
               <div className="min-w-0">
                 <p className="truncate text-lg font-semibold text-foreground">{user.fullName}</p>
                 <p className="truncate text-sm text-muted-foreground">@{user.username}</p>
