@@ -11,6 +11,7 @@ import {
   DEFAULT_MESSAGES_PAGE_LIMIT,
   getOrInitUserChatRamCache,
   PEER_KEY_BUNDLE_CACHE_TTL_MS,
+  purgeDecryptedMessageCacheByPublicId,
   putLruConversationThreadCache,
   putLruDecryptedMessageCache,
   shouldRenderFloatingMessagesWidget,
@@ -18,10 +19,18 @@ import {
   type ChatStoreContextValue,
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
+import {
+  getConversationPreviewText,
+  RECALLED_MESSAGE_PLACEHOLDER,
+} from '@/components/messages/message-actions';
 import { isConversationUnread } from '@/components/messages/message-grouping';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { authFetch } from '@/lib/auth-client';
-import { decryptDirectMessage, encryptDirectMessage } from '@/lib/e2ee/cipher';
+import {
+  decryptDirectMessage,
+  encryptDirectMessage,
+  reEncryptEditedDirectMessage,
+} from '@/lib/e2ee/cipher';
 import {
   clearE2eeClientBootstrapState,
   ensureE2eeDeviceRegisteredSingleton,
@@ -37,6 +46,8 @@ import type {
   ChatMessageDto,
   ConversationListResult,
   ConversationSummaryDto,
+  DeleteConversationForMeResult,
+  DeleteMessageForMeResult,
   E2eeKeyBackupDto,
   MarkConversationReadResult,
   MessageListResult,
@@ -112,6 +123,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     new Map(),
   );
   const inFlightThreadLoadByConvRef = React.useRef<Map<string, Promise<void>>>(new Map());
+  const inFlightSingleMsgSyncRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightReadReqRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightOwnStatusRef = React.useRef<Promise<void> | null>(null);
   const prevReadReceiptsEnabledRef = React.useRef<boolean | undefined>(
@@ -545,10 +557,17 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
 
       const currentMyReadSeq = targetConv?.myState.lastReadSeq ?? 0;
+      const currentClearedBeforeSeq = targetConv?.myState.clearedBeforeSeq ?? 0;
+      const effectiveReadFloor = Math.max(currentMyReadSeq, currentClearedBeforeSeq);
       const wasTrackedUnread = store.unreadPrimaryConvIds.has(conversationPublicId);
       const wasUnread = wasTrackedUnread || (targetConv ? isConversationUnread(targetConv) : false);
 
-      if (targetSeq > currentMyReadSeq || wasUnread) {
+      // Không tự gửi `/read` cho tin nhắn đã nằm dưới mốc `clearedBeforeSeq` để tránh lộ "Đã xem" giả.
+      if (targetSeq <= effectiveReadFloor && !wasUnread) {
+        return;
+      }
+
+      if (targetSeq > effectiveReadFloor || wasUnread) {
         const nextReadSeq = Math.max(currentMyReadSeq, targetSeq);
         store.unreadPrimaryConvIds.delete(conversationPublicId);
 
@@ -734,14 +753,15 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         const previewEntries = await Promise.all(
           data.items.map(async (conv) => {
             if (!conv.lastMessage) {
-              return [conv.public_id, 'Bắt đầu cuộc trò chuyện'] as const;
+              return [conv.public_id, getConversationPreviewText(null)] as const;
+            }
+            if (conv.lastMessage.recalledAt !== null) {
+              return [conv.public_id, RECALLED_MESSAGE_PLACEHOLDER] as const;
             }
             const dec = await decryptSingleMessageCached(conv.lastMessage);
             return [
               conv.public_id,
-              dec.decryptionFailed
-                ? 'Tin nhắn riêng tư'
-                : `${conv.lastMessage.isOwnMessage ? 'Bạn: ' : ''}${dec.plaintext}`,
+              getConversationPreviewText(conv.lastMessage, dec.plaintext, dec.decryptionFailed),
             ] as const;
           }),
         );
@@ -867,7 +887,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         if (latest) {
           setPreviewsByConvId((prev) => ({
             ...prev,
-            [conversationPublicId]: `${latest.dto.isOwnMessage ? 'Bạn: ' : ''}${latest.plaintext}`,
+            [conversationPublicId]: getConversationPreviewText(
+              latest.dto,
+              latest.plaintext,
+              latest.decryptionFailed,
+            ),
           }));
 
           // Chỉ tự động đánh dấu đã đọc khi thỏa mãn đủ 4 điều kiện (đang ở `/messages`, khung chat đang mount, đúng đoạn chat đang mở và cửa sổ đang hiển thị/focus).
@@ -984,9 +1008,13 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           );
 
           let highestSeq = conv.lastSeq;
+          let highestVisibleSeq = 0;
           for (const item of msgData.items) {
             if (item.seq > highestSeq) {
               highestSeq = item.seq;
+            }
+            if (item.seq > highestVisibleSeq) {
+              highestVisibleSeq = item.seq;
             }
           }
 
@@ -1002,8 +1030,16 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             lastAccessedAt: Date.now(),
           }));
 
-          if (conv.myState.inboxState === 'primary' && highestSeq > conv.myState.lastReadSeq) {
-            void markConversationReadOptimistic(conv.public_id, highestSeq);
+          const effectiveReadFloor = Math.max(
+            conv.myState.lastReadSeq,
+            conv.myState.clearedBeforeSeq ?? 0,
+          );
+          if (
+            conv.myState.inboxState === 'primary' &&
+            msgData.items.length > 0 &&
+            highestVisibleSeq > effectiveReadFloor
+          ) {
+            void markConversationReadOptimistic(conv.public_id, highestVisibleSeq);
           }
         } catch {
           updateThreadState(conv.public_id, (prev) => ({
@@ -1352,6 +1388,637 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setPrimaryConversations,
       updateThreadState,
     ],
+  );
+
+  /**
+   * Tải đúng 1 bản ghi tin nhắn vừa được chỉnh sửa qua `GET /api/v1/messages/[messagePublicId]`
+   * rồi giải mã lại tại chỗ trong RAM (không phải tải lại toàn bộ đoạn chat).
+   */
+  const syncSingleUpdatedMessageFromServer = React.useCallback(
+    async (conversationPublicId: string, messagePublicId: string) => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const thread = store.threadsByConvId.get(conversationPublicId);
+      const convSummary = resolveConversationById(conversationPublicId);
+      const isInLoadedThread = Boolean(
+        thread?.items.some((m) => m.dto.public_id === messagePublicId),
+      );
+      const isConversationPreviewMsg = convSummary?.lastMessage?.public_id === messagePublicId;
+
+      if (!isInLoadedThread && !isConversationPreviewMsg) {
+        return;
+      }
+
+      const existingReq = inFlightSingleMsgSyncRef.current.get(messagePublicId);
+      if (existingReq) {
+        return existingReq;
+      }
+
+      const task = (async () => {
+        try {
+          const peerPublicId = convSummary?.peer.public_id;
+          const [res, peerBundle] = await Promise.all([
+            authFetch(`/api/v1/messages/${encodeURIComponent(messagePublicId)}`),
+            peerPublicId ? ensurePeerKeyBundle(peerPublicId) : Promise.resolve(null),
+          ]);
+          if (!res.ok) {
+            return;
+          }
+          const body = (await res.json()) as { readonly message: ChatMessageDto };
+          const updatedDto = body.message;
+          const expectedDevices = updatedDto.isOwnMessage
+            ? ownKeyBundleRef.current?.devices
+            : peerBundle?.devices;
+
+          const decrypted = await decryptSingleMessageCached(updatedDto, expectedDevices);
+
+          if (store.threadsByConvId.has(conversationPublicId)) {
+            updateThreadState(conversationPublicId, (prev) => {
+              if (!prev) {
+                return {
+                  conversationPublicId,
+                  items: [decrypted],
+                  nextBeforeSeq: null,
+                  highestSeq: updatedDto.seq,
+                  hasInitialized: true,
+                  loadingInitial: false,
+                  loadingOlder: false,
+                  lastAccessedAt: Date.now(),
+                };
+              }
+              const nextItems = prev.items.map((item) =>
+                item.dto.public_id === updatedDto.public_id ||
+                item.dto.clientMsgId === updatedDto.clientMsgId
+                  ? decrypted
+                  : item,
+              );
+              return {
+                ...prev,
+                items: nextItems,
+                lastAccessedAt: Date.now(),
+              };
+            });
+          }
+
+          const patchSummaryLastMessage = (c: ConversationSummaryDto): ConversationSummaryDto => {
+            if (c.public_id !== conversationPublicId) {
+              return c;
+            }
+            if (c.lastMessage?.public_id === updatedDto.public_id || updatedDto.seq >= c.lastSeq) {
+              return {
+                ...c,
+                lastMessage: updatedDto,
+              };
+            }
+            return c;
+          };
+
+          setPrimaryConversations((prev) => prev.map(patchSummaryLastMessage));
+          setPendingConversations((prev) => prev.map(patchSummaryLastMessage));
+          if (selectedConvRef.current?.public_id === conversationPublicId) {
+            selectConversation(patchSummaryLastMessage(selectedConvRef.current));
+          }
+
+          const latestConv = resolveConversationById(conversationPublicId);
+          if (
+            !latestConv ||
+            latestConv.lastMessage?.public_id === updatedDto.public_id ||
+            updatedDto.seq >= latestConv.lastSeq
+          ) {
+            setPreviewsByConvId((prev) => ({
+              ...prev,
+              [conversationPublicId]: getConversationPreviewText(
+                updatedDto,
+                decrypted.plaintext,
+                decrypted.decryptionFailed,
+              ),
+            }));
+          }
+        } catch {
+          // Bỏ qua lỗi mạng tạm thời.
+        } finally {
+          inFlightSingleMsgSyncRef.current.delete(messagePublicId);
+        }
+      })();
+
+      inFlightSingleMsgSyncRef.current.set(messagePublicId, task);
+      return task;
+    },
+    [
+      currentUserPublicId,
+      decryptSingleMessageCached,
+      ensurePeerKeyBundle,
+      resolveConversationById,
+      selectConversation,
+      setPendingConversations,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      updateThreadState,
+    ],
+  );
+
+  const applyRecalledMessageLocally = React.useCallback(
+    (
+      conversationPublicId: string,
+      messagePublicId: string,
+      seq: number | null,
+      recalledAt: string,
+    ) => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, messagePublicId);
+
+      if (store.threadsByConvId.has(conversationPublicId)) {
+        updateThreadState(conversationPublicId, (prev) => {
+          if (!prev) {
+            return {
+              conversationPublicId,
+              items: [],
+              nextBeforeSeq: null,
+              highestSeq: seq ?? 0,
+              hasInitialized: false,
+              loadingInitial: false,
+              loadingOlder: false,
+              lastAccessedAt: Date.now(),
+            };
+          }
+          return {
+            ...prev,
+            items: prev.items.map((item) =>
+              item.dto.public_id === messagePublicId
+                ? {
+                    ...item,
+                    dto: {
+                      ...item.dto,
+                      ciphertext: null,
+                      cryptoHeader: null,
+                      recalledAt,
+                    },
+                    plaintext: RECALLED_MESSAGE_PLACEHOLDER,
+                    decryptionFailed: false,
+                  }
+                : item,
+            ),
+            lastAccessedAt: Date.now(),
+          };
+        });
+      }
+
+      const isMatchingLast = (c: ConversationSummaryDto): boolean => {
+        if (c.public_id !== conversationPublicId) {
+          return false;
+        }
+        if (c.lastMessage?.public_id === messagePublicId) {
+          return true;
+        }
+        return seq !== null && c.lastSeq === seq;
+      };
+
+      let affectedPreview = false;
+      const patchSummary = (c: ConversationSummaryDto): ConversationSummaryDto => {
+        if (!isMatchingLast(c)) {
+          return c;
+        }
+        affectedPreview = true;
+        return {
+          ...c,
+          lastMessage: c.lastMessage
+            ? {
+                ...c.lastMessage,
+                ciphertext: null,
+                cryptoHeader: null,
+                recalledAt,
+              }
+            : null,
+        };
+      };
+
+      setPrimaryConversations((prev) => prev.map(patchSummary));
+      setPendingConversations((prev) => prev.map(patchSummary));
+      if (selectedConvRef.current && isMatchingLast(selectedConvRef.current)) {
+        selectConversation(patchSummary(selectedConvRef.current));
+      }
+
+      if (affectedPreview) {
+        setPreviewsByConvId((prev) => ({
+          ...prev,
+          [conversationPublicId]: RECALLED_MESSAGE_PLACEHOLDER,
+        }));
+      }
+      bumpThreadVersion();
+    },
+    [
+      bumpThreadVersion,
+      currentUserPublicId,
+      selectConversation,
+      setPendingConversations,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      updateThreadState,
+    ],
+  );
+
+  const applyDeletedConversationLocally = React.useCallback(
+    (
+      conversationPublicId: string,
+      serverCounts?: {
+        readonly unreadConversationsCount?: number;
+        readonly pendingCount?: number;
+      },
+    ) => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const wasUnreadPrimary =
+        store.unreadPrimaryConvIds.has(conversationPublicId) ||
+        primaryConvsRef.current.some(
+          (c) => c.public_id === conversationPublicId && isConversationUnread(c),
+        );
+      const wasPending = pendingConvsRef.current.some((c) => c.public_id === conversationPublicId);
+
+      store.threadsByConvId.delete(conversationPublicId);
+      store.unreadPrimaryConvIds.delete(conversationPublicId);
+      store.lastSentReadSeqByConvId.delete(conversationPublicId);
+
+      if (selectedConvRef.current?.public_id === conversationPublicId) {
+        selectConversation(null);
+      }
+      if (floatingActiveConvIdRef.current === conversationPublicId) {
+        floatingActiveConvIdRef.current = null;
+      }
+
+      setPrimaryConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
+      setPendingConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
+      setPreviewsByConvId((prev) => {
+        if (!(conversationPublicId in prev)) {
+          return { ...prev };
+        }
+        const next = { ...prev };
+        delete next[conversationPublicId];
+        return next;
+      });
+
+      if (typeof serverCounts?.unreadConversationsCount === 'number') {
+        setUnreadConversationsCount(serverCounts.unreadConversationsCount);
+      } else if (wasUnreadPrimary) {
+        setUnreadConversationsCount((count) =>
+          Math.min(Math.max(0, count - 1), store.unreadPrimaryConvIds.size),
+        );
+      }
+
+      if (typeof serverCounts?.pendingCount === 'number') {
+        setPendingCount(serverCounts.pendingCount);
+      } else if (wasPending) {
+        setPendingCount((count) => Math.max(0, count - 1));
+      }
+
+      bumpThreadVersion();
+    },
+    [
+      bumpThreadVersion,
+      currentUserPublicId,
+      selectConversation,
+      setPendingConversations,
+      setPendingCount,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      setUnreadConversationsCount,
+    ],
+  );
+
+  /**
+   * Chỉnh sửa tin nhắn chữ trong 5 phút đầu (M10):
+   * Sinh mới hoàn toàn contentKey 256-bit, IV 96-bit mới & chữ ký ECDSA P-256 trên AAD gốc,
+   * gửi PATCH lên Server rồi cập nhật tức thì vào RAM cache & preview.
+   */
+  const editTextMessage = React.useCallback(
+    async (params: {
+      readonly conversation: ConversationSummaryDto;
+      readonly message: DecryptedMessageViewItem;
+      readonly newPlaintext: string;
+    }) => {
+      const trimmed = params.newPlaintext.trim();
+      if (!trimmed) {
+        return;
+      }
+
+      const convId = params.conversation.public_id;
+      const peerPublicId = params.conversation.peer.public_id;
+      const targetMsgId = params.message.dto.public_id;
+
+      await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+      const [senderDevice, peerKeyBundle] = await Promise.all([
+        getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId),
+        ensurePeerKeyBundle(peerPublicId),
+      ]);
+
+      if (!peerKeyBundle || peerKeyBundle.devices.length === 0) {
+        throw new Error(
+          `@${params.conversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị nào.`,
+        );
+      }
+
+      const envelope = await reEncryptEditedDirectMessage({
+        conversationPublicId: convId,
+        senderPublicId: currentUserPublicId,
+        clientMsgId: params.message.dto.clientMsgId,
+        plaintext: trimmed,
+        senderDevice,
+        recipientDevices: peerKeyBundle.devices,
+        senderOtherDevices: ownKeyBundleRef.current?.devices ?? [],
+        sentAt: params.message.dto.createdAt,
+        previousIv: params.message.dto.cryptoHeader?.iv ?? null,
+      });
+
+      const response = await authFetch(`/api/v1/messages/${encodeURIComponent(targetMsgId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ciphertext: envelope.ciphertext,
+          cryptoHeader: envelope.cryptoHeader,
+        }),
+      });
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        throw new Error(errBody?.error?.message ?? 'Không thể chỉnh sửa tin nhắn lúc này.');
+      }
+
+      const data = (await response.json()) as { readonly message: ChatMessageDto };
+      const updatedDto = data.message;
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+
+      purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, updatedDto.public_id);
+      putLruDecryptedMessageCache(
+        store.decryptedMessagesByCacheKey,
+        buildMessageDecryptCacheKey(updatedDto),
+        {
+          plaintext: trimmed,
+          decryptionFailed: false,
+        },
+      );
+
+      if (store.threadsByConvId.has(convId)) {
+        updateThreadState(convId, (prev) => {
+          if (!prev) {
+            return {
+              conversationPublicId: convId,
+              items: [
+                {
+                  dto: updatedDto,
+                  plaintext: trimmed,
+                  decryptionFailed: false,
+                },
+              ],
+              nextBeforeSeq: null,
+              highestSeq: updatedDto.seq,
+              hasInitialized: true,
+              loadingInitial: false,
+              loadingOlder: false,
+              lastAccessedAt: Date.now(),
+            };
+          }
+          return {
+            ...prev,
+            items: prev.items.map((item) =>
+              item.dto.public_id === updatedDto.public_id
+                ? {
+                    ...item,
+                    dto: updatedDto,
+                    plaintext: trimmed,
+                    decryptionFailed: false,
+                  }
+                : item,
+            ),
+            lastAccessedAt: Date.now(),
+          };
+        });
+      }
+
+      const patchLastMsg = (c: ConversationSummaryDto): ConversationSummaryDto => {
+        if (c.public_id !== convId) {
+          return c;
+        }
+        if (c.lastMessage?.public_id === updatedDto.public_id || updatedDto.seq >= c.lastSeq) {
+          return {
+            ...c,
+            lastMessage: updatedDto,
+          };
+        }
+        return c;
+      };
+      setPrimaryConversations((prev) => prev.map(patchLastMsg));
+      setPendingConversations((prev) => prev.map(patchLastMsg));
+      if (selectedConvRef.current?.public_id === convId) {
+        selectConversation(patchLastMsg(selectedConvRef.current));
+      }
+
+      const latestConv = resolveConversationById(convId);
+      if (
+        !latestConv ||
+        latestConv.lastMessage?.public_id === updatedDto.public_id ||
+        updatedDto.seq >= latestConv.lastSeq
+      ) {
+        setPreviewsByConvId((prev) => ({
+          ...prev,
+          [convId]: getConversationPreviewText(updatedDto, trimmed, false),
+        }));
+      }
+    },
+    [
+      currentUserPublicId,
+      ensurePeerKeyBundle,
+      resolveConversationById,
+      selectConversation,
+      setPendingConversations,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      updateThreadState,
+    ],
+  );
+
+  /**
+   * Thu hồi tin nhắn trong 5 phút đầu (M10).
+   */
+  const recallMessage = React.useCallback(
+    async (params: { readonly conversationPublicId: string; readonly messagePublicId: string }) => {
+      const response = await authFetch(
+        `/api/v1/messages/${encodeURIComponent(params.messagePublicId)}/recall`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        },
+      );
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        throw new Error(errBody?.error?.message ?? 'Không thể thu hồi tin nhắn lúc này.');
+      }
+
+      const data = (await response.json()) as { readonly message: ChatMessageDto };
+      applyRecalledMessageLocally(
+        params.conversationPublicId,
+        data.message.public_id,
+        data.message.seq,
+        data.message.recalledAt ?? new Date().toISOString(),
+      );
+    },
+    [applyRecalledMessageLocally],
+  );
+
+  /**
+   * Xóa 1 dòng tin nhắn chỉ ở phía mình (Optimistic UI + Rollback an toàn khi lỗi).
+   */
+  const deleteMessageForMe = React.useCallback(
+    async (params: { readonly conversationPublicId: string; readonly messagePublicId: string }) => {
+      const convId = params.conversationPublicId;
+      const msgId = params.messagePublicId;
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const prevThread = store.threadsByConvId.get(convId) ?? null;
+      const removedItem = prevThread?.items.find((m) => m.dto.public_id === msgId) ?? null;
+      const removedIndex = prevThread?.items.findIndex((m) => m.dto.public_id === msgId) ?? -1;
+
+      // Optimistic removal khỏi khung chat hiện tại.
+      if (prevThread && removedItem) {
+        updateThreadState(convId, (prev) => {
+          if (!prev) {
+            return prevThread;
+          }
+          return {
+            ...prev,
+            items: prev.items.filter((m) => m.dto.public_id !== msgId),
+            lastAccessedAt: Date.now(),
+          };
+        });
+      }
+
+      try {
+        const response = await authFetch(`/api/v1/messages/${encodeURIComponent(msgId)}/for-me`, {
+          method: 'DELETE',
+        });
+
+        if (response.status === 404) {
+          purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, msgId);
+          return;
+        }
+
+        if (!response.ok) {
+          const errBody = (await response.json().catch(() => null)) as {
+            readonly error?: { readonly message?: string };
+          } | null;
+          throw new Error(errBody?.error?.message ?? 'Không thể xóa tin nhắn lúc này.');
+        }
+
+        const data = (await response.json()) as DeleteMessageForMeResult;
+        purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, msgId);
+
+        if (typeof data.unreadConversationsCount === 'number') {
+          setUnreadConversationsCount(data.unreadConversationsCount);
+        }
+
+        const nextLast = data.nextLastMessage;
+        let nextPreviewText = getConversationPreviewText(null);
+        if (nextLast) {
+          if (nextLast.recalledAt !== null) {
+            nextPreviewText = RECALLED_MESSAGE_PLACEHOLDER;
+          } else {
+            const conv = resolveConversationById(convId);
+            const peerBundle =
+              !nextLast.isOwnMessage && conv
+                ? await ensurePeerKeyBundle(conv.peer.public_id)
+                : null;
+            const expectedDevices = nextLast.isOwnMessage
+              ? ownKeyBundleRef.current?.devices
+              : peerBundle?.devices;
+            const dec = await decryptSingleMessageCached(nextLast, expectedDevices);
+            nextPreviewText = getConversationPreviewText(
+              nextLast,
+              dec.plaintext,
+              dec.decryptionFailed,
+            );
+          }
+        }
+
+        const patchLastMessage = (c: ConversationSummaryDto): ConversationSummaryDto =>
+          c.public_id === convId ? { ...c, lastMessage: nextLast } : c;
+
+        setPrimaryConversations((prev) => prev.map(patchLastMessage));
+        setPendingConversations((prev) => prev.map(patchLastMessage));
+        if (selectedConvRef.current?.public_id === convId) {
+          selectConversation(patchLastMessage(selectedConvRef.current));
+        }
+
+        setPreviewsByConvId((prev) => ({
+          ...prev,
+          [convId]: nextPreviewText,
+        }));
+      } catch (error) {
+        // Rollback đúng dòng bị lỗi nếu API thất bại.
+        if (removedItem && removedIndex >= 0) {
+          updateThreadState(convId, (prev) => {
+            if (!prev) {
+              return prevThread!;
+            }
+            if (prev.items.some((m) => m.dto.public_id === msgId)) {
+              return prev;
+            }
+            const restored = [...prev.items, removedItem].sort((a, b) => a.dto.seq - b.dto.seq);
+            return {
+              ...prev,
+              items: restored,
+              lastAccessedAt: Date.now(),
+            };
+          });
+        }
+        throw error;
+      }
+    },
+    [
+      currentUserPublicId,
+      decryptSingleMessageCached,
+      ensurePeerKeyBundle,
+      resolveConversationById,
+      selectConversation,
+      setPendingConversations,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      setUnreadConversationsCount,
+      updateThreadState,
+    ],
+  );
+
+  /**
+   * Xóa đoạn hội thoại ở phía mình (M10):
+   * Xóa sạch khỏi danh sách RAM, cập nhật đồng bộ `unreadConversationsCount`,
+   * và tự thoát đoạn chat trên cả `/messages` lẫn `FloatingMessagesWidget`.
+   */
+  const deleteConversationForMe = React.useCallback(
+    async (conversationPublicId: string) => {
+      const response = await authFetch(
+        `/api/v1/conversations/${encodeURIComponent(conversationPublicId)}`,
+        { method: 'DELETE' },
+      );
+
+      if (response.status === 404) {
+        applyDeletedConversationLocally(conversationPublicId);
+        return;
+      }
+
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        throw new Error(errBody?.error?.message ?? 'Không thể xóa đoạn chat lúc này.');
+      }
+
+      const data = (await response.json()) as DeleteConversationForMeResult;
+      applyDeletedConversationLocally(conversationPublicId, {
+        unreadConversationsCount: data.unreadConversationsCount,
+        pendingCount: data.pendingCount,
+      });
+    },
+    [applyDeletedConversationLocally],
   );
 
   const openOrCreateDirectConversation = React.useCallback(
@@ -1787,6 +2454,106 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         return;
       }
 
+      if (event.event === 'chat.message.updated') {
+        const convId =
+          typeof event.data.conversationPublicId === 'string'
+            ? event.data.conversationPublicId
+            : null;
+        const messagePublicId =
+          typeof event.data.messagePublicId === 'string' ? event.data.messagePublicId : null;
+        if (convId && messagePublicId) {
+          void syncSingleUpdatedMessageFromServer(convId, messagePublicId);
+        }
+        return;
+      }
+
+      if (event.event === 'chat.message.recalled') {
+        const convId =
+          typeof event.data.conversationPublicId === 'string'
+            ? event.data.conversationPublicId
+            : null;
+        const messagePublicId =
+          typeof event.data.messagePublicId === 'string' ? event.data.messagePublicId : null;
+        const seq = typeof event.data.seq === 'number' ? event.data.seq : null;
+        const recalledAt =
+          typeof event.data.recalledAt === 'string'
+            ? event.data.recalledAt
+            : new Date().toISOString();
+        if (convId && messagePublicId) {
+          applyRecalledMessageLocally(convId, messagePublicId, seq, recalledAt);
+        }
+        return;
+      }
+
+      if (event.event === 'chat.message.deleted_for_me') {
+        const convId =
+          typeof event.data.conversationPublicId === 'string'
+            ? event.data.conversationPublicId
+            : null;
+        const messagePublicId =
+          typeof event.data.messagePublicId === 'string' ? event.data.messagePublicId : null;
+        const serverUnreadCount =
+          typeof event.data.unreadConversationsCount === 'number'
+            ? event.data.unreadConversationsCount
+            : null;
+
+        if (serverUnreadCount !== null) {
+          setUnreadConversationsCount(serverUnreadCount);
+        }
+
+        if (convId && messagePublicId) {
+          purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, messagePublicId);
+          if (store.threadsByConvId.has(convId)) {
+            updateThreadState(convId, (prev) => {
+              if (!prev) {
+                return {
+                  conversationPublicId: convId,
+                  items: [],
+                  nextBeforeSeq: null,
+                  highestSeq: 0,
+                  hasInitialized: false,
+                  loadingInitial: false,
+                  loadingOlder: false,
+                  lastAccessedAt: Date.now(),
+                };
+              }
+              return {
+                ...prev,
+                items: prev.items.filter((m) => m.dto.public_id !== messagePublicId),
+                lastAccessedAt: Date.now(),
+              };
+            });
+          }
+          const conv = resolveConversationById(convId);
+          if (conv?.lastMessage?.public_id === messagePublicId) {
+            void loadConversations(conv.myState.inboxState === 'pending' ? 'pending' : 'primary', {
+              background: true,
+            });
+          }
+        }
+        return;
+      }
+
+      if (event.event === 'chat.conversation.deleted') {
+        const convId =
+          typeof event.data.conversationPublicId === 'string'
+            ? event.data.conversationPublicId
+            : null;
+        const serverUnreadCount =
+          typeof event.data.unreadConversationsCount === 'number'
+            ? event.data.unreadConversationsCount
+            : undefined;
+        const serverPendingCount =
+          typeof event.data.pendingCount === 'number' ? event.data.pendingCount : undefined;
+        if (convId) {
+          applyDeletedConversationLocally(convId, {
+            unreadConversationsCount: serverUnreadCount,
+            pendingCount: serverPendingCount,
+          });
+        }
+        return;
+      }
+
       if (event.event === 'chat.conversation.updated') {
         void loadConversations('primary', { background: true });
         if (store.hasLoadedPending || store.activeTab === 'pending') {
@@ -1812,6 +2579,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
     });
   }, [
+    applyDeletedConversationLocally,
+    applyRecalledMessageLocally,
     bumpThreadVersion,
     checkCanAutoMarkRead,
     currentUserPublicId,
@@ -1823,6 +2592,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     setPrimaryConversations,
     setUnreadConversationsCount,
     subscribeChatEvents,
+    syncSingleUpdatedMessageFromServer,
+    updateThreadState,
   ]);
 
   // Tự động đánh dấu đã đọc khi người dùng quay lại tab trình duyệt hoặc focus cửa sổ lúc đang mở sẵn 1 đoạn chat chưa đọc tại `/messages` hoặc trong Cửa sổ Tin nhắn nổi.
@@ -1879,6 +2650,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       loadOlderMessages,
       markConversationReadOptimistic,
       sendOptimisticTextMessage,
+      editTextMessage,
+      recallMessage,
+      deleteMessageForMe,
+      deleteConversationForMe,
       openOrCreateDirectConversation,
       acceptSelectedPendingConversation,
       declineSelectedPendingConversation,
@@ -1891,6 +2666,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       activeTab,
       clearAllChatCache,
       declineSelectedPendingConversation,
+      deleteConversationForMe,
+      deleteMessageForMe,
+      editTextMessage,
       ensurePeerKeyBundle,
       getCachedPeerKeyBundle,
       getThreadState,
@@ -1909,6 +2687,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       presences,
       previewsByConvId,
       primaryConversations,
+      recallMessage,
       refreshOwnE2eeStatus,
       removeBlockedPeerConversationLocally,
       selectConversation,

@@ -119,6 +119,9 @@ describe('Core Realtime Provider (Port & Adapter)', () => {
     expect(() =>
       assertRealtimePayloadSafe({ actor: { userId: '0195a000-0000-7000-8000-000000000001' } }),
     ).toThrow();
+    expect(() => assertRealtimePayloadSafe({ ciphertext: 'synthetic-cipher' })).toThrow();
+    expect(() => assertRealtimePayloadSafe({ cryptoHeader: { iv: 'abc' } })).toThrow();
+    expect(() => assertRealtimePayloadSafe({ plaintext: 'secret text' })).toThrow();
 
     // Payload DTO công khai hợp lệ được phép đi qua.
     expect(() =>

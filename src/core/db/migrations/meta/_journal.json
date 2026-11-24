@@ -50,6 +50,13 @@
       "when": 1795447933115,
       "tag": "0006_add_e2ee_and_direct_chat_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795511668727,
+      "tag": "0007_add_message_user_deletions_rls",
+      "breakpoints": true
     }
   ]
 }

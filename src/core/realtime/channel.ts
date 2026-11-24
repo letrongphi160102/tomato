@@ -28,6 +28,12 @@ const FORBIDDEN_PAYLOAD_KEYS = new Set([
   'date_of_birth',
   'ipaddress',
   'ip_address',
+  'ciphertext',
+  'cryptoheader',
+  'crypto_header',
+  'plaintext',
+  'wrappedkeys',
+  'wrapped_keys',
 ]);
 
 const EMAIL_VALUE_REGEX = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;

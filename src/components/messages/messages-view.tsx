@@ -21,14 +21,19 @@ import {
 } from 'lucide-react';
 
 import { ChatInfoDrawer } from '@/components/messages/chat-info-drawer';
-import { useChatStore } from '@/components/messages/chat-store-context';
+import {
+  useChatStore,
+  type DecryptedMessageViewItem,
+} from '@/components/messages/chat-store-context';
+import { ConversationActionsMenu } from '@/components/messages/conversation-actions-menu';
 import { EmojiPickerPopover } from '@/components/messages/emoji-picker-popover';
+import { canRecallMessage, MAX_MESSAGE_EDIT_COUNT } from '@/components/messages/message-actions';
+import { MessageBubbleRow } from '@/components/messages/message-bubble-row';
+import { MessageEditBanner } from '@/components/messages/message-edit-banner';
 import {
   buildClusteredMessageEntries,
   formatConversationShortTimeVi,
-  formatExactMessageTooltipTimeVi,
   isConversationUnread,
-  type MessageBubbleClusterPosition,
 } from '@/components/messages/message-grouping';
 import { NewMessageModal } from '@/components/messages/new-message-modal';
 import { PinBackupModal } from '@/components/messages/pin-backup-modal';
@@ -36,11 +41,10 @@ import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
 import { Button } from '@/components/ui/button';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { authFetch } from '@/lib/auth-client';
 import { cn } from '@/lib/utils';
 import type { ConversationSummaryDto } from '@/modules/chat';
-import type { DecryptedMessageViewItem } from '@/components/messages/chat-store-context';
 
 const EMPTY_CONVERSATIONS: readonly ConversationSummaryDto[] = [];
 const EMPTY_MESSAGES: readonly DecryptedMessageViewItem[] = [];
@@ -49,32 +53,6 @@ export interface MessagesViewProps {
   readonly currentUserPublicId: string;
   readonly currentUserHandle: string;
   readonly currentUserFullName: string;
-}
-
-function getBubbleRadiusClasses(isMine: boolean, position: MessageBubbleClusterPosition): string {
-  if (isMine) {
-    switch (position) {
-      case 'single':
-        return 'rounded-2xl';
-      case 'first':
-        return 'rounded-2xl rounded-br-md';
-      case 'middle':
-        return 'rounded-2xl rounded-tr-md rounded-br-md';
-      case 'last':
-        return 'rounded-2xl rounded-tr-md';
-    }
-  }
-
-  switch (position) {
-    case 'single':
-      return 'rounded-2xl';
-    case 'first':
-      return 'rounded-2xl rounded-bl-md';
-    case 'middle':
-      return 'rounded-2xl rounded-tl-md rounded-bl-md';
-    case 'last':
-      return 'rounded-2xl rounded-tl-md';
-  }
 }
 
 export function MessagesView({ currentUserPublicId, currentUserHandle }: MessagesViewProps) {
@@ -88,14 +66,32 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const targetConversationParam = searchParams.get('conversation');
 
   const [draftText, setDraftText] = React.useState('');
+  const [editDraftText, setEditDraftText] = React.useState('');
   const [chatError, setChatError] = React.useState<string | null>(null);
   const [infoDrawerOpen, setInfoDrawerOpen] = React.useState(false);
   const [newMessageModalOpen, setNewMessageModalOpen] = React.useState(false);
   const [pinModalOpen, setPinModalOpen] = React.useState(false);
   const [confirmBlockOpen, setConfirmBlockOpen] = React.useState(false);
+  const [confirmDeleteConvTarget, setConfirmDeleteConvTarget] =
+    React.useState<ConversationSummaryDto | null>(null);
+  const [confirmRecallTarget, setConfirmRecallTarget] =
+    React.useState<DecryptedMessageViewItem | null>(null);
+  const [dialogError, setDialogError] = React.useState<string | null>(null);
+  const [editingTarget, setEditingTarget] = React.useState<{
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+    readonly clientMsgId: string;
+  } | null>(null);
+  const [editSaving, setEditSaving] = React.useState(false);
+  const [tapSelectedMsg, setTapSelectedMsg] = React.useState<{
+    readonly conversationPublicId: string;
+    readonly clientMsgId: string;
+  } | null>(null);
+  const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
   const [actionBusy, setActionBusy] = React.useState(false);
 
   const messagesContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const composerInputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const handledToParamRef = React.useRef<string | null>(null);
   const handledConvParamRef = React.useRef<string | null>(null);
   const isNearBottomRef = React.useRef(true);
@@ -234,6 +230,46 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedConvPublicId, openConversationThread]);
 
+  // Suy dẫn trực tiếp tin nhắn đang chỉnh sửa: tự động đóng `MessageEditBanner` ngay lập tức (0 cascading render)
+  // khi đổi đoạn chat hoặc khi tin bị thu hồi / xóa 1 phía từ tab khác / đạt giới hạn sửa.
+  const editingMessage = React.useMemo<DecryptedMessageViewItem | null>(() => {
+    if (!editingTarget || !selectedConversation) {
+      return null;
+    }
+    if (editingTarget.conversationPublicId !== selectedConversation.public_id) {
+      return null;
+    }
+    const latestMatch = messages.find(
+      (m) =>
+        m.dto.public_id === editingTarget.messagePublicId ||
+        m.dto.clientMsgId === editingTarget.clientMsgId,
+    );
+    if (
+      !latestMatch ||
+      latestMatch.dto.recalledAt !== null ||
+      latestMatch.dto.editCount >= MAX_MESSAGE_EDIT_COUNT
+    ) {
+      return null;
+    }
+    return latestMatch;
+  }, [editingTarget, messages, selectedConversation]);
+
+  // Nhịp cập nhật đồng hồ nhẹ (10 giây/lần) CHỈ khi đang có tin nhắn của mình nằm trong cửa sổ 5 phút
+  // để tự động ẩn 2 nút "Chỉnh sửa" và "Thu hồi" đúng thời điểm.
+  const hasOwnRecentMessage = React.useMemo(
+    () => messages.some((m) => canRecallMessage(m, nowMs)),
+    [messages, nowMs],
+  );
+  React.useEffect(() => {
+    if (!hasOwnRecentMessage) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [hasOwnRecentMessage]);
+
   // Giữ nguyên vị trí cuộn (Scroll Anchoring) khi nạp tin nhắn cũ lên đầu + Cuộn thông minh khi có tin mới.
   React.useLayoutEffect(() => {
     const container = messagesContainerRef.current;
@@ -307,14 +343,133 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     }
   }, [chatStore, hasOlderMessages, loadingOlderMessages, messages.length, selectedConversation]);
 
+  function handleStartEditMessage(item: DecryptedMessageViewItem) {
+    if (!selectedConversation) {
+      return;
+    }
+    setChatError(null);
+    setEditingTarget({
+      conversationPublicId: selectedConversation.public_id,
+      messagePublicId: item.dto.public_id,
+      clientMsgId: item.dto.clientMsgId,
+    });
+    setEditDraftText(item.plaintext);
+    setTapSelectedMsg(null);
+    setTimeout(() => {
+      composerInputRef.current?.focus();
+    }, 0);
+  }
+
+  function handleCancelEditMessage() {
+    setEditingTarget(null);
+    setEditDraftText('');
+    setChatError(null);
+  }
+
+  async function handleConfirmRecallMessage() {
+    if (!selectedConversation || !confirmRecallTarget || !chatStore || actionBusy) {
+      return;
+    }
+    setActionBusy(true);
+    setDialogError(null);
+    try {
+      await chatStore.recallMessage({
+        conversationPublicId: selectedConversation.public_id,
+        messagePublicId: confirmRecallTarget.dto.public_id,
+      });
+      if (editingMessage?.dto.public_id === confirmRecallTarget.dto.public_id) {
+        handleCancelEditMessage();
+      }
+      setConfirmRecallTarget(null);
+      setTapSelectedMsg(null);
+    } catch (error) {
+      setDialogError(
+        error instanceof Error ? error.message : 'Không thể thu hồi tin nhắn lúc này.',
+      );
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleDeleteMessageForMe(item: DecryptedMessageViewItem) {
+    if (!selectedConversation || !chatStore) {
+      return;
+    }
+    setChatError(null);
+    if (editingMessage?.dto.public_id === item.dto.public_id) {
+      handleCancelEditMessage();
+    }
+    setTapSelectedMsg(null);
+    try {
+      await chatStore.deleteMessageForMe({
+        conversationPublicId: selectedConversation.public_id,
+        messagePublicId: item.dto.public_id,
+      });
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : 'Không thể xóa tin nhắn lúc này.');
+    }
+  }
+
+  async function handleConfirmDeleteConversation() {
+    if (!confirmDeleteConvTarget || !chatStore || actionBusy) {
+      return;
+    }
+    setActionBusy(true);
+    setDialogError(null);
+    try {
+      const targetId = confirmDeleteConvTarget.public_id;
+      await chatStore.deleteConversationForMe(targetId);
+      setConfirmDeleteConvTarget(null);
+      if (selectedConversation?.public_id === targetId) {
+        setInfoDrawerOpen(false);
+        setEditingTarget(null);
+        setEditDraftText('');
+        setDraftText('');
+      }
+    } catch (error) {
+      setDialogError(error instanceof Error ? error.message : 'Không thể xóa đoạn chat lúc này.');
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function handleSendMessage(event?: React.FormEvent) {
     event?.preventDefault();
     if (!selectedConversation || !chatStore) {
       return;
     }
 
-    const trimmed = draftText.trim();
+    const activeInputText = editingMessage ? editDraftText : draftText;
+    const trimmed = activeInputText.trim();
     if (!trimmed) {
+      return;
+    }
+
+    if (editingMessage) {
+      if (editSaving) {
+        return;
+      }
+      if (trimmed === editingMessage.plaintext.trim()) {
+        handleCancelEditMessage();
+        return;
+      }
+      setEditSaving(true);
+      setChatError(null);
+      try {
+        await chatStore.editTextMessage({
+          conversation: selectedConversation,
+          message: editingMessage,
+          newPlaintext: trimmed,
+        });
+        setEditingTarget(null);
+        setEditDraftText('');
+      } catch (error) {
+        setChatError(
+          error instanceof Error ? error.message : 'Không thể chỉnh sửa tin nhắn lúc này.',
+        );
+      } finally {
+        setEditSaving(false);
+      }
       return;
     }
 
@@ -591,17 +746,20 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                   const previewText = previewsByConvId[conv.public_id] ?? 'Tin nhắn mới';
 
                   return (
-                    <li key={conv.public_id}>
+                    <li
+                      key={conv.public_id}
+                      className={cn(
+                        'group/conv flex items-center transition-colors hover:bg-muted/50',
+                        isSelected ? 'bg-muted/80' : null,
+                      )}
+                    >
                       <button
                         type="button"
                         onClick={() => {
                           setChatError(null);
                           void chatStore?.openConversationThread(conv);
                         }}
-                        className={cn(
-                          'flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50',
-                          isSelected ? 'bg-muted/80' : null,
-                        )}
+                        className="flex min-w-0 flex-1 items-center gap-3 py-3 pl-4 pr-2 text-left"
                       >
                         <div className="relative shrink-0">
                           <UserAvatar
@@ -657,6 +815,16 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                           />
                         ) : null}
                       </button>
+
+                      <div className="pr-2">
+                        <ConversationActionsMenu
+                          peerFullName={conv.peer.fullName}
+                          onRequestDeleteConversation={() => {
+                            setDialogError(null);
+                            setConfirmDeleteConvTarget(conv);
+                          }}
+                        />
+                      </div>
                     </li>
                   );
                 })}
@@ -818,140 +986,42 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                     </div>
                   ) : (
                     <div className="flex flex-col">
-                      {clusteredMessages.map((entry, idx) => {
-                        const {
-                          item,
-                          clusterPosition,
-                          showPeerAvatar,
-                          timeDividerLabel,
-                          isLastReadByPeer,
-                          isLatestOwnSentUnread,
-                        } = entry;
-                        const isMine = item.dto.isOwnMessage;
-                        const isNewCluster =
-                          clusterPosition === 'single' || clusterPosition === 'first';
-                        const exactTooltipTime = formatExactMessageTooltipTimeVi(
-                          item.dto.createdAt,
-                        );
-
-                        return (
-                          <React.Fragment key={item.dto.clientMsgId}>
-                            {timeDividerLabel ? (
-                              <div className="my-3.5 flex justify-center">
-                                <span className="rounded-full bg-muted/50 px-3 py-0.5 text-[11px] font-medium text-muted-foreground">
-                                  {timeDividerLabel}
-                                </span>
-                              </div>
-                            ) : null}
-
-                            <div
-                              className={cn(
-                                'flex flex-col',
-                                isMine ? 'items-end' : 'items-start',
-                                idx === 0 || timeDividerLabel
-                                  ? 'mt-0.5'
-                                  : isNewCluster
-                                    ? 'mt-3'
-                                    : 'mt-0.5',
-                              )}
-                            >
-                              <div
-                                className={cn(
-                                  'flex max-w-[82%] items-end gap-2',
-                                  isMine ? 'flex-row-reverse' : 'flex-row',
-                                )}
-                              >
-                                {!isMine ? (
-                                  showPeerAvatar ? (
-                                    <UserAvatar
-                                      fullName={selectedConversation.peer.fullName}
-                                      avatarUrl={selectedConversation.peer.avatarUrl}
-                                      size="xs"
-                                      className="size-7 shrink-0"
-                                    />
-                                  ) : (
-                                    <span aria-hidden="true" className="w-7 shrink-0" />
-                                  )
-                                ) : null}
-
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <div
-                                      tabIndex={0}
-                                      className={cn(
-                                        'px-3.5 py-2 text-sm leading-relaxed break-words whitespace-pre-wrap shadow-2xs transition-opacity focus:outline-none',
-                                        getBubbleRadiusClasses(isMine, clusterPosition),
-                                        isMine
-                                          ? 'bg-primary text-primary-foreground'
-                                          : 'border bg-muted/60 text-foreground',
-                                        item.decryptionFailed ? 'italic opacity-80' : null,
-                                        item.sending ? 'opacity-85' : null,
-                                        item.sendError
-                                          ? 'ring-1 ring-destructive/60 opacity-90'
-                                          : null,
-                                      )}
-                                    >
-                                      {item.plaintext}
-                                    </div>
-                                  </TooltipTrigger>
-                                  {exactTooltipTime ? (
-                                    <TooltipContent side={isMine ? 'left' : 'right'}>
-                                      {exactTooltipTime}
-                                    </TooltipContent>
-                                  ) : null}
-                                </Tooltip>
-                              </div>
-
-                              {item.sending ? (
-                                <span className="mt-0.5 px-1 text-[10px] text-muted-foreground">
-                                  Đang gửi...
-                                </span>
-                              ) : null}
-
-                              {item.sendError ? (
-                                <div className="mt-1 flex items-center gap-1.5 px-1 text-[11px] text-destructive">
-                                  <span>Không gửi được</span>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      void handleRetryFailedMessage(
-                                        item.dto.clientMsgId,
-                                        item.plaintext,
-                                      )
-                                    }
-                                    className="inline-flex items-center gap-1 font-semibold underline hover:opacity-80"
-                                  >
-                                    <RotateCcw className="size-3" aria-hidden="true" />
-                                    <span>Thử lại</span>
-                                  </button>
-                                </div>
-                              ) : null}
-
-                              {isLastReadByPeer ? (
-                                <div
-                                  aria-label="Đã xem"
-                                  className="mt-1 flex items-center gap-1 px-1 text-[11px] font-medium text-muted-foreground"
-                                >
-                                  <UserAvatar
-                                    fullName={selectedConversation.peer.fullName}
-                                    avatarUrl={selectedConversation.peer.avatarUrl}
-                                    size="xs"
-                                    className="size-3.5"
-                                  />
-                                  <span>Đã xem</span>
-                                </div>
-                              ) : isLatestOwnSentUnread ? (
-                                <span
-                                  aria-label="Đã gửi"
-                                  className="mt-1 px-1 text-[11px] text-muted-foreground"
-                                >
-                                  Đã gửi
-                                </span>
-                              ) : null}
-                            </div>
-                          </React.Fragment>
-                        );
-                      })}
+                      {clusteredMessages.map((entry, idx) => (
+                        <MessageBubbleRow
+                          key={entry.item.dto.clientMsgId}
+                          entry={entry}
+                          index={idx}
+                          peer={selectedConversation.peer}
+                          variant="full"
+                          nowMs={nowMs}
+                          isBeingEdited={editingMessage?.dto.public_id === entry.item.dto.public_id}
+                          isTapSelected={
+                            tapSelectedMsg?.conversationPublicId ===
+                              selectedConversation.public_id &&
+                            tapSelectedMsg.clientMsgId === entry.item.dto.clientMsgId
+                          }
+                          onTapToggle={(msgClientId) =>
+                            setTapSelectedMsg((prev) =>
+                              prev?.conversationPublicId === selectedConversation.public_id &&
+                              prev.clientMsgId === msgClientId
+                                ? null
+                                : {
+                                    conversationPublicId: selectedConversation.public_id,
+                                    clientMsgId: msgClientId,
+                                  },
+                            )
+                          }
+                          onStartEdit={handleStartEditMessage}
+                          onRequestRecall={(item) => {
+                            setDialogError(null);
+                            setConfirmRecallTarget(item);
+                          }}
+                          onDeleteForMe={(item) => void handleDeleteMessageForMe(item)}
+                          onRetryFailed={(clientMsgId, plaintext) =>
+                            void handleRetryFailedMessage(clientMsgId, plaintext)
+                          }
+                        />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -1026,6 +1096,14 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                       </div>
                     ) : null}
 
+                    {editingMessage ? (
+                      <MessageEditBanner
+                        originalText={editingMessage.plaintext}
+                        saving={editSaving}
+                        onCancel={handleCancelEditMessage}
+                      />
+                    ) : null}
+
                     {recipientHasZeroKeys ? (
                       <div className="rounded-xl border border-dashed bg-muted/40 px-4 py-3 text-center text-xs text-muted-foreground">
                         @{selectedConversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị
@@ -1037,11 +1115,15 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         className="flex items-end gap-1.5 rounded-2xl border bg-muted/30 px-2.5 py-1.5 focus-within:border-primary/60 focus-within:bg-background"
                       >
                         <EmojiPickerPopover
-                          disabled={!selectedConversation.canSendMoreMessages}
-                          onSelectEmoji={(emoji) => setDraftText((prev) => `${prev}${emoji}`)}
+                          disabled={!editingMessage && !selectedConversation.canSendMoreMessages}
+                          onSelectEmoji={(emoji) =>
+                            editingMessage
+                              ? setEditDraftText((prev) => `${prev}${emoji}`)
+                              : setDraftText((prev) => `${prev}${emoji}`)
+                          }
                         />
 
-                        {!selectedConversation.canSendMedia ? (
+                        {!editingMessage && !selectedConversation.canSendMedia ? (
                           <div className="flex items-center gap-0.5">
                             <Button
                               type="button"
@@ -1069,16 +1151,31 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         ) : null}
 
                         <textarea
+                          ref={composerInputRef}
                           rows={1}
-                          value={draftText}
-                          disabled={!selectedConversation.canSendMoreMessages}
-                          placeholder={
-                            selectedConversation.canSendMoreMessages
-                              ? 'Nhắn tin...'
-                              : 'Đã gửi tối đa 3 tin nhắn đang chờ chấp nhận'
+                          value={editingMessage ? editDraftText : draftText}
+                          disabled={
+                            editSaving ||
+                            (!editingMessage && !selectedConversation.canSendMoreMessages)
                           }
-                          onChange={(e) => setDraftText(e.target.value)}
+                          placeholder={
+                            editingMessage
+                              ? 'Nhập nội dung mới...'
+                              : selectedConversation.canSendMoreMessages
+                                ? 'Nhắn tin...'
+                                : 'Đã gửi tối đa 3 tin nhắn đang chờ chấp nhận'
+                          }
+                          onChange={(e) =>
+                            editingMessage
+                              ? setEditDraftText(e.target.value)
+                              : setDraftText(e.target.value)
+                          }
                           onKeyDown={(e) => {
+                            if (e.key === 'Escape' && editingMessage && !editSaving) {
+                              e.preventDefault();
+                              handleCancelEditMessage();
+                              return;
+                            }
                             if (e.key === 'Enter' && !e.shiftKey) {
                               e.preventDefault();
                               void handleSendMessage();
@@ -1090,11 +1187,21 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         <Button
                           type="submit"
                           size="sm"
-                          disabled={!draftText.trim() || !selectedConversation.canSendMoreMessages}
+                          disabled={
+                            editSaving ||
+                            !(editingMessage ? editDraftText : draftText).trim() ||
+                            (!editingMessage && !selectedConversation.canSendMoreMessages)
+                          }
                           className="h-8 rounded-xl px-3 text-xs"
                         >
-                          <Send className="size-3.5" aria-hidden="true" />
-                          <span>Gửi</span>
+                          {editSaving ? (
+                            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                          ) : editingMessage ? (
+                            <Check className="size-3.5" aria-hidden="true" />
+                          ) : (
+                            <Send className="size-3.5" aria-hidden="true" />
+                          )}
+                          <span>{editingMessage ? 'Lưu' : 'Gửi'}</span>
                         </Button>
                       </form>
                     )}
@@ -1111,6 +1218,10 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                 peer={selectedConversation.peer}
                 peerKeyFingerprints={peerKeyBundle?.devices.map((d) => d.keyFingerprint) ?? []}
                 onClose={() => setInfoDrawerOpen(false)}
+                onRequestDeleteConversation={() => {
+                  setDialogError(null);
+                  setConfirmDeleteConvTarget(selectedConversation);
+                }}
                 onRequestBlockPeer={() => setConfirmBlockOpen(true)}
               />
             </div>
@@ -1161,6 +1272,40 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
           onConfirm={() => void handleConfirmBlockPeer()}
         />
       ) : null}
+
+      <ConfirmDialog
+        open={confirmRecallTarget !== null}
+        title="Thu hồi tin nhắn?"
+        description="Tin nhắn này sẽ bị thu hồi với mọi người trong cuộc trò chuyện. Bạn không thể hoàn tác thao tác này."
+        confirmLabel="Thu hồi"
+        destructive
+        loading={actionBusy}
+        errorMessage={confirmRecallTarget ? dialogError : null}
+        onClose={() => {
+          if (!actionBusy) {
+            setConfirmRecallTarget(null);
+            setDialogError(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmRecallMessage()}
+      />
+
+      <ConfirmDialog
+        open={confirmDeleteConvTarget !== null}
+        title="Xóa đoạn chat?"
+        description="Toàn bộ lịch sử trò chuyện trước thời điểm này sẽ bị xóa khỏi danh sách của bạn. Người kia vẫn giữ nguyên đoạn chat này."
+        confirmLabel="Xóa đoạn chat"
+        destructive
+        loading={actionBusy}
+        errorMessage={confirmDeleteConvTarget ? dialogError : null}
+        onClose={() => {
+          if (!actionBusy) {
+            setConfirmDeleteConvTarget(null);
+            setDialogError(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmDeleteConversation()}
+      />
     </TooltipProvider>
   );
 }

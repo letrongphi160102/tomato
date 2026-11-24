@@ -24,8 +24,13 @@ export type ChatAction =
   | 'chat:conversation:read'
   | 'chat:conversation:accept'
   | 'chat:conversation:decline'
+  | 'chat:conversation:delete'
   | 'chat:message:list'
-  | 'chat:message:send';
+  | 'chat:message:read'
+  | 'chat:message:send'
+  | 'chat:message:edit'
+  | 'chat:message:recall'
+  | 'chat:message:delete_for_me';
 
 export interface SymmetricReadReceiptContext {
   readonly actorShowReadReceipts: boolean;
@@ -115,8 +120,13 @@ export function authorizeChatAction(
     case 'chat:conversation:read':
     case 'chat:conversation:accept':
     case 'chat:conversation:decline':
+    case 'chat:conversation:delete':
     case 'chat:message:list':
-    case 'chat:message:send': {
+    case 'chat:message:read':
+    case 'chat:message:send':
+    case 'chat:message:edit':
+    case 'chat:message:recall':
+    case 'chat:message:delete_for_me': {
       const conv = resource.conversation;
       const participant = resource.actorParticipant;
       const peer = resource.peerUser;

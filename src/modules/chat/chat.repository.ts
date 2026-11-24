@@ -15,6 +15,7 @@ import {
   conversationParticipants,
   conversations,
   follows,
+  messageUserDeletions,
   messages,
   userE2eeDevices,
   userE2eeKeyBackups,
@@ -88,6 +89,23 @@ export class ChatRepository {
     callback: (tx: DatabaseTransaction) => Promise<T>,
   ): Promise<T> {
     return withRlsContext(actorUserId, callback, this.getDefaultDb());
+  }
+
+  async getDatabaseNow(tx: DatabaseTransaction): Promise<Date> {
+    const result = await tx.execute<{ readonly db_now: Date | string }>(
+      sql`SELECT NOW() AS db_now`,
+    );
+    const raw = result.rows[0]?.db_now;
+    if (raw instanceof Date) {
+      return raw;
+    }
+    if (typeof raw === 'string') {
+      const parsed = new Date(raw);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed;
+      }
+    }
+    return new Date();
   }
 
   async findUserByPublicId(
@@ -360,6 +378,18 @@ export class ChatRepository {
     return rows[0] ?? null;
   }
 
+  async findConversationById(
+    conversationId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<ConversationRow | null> {
+    const rows = await executor
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async lockConversationByPublicId(
     publicId: string,
     tx: DatabaseTransaction,
@@ -368,6 +398,19 @@ export class ChatRepository {
       .select()
       .from(conversations)
       .where(eq(conversations.publicId, publicId))
+      .limit(1)
+      .for('update');
+    return rows[0] ?? null;
+  }
+
+  async lockConversationById(
+    conversationId: string,
+    tx: DatabaseTransaction,
+  ): Promise<ConversationRow | null> {
+    const rows = await tx
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
       .limit(1)
       .for('update');
     return rows[0] ?? null;
@@ -530,6 +573,37 @@ export class ChatRepository {
     return rows[0] ?? null;
   }
 
+  /**
+   * Xóa đoạn hội thoại ở phía riêng `actor`:
+   * Chỉ cập nhật `cleared_before_seq = GREATEST(cleared_before_seq, last_seq)` và `hidden_at = now`.
+   * TUYỆT ĐỐI KHÔNG tăng `last_read_seq` để không bao giờ làm đối phương nhìn thấy nhãn "Đã xem" giả.
+   */
+  async clearAndHideConversationForUser(
+    params: {
+      readonly conversationId: string;
+      readonly userId: string;
+      readonly conversationLastSeq: number;
+      readonly now: Date;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<ConversationParticipantRow | null> {
+    const safeLastSeq = Math.max(0, params.conversationLastSeq);
+    const rows = await tx
+      .update(conversationParticipants)
+      .set({
+        clearedBeforeSeq: sql`GREATEST(${conversationParticipants.clearedBeforeSeq}, ${safeLastSeq})`,
+        hiddenAt: params.now,
+      })
+      .where(
+        and(
+          eq(conversationParticipants.conversationId, params.conversationId),
+          eq(conversationParticipants.userId, params.userId),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  }
+
   async countUnreadPrimaryConversationsForUser(
     userId: string,
     executor: DbExecutor = this.getDefaultDb(),
@@ -545,7 +619,7 @@ export class ChatRepository {
           eq(conversationParticipants.userId, userId),
           eq(conversationParticipants.inboxState, 'primary'),
           isNull(conversationParticipants.hiddenAt),
-          gt(conversations.lastSeq, 0),
+          gt(conversations.lastSeq, conversationParticipants.clearedBeforeSeq),
           sql`EXISTS (
             SELECT 1
             FROM ${conversationParticipants} peer_cp
@@ -565,6 +639,12 @@ export class ChatRepository {
             FROM ${messages} m
             WHERE m.conversation_id = ${conversations.id}
               AND m.sender_id <> ${userId}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM ${messageUserDeletions} mud
+                WHERE mud.message_id = m.id
+                  AND mud.user_id = ${userId}
+              )
               AND m.seq > GREATEST(
                 ${conversationParticipants.lastReadSeq},
                 ${conversationParticipants.clearedBeforeSeq},
@@ -600,7 +680,7 @@ export class ChatRepository {
           eq(conversationParticipants.userId, userId),
           eq(conversationParticipants.inboxState, 'pending'),
           isNull(conversationParticipants.hiddenAt),
-          gt(conversations.lastSeq, 0),
+          gt(conversations.lastSeq, conversationParticipants.clearedBeforeSeq),
           sql`EXISTS (
             SELECT 1
             FROM ${conversationParticipants} peer_cp
@@ -619,6 +699,39 @@ export class ChatRepository {
       );
 
     return Number(rows[0]?.count ?? 0);
+  }
+
+  async findLatestVisibleMessageForConversation(
+    params: {
+      readonly conversationId: string;
+      readonly viewerUserId: string;
+      readonly clearedBeforeSeq: number;
+    },
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<{ readonly row: MessageRow; readonly senderPublicId: string } | null> {
+    const msgRows = await executor
+      .select({
+        row: messages,
+        senderPublicId: users.publicId,
+      })
+      .from(messages)
+      .innerJoin(users, eq(messages.senderId, users.id))
+      .where(
+        and(
+          eq(messages.conversationId, params.conversationId),
+          gt(messages.seq, params.clearedBeforeSeq),
+          sql`NOT EXISTS (
+            SELECT 1
+            FROM ${messageUserDeletions} mud
+            WHERE mud.message_id = ${messages.id}
+              AND mud.user_id = ${params.viewerUserId}
+          )`,
+        ),
+      )
+      .orderBy(desc(messages.seq))
+      .limit(1);
+
+    return msgRows[0] ?? null;
   }
 
   async listConversationsForUser(
@@ -641,8 +754,8 @@ export class ChatRepository {
           eq(conversationParticipants.userId, params.userId),
           eq(conversationParticipants.inboxState, params.tab),
           isNull(conversationParticipants.hiddenAt),
-          // Chỉ hiển thị trong danh sách hộp thư những cuộc trò chuyện đã có ít nhất 1 tin nhắn được gửi.
-          gt(conversations.lastSeq, 0),
+          // Chỉ hiển thị trong danh sách hộp thư những cuộc trò chuyện có tin nhắn mới hơn mốc đã xóa của bản thân.
+          gt(conversations.lastSeq, conversationParticipants.clearedBeforeSeq),
         ),
       )
       .orderBy(
@@ -730,28 +843,14 @@ export class ChatRepository {
 
       let lastMessage: ConversationListRowRecord['lastMessage'] = null;
       if (item.conversation.lastSeq > item.participant.clearedBeforeSeq) {
-        const msgRows = await executor
-          .select({
-            message: messages,
-            senderPublicId: users.publicId,
-          })
-          .from(messages)
-          .innerJoin(users, eq(messages.senderId, users.id))
-          .where(
-            and(
-              eq(messages.conversationId, item.conversation.id),
-              gt(messages.seq, item.participant.clearedBeforeSeq),
-            ),
-          )
-          .orderBy(desc(messages.seq))
-          .limit(1);
-
-        if (msgRows[0]) {
-          lastMessage = {
-            row: msgRows[0].message,
-            senderPublicId: msgRows[0].senderPublicId,
-          };
-        }
+        lastMessage = await this.findLatestVisibleMessageForConversation(
+          {
+            conversationId: item.conversation.id,
+            viewerUserId: params.userId,
+            clearedBeforeSeq: Number(item.participant.clearedBeforeSeq),
+          },
+          executor,
+        );
       }
 
       results.push({
@@ -834,9 +933,135 @@ export class ChatRepository {
     return inserted[0]!;
   }
 
+  async findMessageByPublicId(
+    publicId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<{ readonly row: MessageRow; readonly senderPublicId: string } | null> {
+    const rows = await executor
+      .select({
+        row: messages,
+        senderPublicId: users.publicId,
+      })
+      .from(messages)
+      .innerJoin(users, eq(messages.senderId, users.id))
+      .where(eq(messages.publicId, publicId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async lockMessageByPublicId(
+    publicId: string,
+    tx: DatabaseTransaction,
+  ): Promise<MessageRow | null> {
+    const rows = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.publicId, publicId))
+      .limit(1)
+      .for('update');
+    return rows[0] ?? null;
+  }
+
+  async isMessageDeletedForUser(
+    messageId: string,
+    userId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<boolean> {
+    const rows = await executor
+      .select({ messageId: messageUserDeletions.messageId })
+      .from(messageUserDeletions)
+      .where(
+        and(eq(messageUserDeletions.messageId, messageId), eq(messageUserDeletions.userId, userId)),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async updateEditedMessageAtomically(
+    params: {
+      readonly messageId: string;
+      readonly senderId: string;
+      readonly ciphertext: string;
+      readonly cryptoHeader: MessageCryptoHeaderRecord;
+      readonly maxEditCount: number;
+      readonly editWindowSeconds: number;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageRow | null> {
+    const rows = await tx
+      .update(messages)
+      .set({
+        ciphertext: params.ciphertext,
+        cryptoHeader: params.cryptoHeader,
+        editCount: sql`${messages.editCount} + 1`,
+        editedAt: sql`NOW()`,
+      })
+      .where(
+        and(
+          eq(messages.id, params.messageId),
+          eq(messages.senderId, params.senderId),
+          eq(messages.messageType, 'text'),
+          isNull(messages.recalledAt),
+          lt(messages.editCount, params.maxEditCount),
+          sql`(NOW() - ${messages.createdAt}) <= (${params.editWindowSeconds} * interval '1 second')`,
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async recallMessageAtomically(
+    params: {
+      readonly messageId: string;
+      readonly senderId: string;
+      readonly recallWindowSeconds: number;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageRow | null> {
+    const rows = await tx
+      .update(messages)
+      .set({
+        ciphertext: null,
+        cryptoHeader: null,
+        attachmentStorageKey: null,
+        recalledAt: sql`NOW()`,
+      })
+      .where(
+        and(
+          eq(messages.id, params.messageId),
+          eq(messages.senderId, params.senderId),
+          isNull(messages.recalledAt),
+          sql`(NOW() - ${messages.createdAt}) <= (${params.recallWindowSeconds} * interval '1 second')`,
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async insertMessageUserDeletion(
+    params: {
+      readonly messageId: string;
+      readonly userId: string;
+      readonly now: Date;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<void> {
+    await tx
+      .insert(messageUserDeletions)
+      .values({
+        messageId: params.messageId,
+        userId: params.userId,
+        deletedAt: params.now,
+      })
+      .onConflictDoNothing({
+        target: [messageUserDeletions.messageId, messageUserDeletions.userId],
+      });
+  }
+
   async listMessagesForConversation(
     params: {
       readonly conversationId: string;
+      readonly viewerUserId?: string;
       readonly clearedBeforeSeq: number;
       readonly limit: number;
       readonly cursorSeq?: number;
@@ -849,6 +1074,17 @@ export class ChatRepository {
       eq(messages.conversationId, params.conversationId),
       gt(messages.seq, minSeq),
     ];
+
+    if (params.viewerUserId) {
+      conditions.push(
+        sql`NOT EXISTS (
+          SELECT 1
+          FROM ${messageUserDeletions} mud
+          WHERE mud.message_id = ${messages.id}
+            AND mud.user_id = ${params.viewerUserId}
+        )`,
+      );
+    }
 
     if (params.cursorSeq !== undefined) {
       conditions.push(lt(messages.seq, params.cursorSeq));

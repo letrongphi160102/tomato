@@ -148,12 +148,21 @@ export function formatConversationShortTimeVi(
 
 /**
  * Kiểm tra một cuộc hội thoại có đang chứa tin nhắn chưa đọc từ đối phương hay không.
+ * Luôn xét mốc `GREATEST(lastReadSeq, clearedBeforeSeq)` để xóa đoạn chat có tin chưa đọc
+ * vẫn xóa sạch trạng thái chưa đọc mà không cần tăng giả `lastReadSeq`.
  */
 export function isConversationUnread(conv: ConversationSummaryDto): boolean {
-  if (conv.lastSeq <= conv.myState.lastReadSeq) {
+  const effectiveReadFloor = Math.max(conv.myState.lastReadSeq, conv.myState.clearedBeforeSeq ?? 0);
+  if (conv.lastSeq <= effectiveReadFloor) {
     return false;
   }
-  if (conv.lastMessage && conv.lastMessage.isOwnMessage) {
+  if (!conv.lastMessage) {
+    return false;
+  }
+  if (conv.lastMessage.isOwnMessage) {
+    return false;
+  }
+  if (conv.lastMessage.seq <= effectiveReadFloor) {
     return false;
   }
   return true;

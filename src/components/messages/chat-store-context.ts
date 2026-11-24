@@ -71,6 +71,20 @@ export interface ChatStoreContextValue {
     readonly plaintext: string;
     readonly retryClientMsgId?: string;
   }) => Promise<void>;
+  readonly editTextMessage: (params: {
+    readonly conversation: ConversationSummaryDto;
+    readonly message: DecryptedMessageViewItem;
+    readonly newPlaintext: string;
+  }) => Promise<void>;
+  readonly recallMessage: (params: {
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+  }) => Promise<void>;
+  readonly deleteMessageForMe: (params: {
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+  }) => Promise<void>;
+  readonly deleteConversationForMe: (conversationPublicId: string) => Promise<void>;
   readonly openOrCreateDirectConversation: (
     recipientPublicId: string,
   ) => Promise<ConversationSummaryDto>;
@@ -248,7 +262,11 @@ export function canAutoMarkConversationRead(params: AutoMarkConversationReadChec
   if (activeConv.myState.inboxState !== 'primary') {
     return false;
   }
-  if (params.targetSeq <= activeConv.myState.lastReadSeq) {
+  const effectiveReadFloor = Math.max(
+    activeConv.myState.lastReadSeq,
+    activeConv.myState.clearedBeforeSeq ?? 0,
+  );
+  if (params.targetSeq <= effectiveReadFloor) {
     return false;
   }
   return true;
@@ -260,6 +278,18 @@ export function buildMessageDecryptCacheKey(message: {
   readonly recalledAt: string | null;
 }): string {
   return `${message.public_id}:${message.editedAt ?? ''}:${message.recalledAt ?? ''}`;
+}
+
+export function purgeDecryptedMessageCacheByPublicId(
+  map: Map<string, DecryptedMessageCacheEntry>,
+  messagePublicId: string,
+): void {
+  const prefix = `${messagePublicId}:`;
+  for (const key of Array.from(map.keys())) {
+    if (key.startsWith(prefix)) {
+      map.delete(key);
+    }
+  }
 }
 
 export function putLruDecryptedMessageCache(

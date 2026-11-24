@@ -30,9 +30,14 @@ import {
 } from '@/modules/chat/e2ee-bootstrap';
 import {
   MAX_ACTIVE_E2EE_DEVICES_PER_USER,
+  MAX_MESSAGE_EDIT_COUNT,
   MAX_PENDING_MESSAGES_BEFORE_ACCEPT,
+  MESSAGE_EDIT_WINDOW_MS,
+  MESSAGE_RECALL_WINDOW_MS,
   chatPublicIdParamSchema,
   createDirectConversationInputSchema,
+  editMessageInputSchema,
+  emptyStrictObjectSchema,
   listConversationsQuerySchema,
   listMessagesQuerySchema,
   markConversationReadInputSchema,
@@ -111,6 +116,7 @@ export interface ConversationParticipantStateDto {
   readonly pendingMessagesSent: number;
   readonly pendingMessagesRemaining: number;
   readonly lastReadSeq: number;
+  readonly clearedBeforeSeq?: number;
 }
 
 export interface ConversationSummaryDto {
@@ -168,6 +174,22 @@ export interface SendMessageResult {
 export interface ConversationDecisionResult {
   readonly conversationPublicId: string;
   readonly inboxState: ConversationInboxState;
+  readonly message: string;
+}
+
+export interface DeleteMessageForMeResult {
+  readonly conversationPublicId: string;
+  readonly messagePublicId: string;
+  readonly nextLastMessage: ChatMessageDto | null;
+  readonly unreadConversationsCount: number;
+  readonly message: string;
+}
+
+export interface DeleteConversationForMeResult {
+  readonly conversationPublicId: string;
+  readonly clearedBeforeSeq: number;
+  readonly unreadConversationsCount: number;
+  readonly pendingCount: number;
   readonly message: string;
 }
 
@@ -279,6 +301,7 @@ function toConversationSummaryDto(
       pendingMessagesSent: sentCount,
       pendingMessagesRemaining: remaining,
       lastReadSeq: effectiveMyLastReadSeq,
+      clearedBeforeSeq: Number(record.actorParticipant.clearedBeforeSeq),
     },
     isAwaitingPeerAcceptance,
     canSendMedia: !isAwaitingPeerAcceptance && !isMyInboxPending,
@@ -306,6 +329,8 @@ export interface ChatServiceDependencies {
   readonly realtimeProvider?: RealtimeProvider;
   readonly notificationService?: NotificationService | null;
   readonly now?: () => Date;
+  /** Móc nối dọn tệp đính kèm trên Storage khi thu hồi tin nhắn (sẵn sàng cho M11). */
+  readonly onAttachmentRecalled?: (storageKey: string) => Promise<void>;
 }
 
 export class ChatService {
@@ -314,6 +339,8 @@ export class ChatService {
   private readonly realtimeProvider: RealtimeProvider;
   private readonly notificationService: NotificationService | null;
   private readonly now: () => Date;
+  private readonly hasCustomNow: boolean;
+  private readonly onAttachmentRecalled: ((storageKey: string) => Promise<void>) | null;
 
   constructor(deps: ChatServiceDependencies = {}) {
     this.repository = deps.repository ?? new ChatRepository();
@@ -326,6 +353,20 @@ export class ChatService {
           ? getNotificationService()
           : null;
     this.now = deps.now ?? (() => new Date());
+    this.hasCustomNow = deps.now !== undefined;
+    this.onAttachmentRecalled = deps.onAttachmentRecalled ?? null;
+  }
+
+  private async resolveAuthoritativeServerNow(
+    tx: Parameters<Parameters<ChatRepository['runInRlsTx']>[1]>[0],
+  ): Promise<Date> {
+    if (this.hasCustomNow) {
+      return this.now();
+    }
+    if (typeof this.repository.getDatabaseNow === 'function') {
+      return this.repository.getDatabaseNow(tx);
+    }
+    return this.now();
   }
 
   private async consumeRateLimitOrThrow(
@@ -594,7 +635,12 @@ export class ChatService {
             : listRows.filter(
                 (r) =>
                   r.actorParticipant.inboxState === 'primary' &&
-                  Number(r.conversation.lastSeq) > Number(r.actorParticipant.lastReadSeq) &&
+                  r.actorParticipant.hiddenAt === null &&
+                  Number(r.conversation.lastSeq) >
+                    Math.max(
+                      Number(r.actorParticipant.lastReadSeq),
+                      Number(r.actorParticipant.clearedBeforeSeq),
+                    ) &&
                   r.lastMessage !== null &&
                   r.lastMessage.senderPublicId !== actor.user.publicId,
               ).length;
@@ -796,13 +842,28 @@ export class ChatService {
         }
       }
 
+      // Chỉ nạp `lastMessage` khi có tin nhắn mới hơn mốc `cleared_before_seq` của `actor`.
+      // Khi mở lại hội thoại từng bị xóa (`last_seq === cleared_before_seq`), trả về `lastMessage: null` sạch sẽ, không lộ preview tin cũ.
+      const visibleLastMessage =
+        Number(conversation.lastSeq) > Number(actorParticipant.clearedBeforeSeq) &&
+        typeof this.repository.findLatestVisibleMessageForConversation === 'function'
+          ? await this.repository.findLatestVisibleMessageForConversation(
+              {
+                conversationId: conversation.id,
+                viewerUserId: lockedActor.id,
+                clearedBeforeSeq: Number(actorParticipant.clearedBeforeSeq),
+              },
+              tx,
+            )
+          : null;
+
       const summary = toConversationSummaryDto(
         {
           conversation,
           actorParticipant,
           peerParticipant,
           peerUser: lockedTarget,
-          lastMessage: null,
+          lastMessage: visibleLastMessage,
         },
         actor.user.publicId,
         {
@@ -860,13 +921,26 @@ export class ChatService {
         relationship,
       });
 
+      const visibleLastMessage =
+        Number(conversation.lastSeq) > Number(actorParticipant!.clearedBeforeSeq) &&
+        typeof this.repository.findLatestVisibleMessageForConversation === 'function'
+          ? await this.repository.findLatestVisibleMessageForConversation(
+              {
+                conversationId: conversation.id,
+                viewerUserId: actor.user.id,
+                clearedBeforeSeq: Number(actorParticipant!.clearedBeforeSeq),
+              },
+              tx,
+            )
+          : null;
+
       return toConversationSummaryDto(
         {
           conversation,
           actorParticipant: actorParticipant!,
           peerParticipant: peerParticipant!,
           peerUser: peerUser!,
-          lastMessage: null,
+          lastMessage: visibleLastMessage,
         },
         actor.user.publicId,
         {
@@ -1274,6 +1348,7 @@ export class ChatService {
       const msgRows = await this.repository.listMessagesForConversation(
         {
           conversationId: conversation.id,
+          viewerUserId: actor.user.id,
           clearedBeforeSeq: Number(actorParticipant!.clearedBeforeSeq),
           limit: parsedQuery.data.limit,
           cursorSeq: effectiveBeforeSeq,
@@ -1505,19 +1580,39 @@ export class ChatService {
         tx,
       );
 
-      // Người gửi tin nhắn mới hiển nhiên đã đọc hội thoại tới `nextSeq`.
-      if (Number(actorParticipant!.lastReadSeq) < nextSeq) {
+      // Người gửi tin nhắn mới hiển nhiên đã đọc hội thoại tới `nextSeq`,
+      // đồng thời luôn gỡ `hidden_at = NULL` nếu chính `actor` từng xóa/ẩn đoạn chat trước đó.
+      if (Number(actorParticipant!.lastReadSeq) < nextSeq || actorParticipant!.hiddenAt !== null) {
+        const nextActorReadSeq = Math.max(Number(actorParticipant!.lastReadSeq), nextSeq);
         actorParticipant = (await this.repository.updateParticipantState(
           conversation.id,
           actor.user.id,
           {
-            lastReadSeq: nextSeq,
+            lastReadSeq: nextActorReadSeq,
             hiddenAt: null,
           },
           tx,
         )) ?? {
           ...actorParticipant!,
-          lastReadSeq: nextSeq,
+          lastReadSeq: nextActorReadSeq,
+          hiddenAt: null,
+        };
+      }
+
+      // Nếu đối phương đang ở trạng thái `primary` nhưng từng xóa đoạn chat (`hidden_at IS NOT NULL`),
+      // tự động gỡ ẩn (`hidden_at = NULL`) để hội thoại hiện lại sạch sẽ và chỉ hiện tin `seq > cleared_before_seq`.
+      // Lưu ý: nếu đối phương đang ở `declined`, giữ nguyên luật im lặng tuyệt đối từ M9 (không gỡ ẩn, không thông báo).
+      if (peerParticipant!.inboxState === 'primary' && peerParticipant!.hiddenAt !== null) {
+        peerParticipant = (await this.repository.updateParticipantState(
+          conversation.id,
+          peerUser!.id,
+          {
+            hiddenAt: null,
+          },
+          tx,
+        )) ?? {
+          ...peerParticipant!,
+          hiddenAt: null,
         };
       }
 
@@ -1618,9 +1713,702 @@ export class ChatService {
     };
   }
 
+  // =========================================================================
+  // 5. Cột mốc M10 — Đọc đơn lẻ, Sửa/Thu hồi trong 5 phút, Xóa 1 phía & Xóa hội thoại
+  // =========================================================================
+
+  async getMessageByPublicId(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+  ): Promise<{ readonly message: ChatMessageDto }> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:read:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.getMessageByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+
+    const dto = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findMessageByPublicId(messagePublicId, tx);
+      if (!found) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(found.row.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:message:read', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (Number(found.row.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        found.row.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      return toMessageDto(
+        found.row,
+        conversation.publicId,
+        found.senderPublicId,
+        actor.user.publicId,
+      );
+    });
+
+    return { message: dto };
+  }
+
+  async editMessage(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+    rawInput: unknown,
+  ): Promise<{ readonly message: ChatMessageDto }> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:edit:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.editMessageByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const parsed = editMessageInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    const editWindowSeconds = Math.floor(MESSAGE_EDIT_WINDOW_MS / 1000);
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const lockedMessage = await this.repository.lockMessageByPublicId(messagePublicId, tx);
+      if (!lockedMessage) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(
+        lockedMessage.conversationId,
+        tx,
+      );
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      // Lớp 1 BOLA: Không phải thành viên hoặc bị chặn 2 chiều -> 404 đồng nhất.
+      assertChatAuthorized(actor, 'chat:message:edit', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      // Thành viên hội thoại nhưng không phải chủ sở hữu tin nhắn -> 403 FORBIDDEN.
+      if (lockedMessage.senderId !== actor.user.id) {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'FORBIDDEN',
+          message: CHAT_MESSAGES.editForbiddenNotOwner,
+        });
+      }
+
+      // Không cho sửa tin nhắn đã bị xóa ở phía chính mình hoặc đã bị xóa theo đoạn hội thoại.
+      if (Number(lockedMessage.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        lockedMessage.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      if (lockedMessage.recalledAt !== null) {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_ALREADY_RECALLED',
+          message: CHAT_MESSAGES.alreadyRecalled,
+        });
+      }
+
+      if (lockedMessage.messageType !== 'text') {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_EDIT_UNSUPPORTED_TYPE',
+          message: CHAT_MESSAGES.editUnsupportedType,
+        });
+      }
+
+      // Cưỡng chế thời hạn 5 phút (300 giây) theo đồng hồ PostgreSQL/Server.
+      const serverNow = await this.resolveAuthoritativeServerNow(tx);
+      const elapsedMs = serverNow.getTime() - lockedMessage.createdAt.getTime();
+      if (elapsedMs > MESSAGE_EDIT_WINDOW_MS) {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'CHAT_MESSAGE_EDIT_WINDOW_EXPIRED',
+          message: CHAT_MESSAGES.editWindowExpired,
+        });
+      }
+
+      if (lockedMessage.editCount >= MAX_MESSAGE_EDIT_COUNT) {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_EDIT_LIMIT_REACHED',
+          message: CHAT_MESSAGES.editLimitReached,
+        });
+      }
+
+      // Phòng thủ chống tái sử dụng IV AES-GCM ngay tại tầng Server.
+      if (
+        lockedMessage.cryptoHeader &&
+        lockedMessage.cryptoHeader.iv === parsed.data.cryptoHeader.iv
+      ) {
+        throw new ChatDomainError({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          message: CHAT_MESSAGES.editIvReused,
+          details: [
+            {
+              field: 'cryptoHeader.iv',
+              message: CHAT_MESSAGES.editIvReused,
+            },
+          ],
+        });
+      }
+
+      const updatedRow = await this.repository.updateEditedMessageAtomically(
+        {
+          messageId: lockedMessage.id,
+          senderId: actor.user.id,
+          ciphertext: parsed.data.ciphertext,
+          cryptoHeader: parsed.data.cryptoHeader,
+          maxEditCount: MAX_MESSAGE_EDIT_COUNT,
+          editWindowSeconds,
+        },
+        tx,
+      );
+
+      if (!updatedRow) {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'CHAT_MESSAGE_EDIT_WINDOW_EXPIRED',
+          message: CHAT_MESSAGES.editWindowExpired,
+        });
+      }
+
+      const dto = toMessageDto(
+        updatedRow,
+        conversation.publicId,
+        actor.user.publicId,
+        actor.user.publicId,
+      );
+
+      return {
+        message: dto,
+        peerPublicId: peerUser!.publicId,
+        shouldNotifyPeerRealtime: peerParticipant!.inboxState !== 'declined',
+      };
+    });
+
+    // Chỉ đẩy metadata siêu nhẹ (0% ciphertext / cryptoHeader) và luôn `await` trước khi trả HTTP response.
+    const eventPayload = {
+      conversationPublicId: outcome.message.conversationPublicId,
+      messagePublicId: outcome.message.public_id,
+      seq: outcome.message.seq,
+      editCount: outcome.message.editCount,
+      editedAt: outcome.message.editedAt,
+    };
+
+    const publishTasks: Promise<void>[] = [
+      this.publishChatEventBestEffort(actor.user.publicId, 'chat.message.updated', eventPayload),
+    ];
+    if (outcome.shouldNotifyPeerRealtime) {
+      publishTasks.push(
+        this.publishChatEventBestEffort(outcome.peerPublicId, 'chat.message.updated', eventPayload),
+      );
+    }
+    await Promise.all(publishTasks);
+
+    return { message: outcome.message };
+  }
+
+  async recallMessage(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+    rawInput: unknown = {},
+  ): Promise<{ readonly message: ChatMessageDto }> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:recall:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.recallMessageByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const parsedBody = emptyStrictObjectSchema.safeParse(rawInput ?? {});
+    if (!parsedBody.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsedBody.error),
+      });
+    }
+
+    const recallWindowSeconds = Math.floor(MESSAGE_RECALL_WINDOW_MS / 1000);
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const lockedMessage = await this.repository.lockMessageByPublicId(messagePublicId, tx);
+      if (!lockedMessage) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(
+        lockedMessage.conversationId,
+        tx,
+      );
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:message:recall', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (lockedMessage.senderId !== actor.user.id) {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'FORBIDDEN',
+          message: CHAT_MESSAGES.recallForbiddenNotOwner,
+        });
+      }
+
+      if (Number(lockedMessage.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        lockedMessage.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      if (lockedMessage.recalledAt !== null) {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_ALREADY_RECALLED',
+          message: CHAT_MESSAGES.alreadyRecalled,
+        });
+      }
+
+      const serverNow = await this.resolveAuthoritativeServerNow(tx);
+      const elapsedMs = serverNow.getTime() - lockedMessage.createdAt.getTime();
+      if (elapsedMs > MESSAGE_RECALL_WINDOW_MS) {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'CHAT_MESSAGE_RECALL_WINDOW_EXPIRED',
+          message: CHAT_MESSAGES.recallWindowExpired,
+        });
+      }
+
+      const previousAttachmentStorageKey = lockedMessage.attachmentStorageKey;
+      const recalledRow = await this.repository.recallMessageAtomically(
+        {
+          messageId: lockedMessage.id,
+          senderId: actor.user.id,
+          recallWindowSeconds,
+        },
+        tx,
+      );
+
+      if (!recalledRow) {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'CHAT_MESSAGE_RECALL_WINDOW_EXPIRED',
+          message: CHAT_MESSAGES.recallWindowExpired,
+        });
+      }
+
+      const dto = toMessageDto(
+        recalledRow,
+        conversation.publicId,
+        actor.user.publicId,
+        actor.user.publicId,
+      );
+
+      return {
+        message: dto,
+        previousAttachmentStorageKey,
+        peerPublicId: peerUser!.publicId,
+        shouldNotifyPeerRealtime: peerParticipant!.inboxState !== 'declined',
+      };
+    });
+
+    // Sẵn sàng móc nối xóa tệp bản mã trên Storage cho M11 (best-effort sau khi DB đã tombstone nguyên tử).
+    if (outcome.previousAttachmentStorageKey && this.onAttachmentRecalled) {
+      try {
+        await this.onAttachmentRecalled(outcome.previousAttachmentStorageKey);
+      } catch (error) {
+        logger.warn(
+          {
+            component: 'chat-service',
+            event: 'chat_recall_attachment_cleanup_failed',
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'Không thể dọn tệp đính kèm sau khi thu hồi tin nhắn',
+        );
+      }
+    }
+
+    const eventPayload = {
+      conversationPublicId: outcome.message.conversationPublicId,
+      messagePublicId: outcome.message.public_id,
+      seq: outcome.message.seq,
+      recalledAt: outcome.message.recalledAt,
+    };
+
+    const publishTasks: Promise<void>[] = [
+      this.publishChatEventBestEffort(actor.user.publicId, 'chat.message.recalled', eventPayload),
+    ];
+    if (outcome.shouldNotifyPeerRealtime) {
+      publishTasks.push(
+        this.publishChatEventBestEffort(
+          outcome.peerPublicId,
+          'chat.message.recalled',
+          eventPayload,
+        ),
+      );
+    }
+    await Promise.all(publishTasks);
+
+    return { message: outcome.message };
+  }
+
+  async deleteMessageForMe(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+  ): Promise<DeleteMessageForMeResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:delete_for_me:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.deleteMessageForMeByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const currentTime = this.now();
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findMessageByPublicId(messagePublicId, tx);
+      if (!found) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(found.row.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:message:delete_for_me', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      await this.repository.insertMessageUserDeletion(
+        {
+          messageId: found.row.id,
+          userId: actor.user.id,
+          now: currentTime,
+        },
+        tx,
+      );
+
+      const nextVisibleLastMsg = await this.repository.findLatestVisibleMessageForConversation(
+        {
+          conversationId: conversation.id,
+          viewerUserId: actor.user.id,
+          clearedBeforeSeq: Number(actorParticipant!.clearedBeforeSeq),
+        },
+        tx,
+      );
+
+      const unreadConversationsCount =
+        typeof this.repository.countUnreadPrimaryConversationsForUser === 'function'
+          ? await this.repository.countUnreadPrimaryConversationsForUser(actor.user.id, tx)
+          : 0;
+
+      return {
+        conversationPublicId: conversation.publicId,
+        messagePublicId: found.row.publicId,
+        seq: Number(found.row.seq),
+        nextLastMessage: nextVisibleLastMsg
+          ? toMessageDto(
+              nextVisibleLastMsg.row,
+              conversation.publicId,
+              nextVisibleLastMsg.senderPublicId,
+              actor.user.publicId,
+            )
+          : null,
+        unreadConversationsCount,
+        deletedAt: currentTime.toISOString(),
+      };
+    });
+
+    // CHỈ đồng bộ tới kênh cá nhân của chính `actor` (các tab khác của `actor`); TUYỆT ĐỐI KHÔNG gửi sang đối phương.
+    await this.publishChatEventBestEffort(actor.user.publicId, 'chat.message.deleted_for_me', {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      seq: outcome.seq,
+      unreadConversationsCount: outcome.unreadConversationsCount,
+      deletedAt: outcome.deletedAt,
+    });
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      nextLastMessage: outcome.nextLastMessage,
+      unreadConversationsCount: outcome.unreadConversationsCount,
+      message: CHAT_MESSAGES.messageDeletedForMe,
+    };
+  }
+
+  async deleteConversationForMe(
+    actor: AuthenticatedPrincipal,
+    rawConversationPublicId: string,
+  ): Promise<DeleteConversationForMeResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:conversations:delete:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.deleteConversationByUser,
+    );
+
+    const conversationPublicId = parsePublicIdOrThrowNotFound(rawConversationPublicId);
+    const currentTime = this.now();
+    const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const conversation = await this.repository.lockConversationByPublicId(
+        conversationPublicId,
+        tx,
+      );
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:conversation:delete', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      const conversationLastSeq = Number(conversation.lastSeq);
+      // Chỉ cập nhật `cleared_before_seq` và `hidden_at`; TUYỆT ĐỐI KHÔNG tăng `last_read_seq`
+      // để tránh làm đối phương nhìn thấy trạng thái "Đã xem" giả cho các tin chưa đọc.
+      const updatedActorParticipant = await this.repository.clearAndHideConversationForUser(
+        {
+          conversationId: conversation.id,
+          userId: actor.user.id,
+          conversationLastSeq,
+          now: currentTime,
+        },
+        tx,
+      );
+
+      if (actorParticipant!.inboxState === 'pending' && this.notificationService && peerUser) {
+        pendingDispatches.push(
+          await this.notificationService.removeMessageRequestNotificationsInTx(tx, {
+            recipientId: actor.user.id,
+            recipientPublicId: actor.user.publicId,
+            actorIds: [peerUser.id],
+          }),
+        );
+      }
+
+      const [unreadConversationsCount, pendingCount] = await Promise.all([
+        typeof this.repository.countUnreadPrimaryConversationsForUser === 'function'
+          ? this.repository.countUnreadPrimaryConversationsForUser(actor.user.id, tx)
+          : Promise.resolve(0),
+        typeof this.repository.countPendingConversationsForUser === 'function'
+          ? this.repository.countPendingConversationsForUser(actor.user.id, tx)
+          : Promise.resolve(0),
+      ]);
+
+      return {
+        conversationPublicId: conversation.publicId,
+        clearedBeforeSeq: Number(
+          updatedActorParticipant?.clearedBeforeSeq ??
+            Math.max(Number(actorParticipant!.clearedBeforeSeq), conversationLastSeq),
+        ),
+        unreadConversationsCount,
+        pendingCount,
+        deletedAt: currentTime.toISOString(),
+      };
+    });
+
+    if (this.notificationService && pendingDispatches.length > 0) {
+      await this.notificationService.dispatchRealtimeEvents(pendingDispatches);
+    }
+
+    // CHỈ đồng bộ tới kênh cá nhân của chính `actor` (không bắn `deleted` hay `read` sang đối phương).
+    await this.publishChatEventBestEffort(actor.user.publicId, 'chat.conversation.deleted', {
+      conversationPublicId: outcome.conversationPublicId,
+      clearedBeforeSeq: outcome.clearedBeforeSeq,
+      unreadConversationsCount: outcome.unreadConversationsCount,
+      pendingCount: outcome.pendingCount,
+      deletedAt: outcome.deletedAt,
+    });
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      clearedBeforeSeq: outcome.clearedBeforeSeq,
+      unreadConversationsCount: outcome.unreadConversationsCount,
+      pendingCount: outcome.pendingCount,
+      message: CHAT_MESSAGES.conversationDeletedForMe,
+    };
+  }
+
   private async publishChatEventBestEffort(
     recipientPublicId: string,
-    eventName: 'chat.message.created' | 'chat.conversation.read' | 'chat.conversation.updated',
+    eventName:
+      | 'chat.message.created'
+      | 'chat.message.updated'
+      | 'chat.message.recalled'
+      | 'chat.message.deleted_for_me'
+      | 'chat.conversation.read'
+      | 'chat.conversation.updated'
+      | 'chat.conversation.deleted',
     payload: Record<string, unknown>,
   ): Promise<void> {
     try {

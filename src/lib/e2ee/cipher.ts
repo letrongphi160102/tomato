@@ -253,6 +253,45 @@ export async function encryptDirectMessage(
   };
 }
 
+export interface ReEncryptEditedDirectMessageParams extends EncryptDirectMessageParams {
+  /** IV AES-GCM của phiên bản trước đó (nếu có) để khẳng định tuyệt đối không tái sử dụng IV. */
+  readonly previousIv?: string | null;
+}
+
+/**
+ * Mã hóa lại tin nhắn văn bản khi chỉnh sửa (M10):
+ * - Giữ nguyên AAD `conversationPublicId|senderPublicId|clientMsgId` để bảo toàn chống đánh tráo bản mã.
+ * - BẮT BUỘC sinh mới contentKey 256-bit, IV 96-bit mới hoàn toàn (`iv !== previousIv`),
+ *   ephemeral ECDH keys + wrap IV mới cho mọi thiết bị, và ký lại bằng ECDSA P-256 `signingPrivateKey`.
+ */
+export async function reEncryptEditedDirectMessage(
+  params: ReEncryptEditedDirectMessageParams,
+): Promise<EncryptedDirectMessageEnvelope> {
+  const cleanText = sanitizeChatPlaintext(params.plaintext).trim();
+  if (!cleanText) {
+    throw new E2eeCryptoError(
+      'INVALID_KEY_FORMAT',
+      'Nội dung tin nhắn chỉnh sửa không được để trống.',
+    );
+  }
+
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const envelope = await encryptDirectMessage({
+      ...params,
+      plaintext: cleanText,
+    });
+    if (!params.previousIv || envelope.cryptoHeader.iv !== params.previousIv) {
+      return envelope;
+    }
+  }
+
+  throw new E2eeCryptoError(
+    'WEBCRYPTO_UNAVAILABLE',
+    'Không thể tạo vector khởi tạo mã hóa mới an toàn. Vui lòng thử lại.',
+  );
+}
+
 export interface DecryptDirectMessageParams {
   readonly conversationPublicId: string;
   readonly senderPublicId: string;

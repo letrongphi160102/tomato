@@ -492,8 +492,12 @@ export function RealtimePresenceProvider({
 
     if (
       incoming.event === 'chat.message.created' ||
+      incoming.event === 'chat.message.updated' ||
+      incoming.event === 'chat.message.recalled' ||
+      incoming.event === 'chat.message.deleted_for_me' ||
       incoming.event === 'chat.conversation.read' ||
-      incoming.event === 'chat.conversation.updated'
+      incoming.event === 'chat.conversation.updated' ||
+      incoming.event === 'chat.conversation.deleted'
     ) {
       for (const listener of Array.from(chatListenersRef.current)) {
         try {

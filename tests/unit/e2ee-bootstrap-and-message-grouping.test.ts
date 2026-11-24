@@ -12,6 +12,13 @@ import {
   type CachedConversationThreadState,
 } from '@/components/messages/chat-store-context';
 import {
+  canDeleteMessageForMe,
+  canEditMessage,
+  canRecallMessage,
+  getConversationPreviewText,
+  RECALLED_MESSAGE_PLACEHOLDER,
+} from '@/components/messages/message-actions';
+import {
   buildClusteredMessageEntries,
   formatExactMessageTooltipTimeVi,
   formatMessageTimeDividerVi,
@@ -679,5 +686,123 @@ describe('Unit: Singleton E2EE Bootstrap (Chống spam 429), Gom cụm bong bón
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('M10: kiểm tra cửa sổ 5 phút cho Sửa/Thu hồi, giới hạn 5 lần sửa, preview thu hồi, nhãn Đã xem khi tin cuối thu hồi/xóa 1 phía & clearedBeforeSeq không gây lộ Đã xem giả', () => {
+    const createdAt = '2026-11-24T10:00:00.000Z';
+    const createdAtMs = Date.parse(createdAt);
+
+    const ownMsg = makeMessageItem({
+      seq: 5,
+      isOwnMessage: true,
+      createdAt,
+    });
+    const peerMsg = makeMessageItem({
+      seq: 6,
+      isOwnMessage: false,
+      createdAt,
+    });
+
+    // Phút thứ 4 + 59 giây (299s) -> cho phép Sửa & Thu hồi với tin của mình, cấm với tin đối phương.
+    expect(canEditMessage(ownMsg, createdAtMs + 299_000)).toBe(true);
+    expect(canRecallMessage(ownMsg, createdAtMs + 299_000)).toBe(true);
+    expect(canEditMessage(peerMsg, createdAtMs + 299_000)).toBe(false);
+    expect(canRecallMessage(peerMsg, createdAtMs + 299_000)).toBe(false);
+
+    // Phút thứ 5 + 1 giây (301s) -> tự ẩn cả Sửa và Thu hồi.
+    expect(canEditMessage(ownMsg, createdAtMs + 301_000)).toBe(false);
+    expect(canRecallMessage(ownMsg, createdAtMs + 301_000)).toBe(false);
+
+    // Đã sửa 5 lần -> ẩn nút Sửa nhưng vẫn cho Thu hồi nếu còn trong 5 phút.
+    const editedFiveTimes: GroupableMessageItem = {
+      ...ownMsg,
+      dto: { ...ownMsg.dto, editCount: 5, editedAt: '2026-11-24T10:03:00.000Z' },
+    };
+    expect(canEditMessage(editedFiveTimes, createdAtMs + 200_000)).toBe(false);
+    expect(canRecallMessage(editedFiveTimes, createdAtMs + 200_000)).toBe(true);
+
+    // Tin đã thu hồi -> ẩn Sửa & Thu hồi, nhưng luôn cho "Xóa ở phía bạn".
+    const recalledMsg = makeMessageItem({
+      seq: 7,
+      isOwnMessage: true,
+      createdAt,
+      recalledAt: '2026-11-24T10:02:00.000Z',
+    });
+    expect(canEditMessage(recalledMsg, createdAtMs + 150_000)).toBe(false);
+    expect(canRecallMessage(recalledMsg, createdAtMs + 150_000)).toBe(false);
+    expect(canDeleteMessageForMe(recalledMsg)).toBe(true);
+    expect(canDeleteMessageForMe(peerMsg)).toBe(true);
+    expect(getConversationPreviewText(recalledMsg.dto)).toBe(RECALLED_MESSAGE_PLACEHOLDER);
+    expect(getConversationPreviewText(null)).toBe('Bắt đầu cuộc trò chuyện');
+
+    // Khi tin cuối cùng của mình bị thu hồi -> buildClusteredMessageEntries KHÔNG treo nhãn "Đã xem" / "Đã gửi".
+    const clusteredWithRecalledLast = buildClusteredMessageEntries([ownMsg, recalledMsg], 7);
+    expect(clusteredWithRecalledLast.some((e) => e.isLastReadByPeer)).toBe(false);
+    expect(clusteredWithRecalledLast.some((e) => e.isLatestOwnSentUnread)).toBe(false);
+
+    // Sau khi xóa tin thu hồi đó ở phía mình -> danh sách còn lại [ownMsg] -> hiển thị "Đã xem" sạch trên ownMsg.
+    const clusteredAfterDeleteLast = buildClusteredMessageEntries([ownMsg], 7);
+    expect(clusteredAfterDeleteLast[0]?.isLastReadByPeer).toBe(true);
+
+    // Điều chỉnh (2): Hội thoại bị xóa khi đang có tin chưa đọc (`lastSeq = 5, clearedBeforeSeq = 5, lastReadSeq = 2`)
+    // KHÔNG bị coi là chưa đọc (`isConversationUnread = false`) và KHÔNG tự bắn POST `/read` (`canAutoMarkConversationRead = false`).
+    const clearedConv: ConversationSummaryDto = {
+      public_id: '99999999-9999-4999-8999-999999999999',
+      type: 'direct',
+      lastSeq: 5,
+      lastMessageAt: createdAt,
+      createdAt,
+      peer: {
+        public_id: '22222222-2222-4222-8222-222222222222',
+        handle: 'bob',
+        fullName: 'Bob',
+        avatarUrl: null,
+        isPrivate: false,
+      },
+      myState: {
+        inboxState: 'primary',
+        pendingMessagesSent: 0,
+        pendingMessagesRemaining: 3,
+        lastReadSeq: 2,
+        clearedBeforeSeq: 5,
+      },
+      isAwaitingPeerAcceptance: false,
+      canSendMedia: true,
+      canSendMoreMessages: true,
+      peerLastReadSeq: 2,
+      lastMessage: null,
+    };
+
+    expect(isConversationUnread(clearedConv)).toBe(false);
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/messages',
+        isMessagesViewportActive: true,
+        selectedConversation: clearedConv,
+        targetConversationPublicId: clearedConv.public_id,
+        targetSeq: 5,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
+
+    // Khi có tin mới `seq = 6` vượt mốc `clearedBeforeSeq = 5` -> trở lại chưa đọc và cho phép đánh dấu đã đọc khi mở.
+    const reopenedWithNewMsg: ConversationSummaryDto = {
+      ...clearedConv,
+      lastSeq: 6,
+      lastMessage: peerMsg.dto,
+    };
+    expect(isConversationUnread(reopenedWithNewMsg)).toBe(true);
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/messages',
+        isMessagesViewportActive: true,
+        selectedConversation: reopenedWithNewMsg,
+        targetConversationPublicId: reopenedWithNewMsg.public_id,
+        targetSeq: 6,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(true);
   });
 });

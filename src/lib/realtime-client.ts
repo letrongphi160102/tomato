@@ -1,7 +1,11 @@
 import type { InboundMessage, PubSubClient, TokenRequest } from '@ably/pubsub-device';
 
 import { authFetch } from '@/lib/auth-client';
-import type { RealtimeEventName, RealtimeSubscribeTokenDto } from '@/core/realtime/types';
+import {
+  REALTIME_EVENT_NAMES,
+  type RealtimeEventName,
+  type RealtimeSubscribeTokenDto,
+} from '@/core/realtime/types';
 
 export interface RealtimeClientEvent {
   readonly event: RealtimeEventName;
@@ -12,15 +16,7 @@ export interface RealtimeClientConnection {
   disconnect: () => void;
 }
 
-const SUPPORTED_EVENT_NAMES: ReadonlySet<string> = new Set<RealtimeEventName>([
-  'notification.created',
-  'notification.read',
-  'notification.removed',
-  'notification.deleted',
-  'chat.message.created',
-  'chat.conversation.read',
-  'chat.conversation.updated',
-]);
+const SUPPORTED_EVENT_NAMES: ReadonlySet<string> = new Set<RealtimeEventName>(REALTIME_EVENT_NAMES);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -168,15 +164,7 @@ function openPhysicalRealtimeConnection(
       const source = new EventSource(initialToken.streamUrl, { withCredentials: true });
       eventSource = source;
 
-      const eventNames: readonly RealtimeEventName[] = [
-        'notification.created',
-        'notification.read',
-        'notification.removed',
-        'notification.deleted',
-        'chat.message.created',
-        'chat.conversation.read',
-        'chat.conversation.updated',
-      ];
+      const eventNames: readonly RealtimeEventName[] = REALTIME_EVENT_NAMES;
 
       for (const eventName of eventNames) {
         source.addEventListener(eventName, (rawEvent) => {

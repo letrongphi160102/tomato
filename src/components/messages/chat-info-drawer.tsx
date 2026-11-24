@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { Ban, Check, Copy, ExternalLink, Lock, ShieldCheck, X } from 'lucide-react';
+import { Ban, Check, Copy, ExternalLink, Lock, ShieldCheck, Trash2, X } from 'lucide-react';
 
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { Button } from '@/components/ui/button';
@@ -16,6 +16,7 @@ export interface ChatInfoDrawerProps {
   readonly peer: ChatPeerUserDto;
   readonly peerKeyFingerprints: readonly string[];
   readonly onClose: () => void;
+  readonly onRequestDeleteConversation: () => void;
   readonly onRequestBlockPeer: () => void;
 }
 
@@ -26,6 +27,7 @@ export function ChatInfoDrawer({
   peer,
   peerKeyFingerprints,
   onClose,
+  onRequestDeleteConversation,
   onRequestBlockPeer,
 }: ChatInfoDrawerProps) {
   const [safetyGroups, setSafetyGroups] = React.useState<readonly string[]>([]);
@@ -163,7 +165,17 @@ export function ChatInfoDrawer({
           )}
         </div>
 
-        <div className="border-t pt-4">
+        <div className="space-y-1 border-t pt-4">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onRequestDeleteConversation}
+            className="w-full justify-start gap-2.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          >
+            <Trash2 className="size-4" aria-hidden="true" />
+            <span>Xóa đoạn chat</span>
+          </Button>
+
           <Button
             type="button"
             variant="ghost"

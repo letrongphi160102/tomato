@@ -11,6 +11,7 @@ import {
   getBackupDeviceKeyMaterial,
   getOrCreatePrimaryDeviceKeyMaterial,
   listLocalDeviceKeyMaterials,
+  reEncryptEditedDirectMessage,
   restorePinProtectedKeyBackup,
   sanitizeChatPlaintext,
 } from '@/lib/e2ee';
@@ -298,5 +299,71 @@ describe('Unit M9: WebCrypto E2EE Engine (ECDH P-256 + HKDF + AES-256-GCM + ECDS
     expect(safetyAB.formatted).toBe(safetyBA.formatted);
     expect(safetyAB.groups).toHaveLength(12);
     expect(safetyAB.formatted).toMatch(/^(\d{5} ){11}\d{5}$/);
+  });
+
+  it('M10: reEncryptEditedDirectMessage sinh mới hoàn toàn IV 96-bit, contentKey 256-bit, chữ ký ECDSA P-256 trên cùng AAD và lọc RTL override', async () => {
+    const aliceDevice = await getOrCreatePrimaryDeviceKeyMaterial(
+      alicePublicId,
+      '10000000-0000-4000-8000-000000000011',
+    );
+    const bobDevice = await getOrCreatePrimaryDeviceKeyMaterial(
+      bobPublicId,
+      '20000000-0000-4000-8000-000000000022',
+    );
+    const clientMsgId = 'msg_m10_edit_001';
+    const recipientDevices = [
+      {
+        devicePublicId: bobDevice.devicePublicId,
+        keyFingerprint: bobDevice.keyFingerprint,
+        identityPublicKeyJwk: bobDevice.identityPublicKeyJwk,
+        signingPublicKeyJwk: bobDevice.signingPublicKeyJwk,
+      },
+    ];
+    const senderDevices = [
+      {
+        devicePublicId: aliceDevice.devicePublicId,
+        keyFingerprint: aliceDevice.keyFingerprint,
+        identityPublicKeyJwk: aliceDevice.identityPublicKeyJwk,
+        signingPublicKeyJwk: aliceDevice.signingPublicKeyJwk,
+      },
+    ];
+
+    const original = await encryptDirectMessage({
+      conversationPublicId,
+      senderPublicId: alicePublicId,
+      clientMsgId,
+      plaintext: 'Bản gốc trước khi sửa',
+      senderDevice: aliceDevice,
+      recipientDevices,
+    });
+
+    const edited = await reEncryptEditedDirectMessage({
+      conversationPublicId,
+      senderPublicId: alicePublicId,
+      clientMsgId,
+      plaintext: 'Bản đã chỉnh sửa \u202Ean toàn\u202C ✨',
+      senderDevice: aliceDevice,
+      recipientDevices,
+      previousIv: original.cryptoHeader.iv,
+    });
+
+    // Tuyệt đối không tái sử dụng IV AES-GCM, wrap IV hay chữ ký cũ.
+    expect(edited.cryptoHeader.iv).not.toBe(original.cryptoHeader.iv);
+    expect(edited.ciphertext).not.toBe(original.ciphertext);
+    expect(edited.cryptoHeader.signature).not.toBe(original.cryptoHeader.signature);
+    expect(edited.cryptoHeader.wrappedKeys[bobDevice.keyFingerprint]?.iv).not.toBe(
+      original.cryptoHeader.wrappedKeys[bobDevice.keyFingerprint]?.iv,
+    );
+
+    const decryptedEdited = await decryptDirectMessage({
+      conversationPublicId,
+      senderPublicId: alicePublicId,
+      clientMsgId,
+      ciphertext: edited.ciphertext,
+      cryptoHeader: edited.cryptoHeader,
+      receiverKeyMaterials: [bobDevice],
+      expectedSenderDevices: senderDevices,
+    });
+    expect(decryptedEdited.text).toBe('Bản đã chỉnh sửa an toàn ✨');
   });
 });

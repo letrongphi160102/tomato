@@ -69,6 +69,7 @@ export const messages = pgTable(
     index('idx_messages_conversation_seq_desc').on(table.conversationId, table.seq.desc()),
     check('chk_messages_seq_positive', sql`${table.seq} >= 1`),
     check('chk_messages_edit_count_non_negative', sql`${table.editCount} >= 0`),
+    check('chk_messages_edit_count_max', sql`${table.editCount} <= 5`),
   ],
 );
 

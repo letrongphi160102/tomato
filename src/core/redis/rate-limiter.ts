@@ -283,6 +283,31 @@ export const CHAT_RATE_LIMITS = Object.freeze({
     windowSeconds: 60,
     strategy: 'sliding_window',
   }),
+  getMessageByUser: Object.freeze({
+    limit: 120,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  editMessageByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  recallMessageByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  deleteMessageForMeByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  deleteConversationByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
 } satisfies Record<string, RateLimitRule>);
 
 // Lua script nguyên tử cho Fixed Window: kiểm tra giới hạn, chỉ tăng bộ đếm khi còn hạn mức

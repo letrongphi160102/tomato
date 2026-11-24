@@ -45,7 +45,9 @@ function isNoStoreApiRoute(pathname: string): boolean {
     pathname === '/api/v1/e2ee' ||
     pathname.startsWith('/api/v1/e2ee/') ||
     pathname === '/api/v1/conversations' ||
-    pathname.startsWith('/api/v1/conversations/')
+    pathname.startsWith('/api/v1/conversations/') ||
+    pathname === '/api/v1/messages' ||
+    pathname.startsWith('/api/v1/messages/')
   );
 }
 

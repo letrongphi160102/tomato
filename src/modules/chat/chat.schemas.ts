@@ -7,6 +7,9 @@ export const MAX_ACTIVE_E2EE_DEVICES_PER_USER = 10;
 export const MAX_WRAPPED_KEYS_PER_MESSAGE = 20;
 export const MAX_MESSAGE_CIPHERTEXT_LENGTH = 16_384;
 export const MAX_PENDING_MESSAGES_BEFORE_ACCEPT = 3;
+export const MAX_MESSAGE_EDIT_COUNT = 5;
+export const MESSAGE_EDIT_WINDOW_MS = 5 * 60 * 1000;
+export const MESSAGE_RECALL_WINDOW_MS = 5 * 60 * 1000;
 export const MIN_PIN_BACKUP_PBKDF2_ITERATIONS = 600_000;
 export const MAX_PIN_BACKUP_PBKDF2_ITERATIONS = 2_000_000;
 
@@ -161,6 +164,18 @@ export const sendMessageInputSchema = z
       .max(64)
       .regex(CLIENT_MSG_ID_REGEX, 'clientMsgId không hợp lệ.'),
     messageType: z.enum(['text', 'image', 'voice', 'call_event']).default('text'),
+    ciphertext: z
+      .string()
+      .trim()
+      .min(16)
+      .max(MAX_MESSAGE_CIPHERTEXT_LENGTH)
+      .regex(BASE64URL_REGEX, 'Bản mã tin nhắn không hợp lệ.'),
+    cryptoHeader: messageCryptoHeaderSchema,
+  })
+  .strict();
+
+export const editMessageInputSchema = z
+  .object({
     ciphertext: z
       .string()
       .trim()
