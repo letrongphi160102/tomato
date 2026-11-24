@@ -36,6 +36,14 @@ export interface MessageCryptoHeaderRecord {
   readonly wrappedKeys: Readonly<Record<string, WrappedMessageKeyEntry>>;
 }
 
+export interface MessageCallEventMetaRecord {
+  readonly callPublicId: string;
+  readonly callType: 'audio' | 'video';
+  readonly status: 'ended' | 'missed' | 'declined' | 'busy';
+  readonly callerPublicId: string;
+  readonly durationSeconds: number | null;
+}
+
 export const messages = pgTable(
   'messages',
   {
@@ -53,6 +61,7 @@ export const messages = pgTable(
     messageType: messageTypeEnum('message_type').notNull(),
     ciphertext: text('ciphertext'),
     cryptoHeader: jsonb('crypto_header').$type<MessageCryptoHeaderRecord>(),
+    callEventMeta: jsonb('call_event_meta').$type<MessageCallEventMetaRecord>(),
     attachmentStorageKey: text('attachment_storage_key'),
     editCount: smallint('edit_count').notNull().default(0),
     editedAt: timestamp('edited_at', { withTimezone: true }),

@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 
+import { CallActionButtons } from '@/components/calls/call-action-buttons';
 import { ChatComposerWithMedia } from '@/components/messages/chat-media-composer';
 import {
   shouldRenderFloatingMessagesWidget,
@@ -915,6 +916,8 @@ export function FloatingMessagesWidget() {
                   </div>
 
                   <div className="flex shrink-0 items-center gap-0.5">
+                    <CallActionButtons conversation={activeMiniConversation} compact />
+
                     <ConversationActionsMenu
                       peerFullName={activeMiniConversation.peer.fullName}
                       compact

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Home, Loader2, LogOut, MessageCircle, Settings } from 'lucide-react';
 
+import { useCall } from '@/components/calls/call-context';
 import { useChatStore } from '@/components/messages/chat-store-context';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { authFetch, clearAccessTokenFreshness } from '@/lib/auth-client';
@@ -16,6 +17,7 @@ export function AppLeftSidebar() {
   const router = useRouter();
   const realtime = useRealtimePresence();
   const chatStore = useChatStore();
+  const call = useCall();
 
   const [loggingOut, setLoggingOut] = React.useState(false);
 
@@ -32,6 +34,7 @@ export function AppLeftSidebar() {
     }
     setLoggingOut(true);
     clearAccessTokenFreshness();
+    call?.cleanupOnLogout();
     chatStore?.clearAllChatCache();
     realtime?.disconnectAll();
     disconnectAllRealtimeConnections();

@@ -48,6 +48,8 @@ function isNoStoreApiRoute(pathname: string): boolean {
     pathname.startsWith('/api/v1/conversations/') ||
     pathname === '/api/v1/messages' ||
     pathname.startsWith('/api/v1/messages/') ||
+    pathname === '/api/v1/calls' ||
+    pathname.startsWith('/api/v1/calls/') ||
     pathname === '/api/v1/media/local/chat' ||
     pathname.startsWith('/api/v1/media/local/chat/')
   );

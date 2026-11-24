@@ -240,7 +240,7 @@ export const sendMessageInputSchema = z
       .min(8)
       .max(64)
       .regex(CLIENT_MSG_ID_REGEX, 'clientMsgId không hợp lệ.'),
-    messageType: z.enum(['text', 'image', 'voice', 'call_event']).default('text'),
+    messageType: z.enum(['text', 'image', 'voice']).default('text'),
     ciphertext: z
       .string()
       .trim()

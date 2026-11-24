@@ -17,6 +17,8 @@ const CLOUDFLARE_DUMMY_SECRET_KEYS = new Set([
 ]);
 
 const MIN_SECRET_LENGTH = 32;
+const METERED_HOSTNAME_REGEX =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 
 const emptyToUndefined = (value: unknown): unknown => {
   if (typeof value === 'string' && value.trim() === '') {
@@ -138,6 +140,22 @@ const rawEnvSchema = z
 
     REALTIME_PROVIDER: z.preprocess(emptyToUndefined, z.enum(['local', 'ably']).optional()),
     ABLY_API_KEY: optionalString(),
+
+    METERED_DOMAIN: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .toLowerCase()
+        .max(253)
+        .refine((val) => METERED_HOSTNAME_REGEX.test(val) && !/^\d+(?:\.\d+){3}$/.test(val), {
+          message:
+            'METERED_DOMAIN phải là tên miền hợp lệ (ví dụ: tomato-social.metered.live), không kèm https:// hay đường dẫn',
+        })
+        .optional(),
+    ),
+    METERED_SECRET_KEY: optionalString(),
+    METERED_TURN_API_KEY: optionalString(),
   })
   .superRefine((data, ctx) => {
     const isProduction = data.NODE_ENV === 'production';
@@ -392,6 +410,9 @@ export interface Env {
   readonly BLOB_READ_WRITE_TOKEN?: string;
   readonly REALTIME_PROVIDER: 'local' | 'ably';
   readonly ABLY_API_KEY?: string;
+  readonly METERED_DOMAIN?: string;
+  readonly METERED_SECRET_KEY?: string;
+  readonly METERED_TURN_API_KEY?: string;
 }
 
 export class EnvValidationError extends Error {
@@ -479,6 +500,9 @@ export function parseEnv(rawEnv: Record<string, string | undefined>): Env {
     BLOB_READ_WRITE_TOKEN: data.BLOB_READ_WRITE_TOKEN,
     REALTIME_PROVIDER: effectiveRealtimeProvider,
     ABLY_API_KEY: data.ABLY_API_KEY,
+    METERED_DOMAIN: data.METERED_DOMAIN,
+    METERED_SECRET_KEY: data.METERED_SECRET_KEY,
+    METERED_TURN_API_KEY: data.METERED_TURN_API_KEY,
   });
 }
 

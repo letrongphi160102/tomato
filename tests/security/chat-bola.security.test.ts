@@ -577,6 +577,7 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
           messageType: params.messageType,
           ciphertext: params.ciphertext,
           cryptoHeader: params.cryptoHeader,
+          callEventMeta: null,
           attachmentStorageKey: null,
           editCount: 0,
           editedAt: null,

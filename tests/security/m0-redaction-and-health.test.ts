@@ -170,6 +170,65 @@ describe('Security M0: Pino redact chống rò rỉ dữ liệu nhạy cảm', (
     const res = parsed.res as { headers: Record<string, unknown> };
     expect(res.headers['Set-Cookie']).toBe('[REDACTED]');
   });
+
+  it('M12: tẩy sạch SDP, ICE candidate, TURN credential và khóa Metered khỏi log Pino', () => {
+    const chunks: string[] = [];
+    const captureStream = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString('utf8'));
+        callback();
+      },
+    });
+
+    const logger = createLogger({
+      level: 'info',
+      destination: captureStream,
+    });
+
+    const webrtcSecrets = [
+      'v=0-synthetic-sdp-offer-body-m12',
+      'candidate:1-synthetic-ice-candidate-m12',
+      'synthetic-turn-credential-m12',
+      'synthetic-metered-secret-key-m12',
+      'synthetic-metered-turn-api-key-m12',
+    ];
+
+    logger.info(
+      {
+        sdp: webrtcSecrets[0],
+        candidate: webrtcSecrets[1],
+        credential: webrtcSecrets[2],
+        iceServers: [{ urls: 'turn:relay.invalid:443', credential: webrtcSecrets[2] }],
+        secretKey: webrtcSecrets[3],
+        apiKey: webrtcSecrets[4],
+        METERED_SECRET_KEY: webrtcSecrets[3],
+        METERED_TURN_API_KEY: webrtcSecrets[4],
+        nested: {
+          sdp: webrtcSecrets[0],
+          candidate: webrtcSecrets[1],
+          credential: webrtcSecrets[2],
+          secretKey: webrtcSecrets[3],
+          apiKey: webrtcSecrets[4],
+        },
+      },
+      'Kiểm thử redact khóa WebRTC/TURN M12',
+    );
+
+    const rawOutput = chunks.join('');
+    for (const secret of webrtcSecrets) {
+      expect(rawOutput).not.toContain(secret);
+    }
+
+    const parsed = JSON.parse(rawOutput.trim()) as Record<string, unknown>;
+    expect(parsed.sdp).toBe('[REDACTED]');
+    expect(parsed.candidate).toBe('[REDACTED]');
+    expect(parsed.credential).toBe('[REDACTED]');
+    expect(parsed.iceServers).toBe('[REDACTED]');
+    expect(parsed.secretKey).toBe('[REDACTED]');
+    expect(parsed.apiKey).toBe('[REDACTED]');
+    expect(parsed.METERED_SECRET_KEY).toBe('[REDACTED]');
+    expect(parsed.METERED_TURN_API_KEY).toBe('[REDACTED]');
+  });
 });
 
 describe('Security M0: /api/health không lộ chi tiết hạ tầng khi dịch vụ lỗi', () => {

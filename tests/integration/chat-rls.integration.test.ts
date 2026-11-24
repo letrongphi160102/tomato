@@ -314,23 +314,26 @@ describe('Integration M9: PostgreSQL RLS (Non-BYPASSRLS Role), Non-Recursive Pol
     const bob = await seedAndLoginUser('m9_rls_b', 'Bob RLS');
     const davidOutsider = await seedAndLoginUser('m9_rls_d', 'David Outsider RLS');
 
-    // Khởi tạo role kiểm thử RLS không có quyền superuser và không có BYPASSRLS.
-    await db.execute(sql`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tomato_rls_verify_role') THEN
-          CREATE ROLE tomato_rls_verify_role NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-        END IF;
-      END
-      $$;
-    `);
-    await db.execute(sql`GRANT USAGE ON SCHEMA public TO tomato_rls_verify_role`);
-    await db.execute(
-      sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "conversations", "conversation_participants", "messages", "user_e2ee_devices", "user_e2ee_key_backups" TO tomato_rls_verify_role`,
-    );
-    await db.execute(
-      sql`GRANT EXECUTE ON FUNCTION "public"."app_current_user_id"(), "public"."app_is_conversation_member"(uuid) TO tomato_rls_verify_role`,
-    );
+    // Khởi tạo role kiểm thử RLS không có quyền superuser và không có BYPASSRLS (tuần tự hóa bằng advisory lock chống race catalog).
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(727012)`);
+      await tx.execute(sql`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tomato_rls_verify_role') THEN
+            CREATE ROLE tomato_rls_verify_role NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+          END IF;
+        END
+        $$;
+      `);
+      await tx.execute(sql`GRANT USAGE ON SCHEMA public TO tomato_rls_verify_role`);
+      await tx.execute(
+        sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "conversations", "conversation_participants", "messages", "user_e2ee_devices", "user_e2ee_key_backups" TO tomato_rls_verify_role`,
+      );
+      await tx.execute(
+        sql`GRANT EXECUTE ON FUNCTION "public"."app_current_user_id"(), "public"."app_is_conversation_member"(uuid) TO tomato_rls_verify_role`,
+      );
+    });
 
     // 1. Alice và Bob đăng ký khóa E2EE + Alice lưu bản sao lưu PIN.
     const aliceMat = await getOrCreatePrimaryDeviceKeyMaterial(alice.publicId);

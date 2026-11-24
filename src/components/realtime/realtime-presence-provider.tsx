@@ -7,6 +7,7 @@ import {
   clearRealtimeNotificationRamCache,
   getOrInitUserRealtimeNotificationRamCache,
   RealtimePresenceContext,
+  type CallRealtimeListener,
   type ChatRealtimeListener,
   type DeleteNotificationOutcome,
   type RealtimePresenceContextValue,
@@ -87,6 +88,7 @@ export function RealtimePresenceProvider({
   const inFlightUnreadDeleteIdsRef = React.useRef<Set<string>>(new Set());
   const exitTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const chatListenersRef = React.useRef<Set<ChatRealtimeListener>>(new Set());
+  const callListenersRef = React.useRef<Set<CallRealtimeListener>>(new Set());
   const connectionRef = React.useRef<RealtimeClientConnection | null>(null);
   const heartbeatIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const loggedOutRef = React.useRef(false);
@@ -590,6 +592,23 @@ export function RealtimePresenceProvider({
             // Không để lỗi ở 1 subscriber ảnh hưởng tới subscriber khác.
           }
         }
+        return;
+      }
+
+      if (
+        incoming.event === 'call.incoming' ||
+        incoming.event === 'call.accepted' ||
+        incoming.event === 'call.declined' ||
+        incoming.event === 'call.ended' ||
+        incoming.event === 'call.signal'
+      ) {
+        for (const listener of Array.from(callListenersRef.current)) {
+          try {
+            listener(incoming);
+          } catch {
+            // Cô lập lỗi của từng subscriber sự kiện cuộc gọi.
+          }
+        }
       }
     },
     [setNotifications, setUnreadCount],
@@ -599,6 +618,13 @@ export function RealtimePresenceProvider({
     chatListenersRef.current.add(listener);
     return () => {
       chatListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const subscribeCallEvents = React.useCallback((listener: CallRealtimeListener) => {
+    callListenersRef.current.add(listener);
+    return () => {
+      callListenersRef.current.delete(listener);
     };
   }, []);
 
@@ -767,6 +793,7 @@ export function RealtimePresenceProvider({
       deleteNotification,
       removeNotificationLocally,
       subscribeChatEvents,
+      subscribeCallEvents,
       ensureE2eeDeviceRegistered,
       disconnectAll,
     }),
@@ -788,6 +815,7 @@ export function RealtimePresenceProvider({
       readReceiptsEnabled,
       refreshNotifications,
       removeNotificationLocally,
+      subscribeCallEvents,
       subscribeChatEvents,
       unreadCount,
     ],

@@ -1142,6 +1142,7 @@ export class ChatRepository {
         and(
           eq(messages.id, params.messageId),
           eq(messages.senderId, params.senderId),
+          ne(messages.messageType, 'call_event'),
           isNull(messages.recalledAt),
           sql`(NOW() - ${messages.createdAt}) <= (${params.recallWindowSeconds} * interval '1 second')`,
         ),

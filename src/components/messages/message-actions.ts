@@ -2,6 +2,7 @@ import type {
   GroupableMessageItem,
   MessageBubbleClusterPosition,
 } from '@/components/messages/message-grouping';
+import type { MessageCallEventMetaRecord } from '@/core/db/schema/messages';
 import type { ChatMessageDto } from '@/modules/chat';
 
 export const MESSAGE_EDIT_WINDOW_MS = 5 * 60 * 1000;
@@ -12,6 +13,39 @@ export const IMAGE_MESSAGE_PREVIEW_LABEL = 'Đã gửi một ảnh';
 export const VOICE_MESSAGE_PREVIEW_LABEL = 'Tin nhắn thoại';
 export const PIN_SYNC_REQUIRED_PREVIEW = 'Nhập mã PIN để xem tin nhắn';
 export const UNAVAILABLE_OLD_MESSAGE_PREVIEW = 'Tin nhắn không khả dụng trên thiết bị này';
+
+export function formatCallEventDurationVi(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  const mm = String(minutes).padStart(2, '0');
+  const ss = String(seconds).padStart(2, '0');
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${mm}:${ss}`;
+  }
+  return `${mm}:${ss}`;
+}
+
+export function formatCallEventLabel(meta: MessageCallEventMetaRecord | null | undefined): string {
+  if (!meta) {
+    return 'Cuộc gọi';
+  }
+  const typeLabel = meta.callType === 'video' ? 'Cuộc gọi video' : 'Cuộc gọi thoại';
+  if (meta.status === 'ended') {
+    if (typeof meta.durationSeconds === 'number' && meta.durationSeconds > 0) {
+      return `${typeLabel} · ${formatCallEventDurationVi(meta.durationSeconds)}`;
+    }
+    return `${typeLabel} đã kết thúc`;
+  }
+  if (meta.status === 'missed') {
+    return 'Cuộc gọi nhỡ';
+  }
+  if (meta.status === 'declined') {
+    return 'Cuộc gọi bị từ chối';
+  }
+  return 'Người nhận đang bận';
+}
 
 /**
  * Kiểm tra tin nhắn có còn đủ điều kiện hiển thị nút "Chỉnh sửa" trên UI hay không.
@@ -47,7 +81,8 @@ export function canRecallMessage(item: GroupableMessageItem, nowMs: number = Dat
     item.sending ||
     Boolean(item.sendError) ||
     item.dto.seq <= 0 ||
-    item.dto.recalledAt !== null
+    item.dto.recalledAt !== null ||
+    item.dto.messageType === 'call_event'
   ) {
     return false;
   }
@@ -106,6 +141,9 @@ export function getConversationPreviewText(
   }
   if (lastMessage.recalledAt !== null) {
     return RECALLED_MESSAGE_PLACEHOLDER;
+  }
+  if (lastMessage.messageType === 'call_event') {
+    return formatCallEventLabel(lastMessage.callEventMeta);
   }
   if (decryptionFailed) {
     return options?.needsPinSync ? PIN_SYNC_REQUIRED_PREVIEW : UNAVAILABLE_OLD_MESSAGE_PREVIEW;

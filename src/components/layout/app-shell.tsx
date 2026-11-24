@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 
+import { CallProvider } from '@/components/calls/call-provider';
 import { AppLeftSidebar } from '@/components/layout/app-left-sidebar';
 import { AppTopBar } from '@/components/layout/app-top-bar';
 import { ChatStoreProvider } from '@/components/messages/chat-store-provider';
@@ -33,22 +34,24 @@ export function AppShell({
       initialAccessTokenRemainingMs={initialAccessTokenRemainingMs}
     >
       <ChatStoreProvider currentUserPublicId={user.public_id}>
-        <div className="min-h-screen bg-muted/30">
-          <AppTopBar
-            user={user}
-            avatarUrl={profile?.avatarUrl ?? null}
-            handle={profile?.handle ?? user.username}
-          />
-          <div className="flex min-h-[calc(100vh-3.5rem)]">
-            <AppLeftSidebar />
-            {/* Cột giữ chỗ cố định 72px trên Desktop để chống giật bố cục (Zero Layout Shift) khi Sidebar trượt mở rộng */}
-            <div className="hidden w-[72px] shrink-0 md:block" aria-hidden="true" />
-            <main className="mx-auto w-full max-w-5xl flex-1 px-4 pt-6 pb-20 sm:px-6 md:py-8">
-              {children}
-            </main>
+        <CallProvider currentUserPublicId={user.public_id}>
+          <div className="min-h-screen bg-muted/30">
+            <AppTopBar
+              user={user}
+              avatarUrl={profile?.avatarUrl ?? null}
+              handle={profile?.handle ?? user.username}
+            />
+            <div className="flex min-h-[calc(100vh-3.5rem)]">
+              <AppLeftSidebar />
+              {/* Cột giữ chỗ cố định 72px trên Desktop để chống giật bố cục (Zero Layout Shift) khi Sidebar trượt mở rộng */}
+              <div className="hidden w-[72px] shrink-0 md:block" aria-hidden="true" />
+              <main className="mx-auto w-full max-w-5xl flex-1 px-4 pt-6 pb-20 sm:px-6 md:py-8">
+                {children}
+              </main>
+            </div>
+            <FloatingMessagesWidget />
           </div>
-          <FloatingMessagesWidget />
-        </div>
+        </CallProvider>
       </ChatStoreProvider>
     </RealtimePresenceProvider>
   );

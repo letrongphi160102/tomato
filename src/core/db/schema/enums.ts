@@ -81,3 +81,22 @@ export const ATTACHMENT_MEDIA_KINDS = ['image', 'voice'] as const;
 export type AttachmentMediaKind = (typeof ATTACHMENT_MEDIA_KINDS)[number];
 
 export const attachmentMediaKindEnum = pgEnum('attachment_media_kind', ATTACHMENT_MEDIA_KINDS);
+
+export const CALL_TYPES = ['audio', 'video'] as const;
+
+export type CallType = (typeof CALL_TYPES)[number];
+
+export const callTypeEnum = pgEnum('call_type', CALL_TYPES);
+
+export const CALL_STATUSES = [
+  'ringing',
+  'connected',
+  'ended',
+  'missed',
+  'declined',
+  'busy',
+] as const;
+
+export type CallStatus = (typeof CALL_STATUSES)[number];
+
+export const callStatusEnum = pgEnum('call_status', CALL_STATUSES);

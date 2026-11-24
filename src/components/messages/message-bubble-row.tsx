@@ -1,7 +1,16 @@
 'use client';
 
 import * as React from 'react';
-import { MoreHorizontal, Pencil, RotateCcw, Trash2, Undo2 } from 'lucide-react';
+import {
+  MoreHorizontal,
+  Pencil,
+  Phone,
+  PhoneMissed,
+  RotateCcw,
+  Trash2,
+  Undo2,
+  Video,
+} from 'lucide-react';
 
 import type { DecryptedMessageViewItem } from '@/components/messages/chat-store-context';
 import type { ImageLightboxTarget } from '@/components/messages/image-lightbox-modal';
@@ -9,6 +18,7 @@ import {
   canDeleteMessageForMe,
   canEditMessage,
   canRecallMessage,
+  formatCallEventLabel,
   getMessageBubbleRadiusClasses,
   RECALLED_MESSAGE_PLACEHOLDER,
 } from '@/components/messages/message-actions';
@@ -86,6 +96,112 @@ export function MessageBubbleRow({
   const exactTooltipTime = formatExactMessageTooltipTimeVi(item.dto.createdAt);
   const tooltipLabel =
     exactTooltipTime && isEdited ? `${exactTooltipTime} • Đã chỉnh sửa` : exactTooltipTime;
+
+  if (item.dto.messageType === 'call_event' && !isRecalled) {
+    const callMeta = item.dto.callEventMeta;
+    const isMissedOrDeclined =
+      callMeta?.status === 'missed' ||
+      callMeta?.status === 'declined' ||
+      callMeta?.status === 'busy';
+    const isVideoCall = callMeta?.callType === 'video';
+    const callLabel = formatCallEventLabel(callMeta);
+
+    return (
+      <React.Fragment>
+        {timeDividerLabel ? (
+          <div className={cn('flex justify-center', isCompact ? 'my-2.5' : 'my-3.5')}>
+            <span
+              className={cn(
+                'rounded-full bg-muted/50 py-0.5 font-medium text-muted-foreground',
+                isCompact ? 'px-2.5 text-[10px]' : 'px-3 text-[11px]',
+              )}
+            >
+              {timeDividerLabel}
+            </span>
+          </div>
+        ) : null}
+
+        <div
+          className={cn(
+            'group/msg flex items-center justify-center gap-1.5',
+            isCompact ? 'my-2' : 'my-2.5',
+          )}
+        >
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                tabIndex={0}
+                onClick={() => onTapToggle?.(item.dto.clientMsgId)}
+                className={cn(
+                  'inline-flex items-center gap-2 rounded-full border bg-muted/45 font-medium text-foreground shadow-2xs focus:outline-none',
+                  isCompact ? 'px-3 py-1 text-[11px]' : 'px-3.5 py-1.5 text-xs',
+                )}
+              >
+                <span
+                  className={cn(
+                    'inline-flex items-center justify-center rounded-full',
+                    isCompact ? 'size-5' : 'size-6',
+                    isMissedOrDeclined
+                      ? 'bg-destructive/15 text-destructive'
+                      : 'bg-primary/15 text-primary',
+                  )}
+                >
+                  {isMissedOrDeclined ? (
+                    <PhoneMissed className={isCompact ? 'size-3' : 'size-3.5'} aria-hidden="true" />
+                  ) : isVideoCall ? (
+                    <Video className={isCompact ? 'size-3' : 'size-3.5'} aria-hidden="true" />
+                  ) : (
+                    <Phone className={isCompact ? 'size-3' : 'size-3.5'} aria-hidden="true" />
+                  )}
+                </span>
+                <span>{callLabel}</span>
+              </div>
+            </TooltipTrigger>
+            {tooltipLabel ? <TooltipContent side="top">{tooltipLabel}</TooltipContent> : null}
+          </Tooltip>
+
+          {allowDeleteForMe ? (
+            <div
+              className={cn(
+                'flex shrink-0 items-center transition-opacity duration-150',
+                menuOpen || isTapSelected
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover/msg:opacity-100 group-focus-within/msg:opacity-100',
+              )}
+            >
+              <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="Tùy chọn sự kiện cuộc gọi"
+                    onClick={(event) => event.stopPropagation()}
+                    className={cn(
+                      'inline-flex items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      isCompact ? 'size-6' : 'size-7',
+                    )}
+                  >
+                    <MoreHorizontal
+                      className={cn(isCompact ? 'size-3.5' : 'size-4')}
+                      aria-hidden="true"
+                    />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="center" sideOffset={4}>
+                  <DropdownMenuItem
+                    onSelect={() => onDeleteForMe(item)}
+                    className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+                  >
+                    <Trash2 className="size-3.5" aria-hidden="true" />
+                    <span>Xóa ở phía bạn</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          ) : null}
+        </div>
+      </React.Fragment>
+    );
+  }
 
   return (
     <React.Fragment>

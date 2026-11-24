@@ -179,6 +179,9 @@ function canClusterTogether(
   if (hasDividerBetween) {
     return false;
   }
+  if (prev.dto.messageType === 'call_event' || curr.dto.messageType === 'call_event') {
+    return false;
+  }
   if (prev.dto.senderPublicId !== curr.dto.senderPublicId) {
     return false;
   }
@@ -223,6 +226,7 @@ export function buildClusteredMessageEntries<TItem extends GroupableMessageItem>
   if (
     latestConversationItem &&
     latestConversationItem.dto.isOwnMessage &&
+    latestConversationItem.dto.messageType !== 'call_event' &&
     !latestConversationItem.sending &&
     !latestConversationItem.sendError &&
     latestConversationItem.dto.recalledAt === null &&
@@ -260,7 +264,8 @@ export function buildClusteredMessageEntries<TItem extends GroupableMessageItem>
     }
 
     const isEndOfCluster = clusterPosition === 'single' || clusterPosition === 'last';
-    const showPeerAvatar = !item.dto.isOwnMessage && isEndOfCluster;
+    const showPeerAvatar =
+      !item.dto.isOwnMessage && item.dto.messageType !== 'call_event' && isEndOfCluster;
 
     return {
       item,

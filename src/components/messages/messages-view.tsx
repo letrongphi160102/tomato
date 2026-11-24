@@ -17,6 +17,7 @@ import {
   Trash2,
 } from 'lucide-react';
 
+import { CallActionButtons } from '@/components/calls/call-action-buttons';
 import { ChatInfoDrawer } from '@/components/messages/chat-info-drawer';
 import { ChatComposerWithMedia } from '@/components/messages/chat-media-composer';
 import {
@@ -924,20 +925,24 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                     </Link>
                   </div>
 
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Thông tin đoạn chat"
-                    aria-expanded={infoDrawerOpen}
-                    onClick={() => setInfoDrawerOpen((prev) => !prev)}
-                    className={cn(
-                      'size-9 rounded-full',
-                      infoDrawerOpen ? 'bg-muted text-foreground' : 'text-muted-foreground',
-                    )}
-                  >
-                    <Info className="size-4.5" aria-hidden="true" />
-                  </Button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <CallActionButtons conversation={selectedConversation} />
+
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Thông tin đoạn chat"
+                      aria-expanded={infoDrawerOpen}
+                      onClick={() => setInfoDrawerOpen((prev) => !prev)}
+                      className={cn(
+                        'size-9 rounded-full',
+                        infoDrawerOpen ? 'bg-muted text-foreground' : 'text-muted-foreground',
+                      )}
+                    >
+                      <Info className="size-4.5" aria-hidden="true" />
+                    </Button>
+                  </div>
                 </header>
 
                 {/* Lịch sử tin nhắn (Cuộn lên để tải thêm + Gom cụm bong bóng + Tooltip giờ) */}

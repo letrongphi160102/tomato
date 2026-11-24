@@ -6,6 +6,11 @@ import type { RequestClientContext } from '@/core/security/client-context';
 import { formatZodErrorDetails } from '@/core/security/http-response';
 import type { AuthenticatedPrincipal } from '@/modules/auth/auth.policy';
 import {
+  getCallSignalingService,
+  type CallSignalingService,
+  type PendingCallRealtimeDispatch,
+} from '@/modules/calls';
+import {
   getNotificationService,
   type NotificationService,
   type PendingRealtimeDispatch,
@@ -115,6 +120,10 @@ export interface SocialServiceDependencies {
   readonly auditLogService?: AuditLogService;
   readonly notificationService?: NotificationService | null;
   readonly presenceService?: Pick<PresenceService, 'clearUserPresence'> | null;
+  readonly callSignalingService?: Pick<
+    CallSignalingService,
+    'terminateActiveCallsOnBlockInTx' | 'dispatchPendingRealtimeEvents'
+  > | null;
   readonly now?: () => Date;
   readonly privacyBatchSize?: number;
 }
@@ -137,6 +146,10 @@ export class SocialService {
   private readonly auditLogService: AuditLogService;
   private readonly notificationService: NotificationService | null;
   private readonly presenceService: Pick<PresenceService, 'clearUserPresence'> | null;
+  private readonly callSignalingService: Pick<
+    CallSignalingService,
+    'terminateActiveCallsOnBlockInTx' | 'dispatchPendingRealtimeEvents'
+  > | null;
   private readonly now: () => Date;
   private readonly privacyBatchSize: number;
 
@@ -155,6 +168,12 @@ export class SocialService {
         ? deps.presenceService
         : deps.repository === undefined
           ? getPresenceService()
+          : null;
+    this.callSignalingService =
+      deps.callSignalingService !== undefined
+        ? deps.callSignalingService
+        : deps.repository === undefined
+          ? getCallSignalingService()
           : null;
     this.now = deps.now ?? (() => new Date());
     this.privacyBatchSize = Math.max(1, deps.privacyBatchSize ?? PRIVACY_PENDING_BATCH_SIZE);
@@ -1018,6 +1037,7 @@ export class SocialService {
 
     const currentTime = this.now();
     const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
+    const pendingCallDispatches: PendingCallRealtimeDispatch[] = [];
 
     const result = await this.repository.getDb().transaction(async (tx) => {
       const lockedUsers = await this.repository.lockUsersInCanonicalOrder(
@@ -1067,6 +1087,21 @@ export class SocialService {
           currentTime,
           tx,
         );
+      }
+
+      // Cưỡng chế ngắt tức thì mọi cuộc gọi đang `ringing` hoặc `connected` giữa 2 người dùng.
+      if (this.callSignalingService) {
+        const terminatedCalls = await this.callSignalingService.terminateActiveCallsOnBlockInTx(
+          tx,
+          {
+            blockerId: lockedActor.id,
+            blockerPublicId: lockedActor.publicId,
+            blockedId: lockedTarget.id,
+            blockedPublicId: lockedTarget.publicId,
+            now: currentTime,
+          },
+        );
+        pendingCallDispatches.push(...terminatedCalls);
       }
 
       // Xóa sạch toàn bộ thông báo hai chiều (bao gồm cả follow_request và message_request) giữa A và B trong DB; im lặng tuyệt đối với B.
@@ -1139,6 +1174,10 @@ export class SocialService {
 
     if (this.notificationService && pendingDispatches.length > 0) {
       await this.notificationService.dispatchRealtimeEvents(pendingDispatches);
+    }
+
+    if (this.callSignalingService && pendingCallDispatches.length > 0) {
+      await this.callSignalingService.dispatchPendingRealtimeEvents(pendingCallDispatches);
     }
 
     return result;

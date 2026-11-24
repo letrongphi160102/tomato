@@ -286,4 +286,51 @@ describe('Unit M5: Sentry beforeSend / beforeBreadcrumb PII & Secret Scrubber', 
     expect(isThirdPartyBrowserNoiseEvent(zaloNoiseEvent)).toBe(true);
     expect(isThirdPartyBrowserNoiseEvent(appRealEvent)).toBe(false);
   });
+
+  it('M12: tẩy sạch SDP, ICE candidate, TURN credential và tham số secretKey/apiKey của Metered khỏi sự kiện Sentry', () => {
+    const sdpSecret = 'v=0 o=tomato-synthetic-sdp-session-99999 a=fingerprint:sha-256 AA:BB:CC';
+    const candidateSecret = 'candidate:1 1 UDP 2122252543 203.0.113.55 54321 typ host';
+    const turnCredentialSecret = 'synthetic-turn-credential-value-9911';
+    const meteredSecret = 'synthetic-metered-secret-9922';
+    const meteredApiKey = 'synthetic-metered-apikey-9933';
+
+    const event: ErrorEvent = {
+      type: undefined,
+      request: {
+        url: `https://tomato-social.metered.live/api/v1/turn/credentials?apiKey=${meteredApiKey}&secretKey=${meteredSecret}`,
+        query_string: `apiKey=${meteredApiKey}&secretKey=${meteredSecret}`,
+      },
+      extra: {
+        sdp: sdpSecret,
+        candidate: candidateSecret,
+        credential: turnCredentialSecret,
+        iceServers: [{ urls: 'turn:relay.invalid:443', credential: turnCredentialSecret }],
+        METERED_SECRET_KEY: meteredSecret,
+        METERED_TURN_API_KEY: meteredApiKey,
+      },
+      breadcrumbs: [
+        {
+          message: `Metered fetch failed for https://tomato-social.metered.live/api/v1/turn/credential?secretKey=${meteredSecret}&apiKey=${meteredApiKey}`,
+          data: {
+            sdp: sdpSecret,
+            credential: turnCredentialSecret,
+            secretKey: meteredSecret,
+            apiKey: meteredApiKey,
+          },
+        },
+      ],
+    };
+
+    const scrubbed = scrubSentryEvent(event);
+    const serialized = JSON.stringify(scrubbed);
+    for (const leaked of [
+      sdpSecret,
+      candidateSecret,
+      turnCredentialSecret,
+      meteredSecret,
+      meteredApiKey,
+    ]) {
+      expect(serialized).not.toContain(leaked);
+    }
+  });
 });

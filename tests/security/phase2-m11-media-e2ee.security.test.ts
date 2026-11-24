@@ -400,6 +400,7 @@ describe('Security M11: Ảnh HD & Tin nhắn thoại E2EE — BOLA/Pending/CSRF
           messageType: input.messageType,
           ciphertext: input.ciphertext,
           cryptoHeader: input.cryptoHeader,
+          callEventMeta: null,
           attachmentStorageKey: input.attachmentStorageKey ?? null,
           editCount: 0,
           editedAt: null,

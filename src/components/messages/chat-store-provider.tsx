@@ -27,6 +27,7 @@ import {
   type PinSyncState,
 } from '@/components/messages/chat-store-context';
 import {
+  formatCallEventLabel,
   getConversationPreviewText,
   IMAGE_MESSAGE_PREVIEW_LABEL,
   RECALLED_MESSAGE_PLACEHOLDER,
@@ -551,6 +552,13 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         return {
           dto,
           plaintext: RECALLED_MESSAGE_PLACEHOLDER,
+          decryptionFailed: false,
+        };
+      }
+      if (dto.messageType === 'call_event') {
+        return {
+          dto,
+          plaintext: formatCallEventLabel(dto.callEventMeta),
           decryptionFailed: false,
         };
       }

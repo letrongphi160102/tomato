@@ -6,7 +6,7 @@ import { extractSentryIngestOrigin } from '@/core/monitoring/sentry-scrub';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
 
 export const HSTS_HEADER_VALUE = 'max-age=31536000; includeSubDomains';
-export const PERMISSIONS_POLICY_VALUE = 'camera=(), microphone=(self), geolocation=()';
+export const PERMISSIONS_POLICY_VALUE = 'camera=(self), microphone=(self), geolocation=()';
 export const REFERRER_POLICY_VALUE = 'strict-origin-when-cross-origin';
 export const NO_REFERRER_POLICY_VALUE = 'no-referrer';
 export const API_CSP_VALUE = "default-src 'none'; frame-ancestors 'none'";

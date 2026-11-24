@@ -490,6 +490,7 @@ describe('Security M10: Ma trận BOLA 5 nhân vật, Sửa/Thu hồi trong 5 ph
           messageType: params.messageType,
           ciphertext: params.ciphertext,
           cryptoHeader: params.cryptoHeader,
+          callEventMeta: null,
           attachmentStorageKey: null,
           editCount: 0,
           editedAt: null,

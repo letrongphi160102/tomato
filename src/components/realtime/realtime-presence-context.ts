@@ -9,6 +9,7 @@ export interface DeleteNotificationOutcome {
 }
 
 export type ChatRealtimeListener = (event: RealtimeClientEvent) => void;
+export type CallRealtimeListener = (event: RealtimeClientEvent) => void;
 
 export interface RealtimePresenceContextValue {
   readonly notifications: readonly NotificationItemDto[];
@@ -30,6 +31,7 @@ export interface RealtimePresenceContextValue {
   readonly deleteNotification: (notificationPublicId: string) => Promise<DeleteNotificationOutcome>;
   readonly removeNotificationLocally: (publicId: string) => void;
   readonly subscribeChatEvents: (listener: ChatRealtimeListener) => () => void;
+  readonly subscribeCallEvents: (listener: CallRealtimeListener) => () => void;
   readonly ensureE2eeDeviceRegistered: () => Promise<boolean>;
   readonly disconnectAll: () => void;
 }

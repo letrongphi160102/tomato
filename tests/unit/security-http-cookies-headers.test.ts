@@ -45,7 +45,9 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     expect(prodHttpsHeaders['X-Content-Type-Options']).toBe('nosniff');
     expect(prodHttpsHeaders['X-Frame-Options']).toBe('DENY');
     expect(prodHttpsHeaders['Referrer-Policy']).toBe('strict-origin-when-cross-origin');
-    expect(prodHttpsHeaders['Permissions-Policy']).toContain('camera=()');
+    expect(prodHttpsHeaders['Permissions-Policy']).toBe(
+      'camera=(self), microphone=(self), geolocation=()',
+    );
 
     const devHttpHeaders = buildSecurityHeaders({
       nonce,
@@ -311,7 +313,7 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     expect(withoutAbly).not.toContain('ably.io');
   });
 
-  it('M11: Permissions-Policy mở microphone=(self), CSP có media-src blob: và allowVercelBlob mở đủ 4 origin Vercel Blob kể cả domain gốc', () => {
+  it('M11-M12: Permissions-Policy mở camera=(self) & microphone=(self), CSP có media-src blob:, allowVercelBlob mở đủ 4 origin và /api/v1/calls/* trả Cache-Control: no-store', () => {
     const defaultHeaders = buildSecurityHeaders({
       nonce: 'nonce-m11',
       isProduction: true,
@@ -320,7 +322,7 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
       isAuthApiRoute: false,
     });
     expect(defaultHeaders['Permissions-Policy']).toBe(
-      'camera=(), microphone=(self), geolocation=()',
+      'camera=(self), microphone=(self), geolocation=()',
     );
     const defaultCsp = defaultHeaders['Content-Security-Policy'] ?? '';
     expect(defaultCsp).toContain("media-src 'self' blob:");
@@ -360,5 +362,9 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     );
     const localChatUploadRes = proxy(localChatUploadReq);
     expect(localChatUploadRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+
+    const callsIceReq = new NextRequest('http://localhost:3000/api/v1/calls/ice-servers');
+    const callsIceRes = proxy(callsIceReq);
+    expect(callsIceRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
   });
 });

@@ -1,6 +1,7 @@
 export * from './audit-logs';
 export * from './auth-identities';
 export * from './blocks';
+export * from './call-sessions';
 export * from './conversation-participants';
 export * from './conversations';
 export * from './enums';

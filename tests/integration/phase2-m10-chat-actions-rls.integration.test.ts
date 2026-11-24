@@ -307,23 +307,26 @@ describe('Integration M10: PostgreSQL RLS `message_user_deletions` (Non-BYPASSRL
     const bob = await seedAndLoginUser('m10_b', 'Bob M10');
     const david = await seedAndLoginUser('m10_d', 'David M10');
 
-    // Đảm bảo role kiểm thử RLS không có BYPASSRLS có quyền trên bảng mới `message_user_deletions`.
-    await db.execute(sql`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tomato_rls_verify_role') THEN
-          CREATE ROLE tomato_rls_verify_role NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-        END IF;
-      END
-      $$;
-    `);
-    await db.execute(sql`GRANT USAGE ON SCHEMA public TO tomato_rls_verify_role`);
-    await db.execute(
-      sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "conversations", "conversation_participants", "messages", "message_user_deletions" TO tomato_rls_verify_role`,
-    );
-    await db.execute(
-      sql`GRANT EXECUTE ON FUNCTION "public"."app_current_user_id"(), "public"."app_is_conversation_member"(uuid) TO tomato_rls_verify_role`,
-    );
+    // Đảm bảo role kiểm thử RLS không có BYPASSRLS có quyền trên bảng mới `message_user_deletions` (tuần tự hóa bằng advisory lock).
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(727012)`);
+      await tx.execute(sql`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tomato_rls_verify_role') THEN
+            CREATE ROLE tomato_rls_verify_role NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+          END IF;
+        END
+        $$;
+      `);
+      await tx.execute(sql`GRANT USAGE ON SCHEMA public TO tomato_rls_verify_role`);
+      await tx.execute(
+        sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "conversations", "conversation_participants", "messages", "message_user_deletions" TO tomato_rls_verify_role`,
+      );
+      await tx.execute(
+        sql`GRANT EXECUTE ON FUNCTION "public"."app_current_user_id"(), "public"."app_is_conversation_member"(uuid) TO tomato_rls_verify_role`,
+      );
+    });
 
     // Bob follow Alice để hội thoại A-B vào thẳng `primary`.
     const followRes = await followPost(

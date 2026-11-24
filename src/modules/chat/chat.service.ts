@@ -14,6 +14,7 @@ import type {
   E2eeBackupKdfParamsRecord,
   E2eePublicJwkRecord,
   MessageAttachmentRow,
+  MessageCallEventMetaRecord,
   MessageCryptoHeaderRecord,
   MessageRow,
   MessageType,
@@ -167,6 +168,7 @@ export interface ChatMessageDto {
   readonly messageType: MessageType;
   readonly ciphertext: string | null;
   readonly cryptoHeader: MessageCryptoHeaderRecord | null;
+  readonly callEventMeta?: MessageCallEventMetaRecord | null;
   readonly editCount: number;
   readonly editedAt: string | null;
   readonly recalledAt: string | null;
@@ -336,6 +338,9 @@ function toMessageDto(
     messageType: row.messageType,
     ciphertext: row.recalledAt ? null : row.ciphertext,
     cryptoHeader: row.recalledAt ? null : row.cryptoHeader,
+    ...(row.messageType === 'call_event'
+      ? { callEventMeta: row.recalledAt ? null : (row.callEventMeta ?? null) }
+      : {}),
     editCount: row.editCount,
     editedAt: row.editedAt ? row.editedAt.toISOString() : null,
     recalledAt: row.recalledAt ? row.recalledAt.toISOString() : null,
@@ -2897,6 +2902,14 @@ export class ChatService {
           status: 409,
           code: 'CHAT_MESSAGE_ALREADY_RECALLED',
           message: CHAT_MESSAGES.alreadyRecalled,
+        });
+      }
+
+      if (lockedMessage.messageType === 'call_event') {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_RECALL_UNSUPPORTED_TYPE',
+          message: CHAT_MESSAGES.recallUnsupportedType,
         });
       }
 

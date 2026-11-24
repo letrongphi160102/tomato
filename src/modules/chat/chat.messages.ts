@@ -22,6 +22,7 @@ export const CHAT_MESSAGES = Object.freeze({
   editLimitReached: 'Bạn đã đạt giới hạn tối đa 5 lần chỉnh sửa cho tin nhắn này.',
   alreadyRecalled: 'Tin nhắn này đã được thu hồi.',
   editUnsupportedType: 'Chỉ có thể chỉnh sửa tin nhắn văn bản.',
+  recallUnsupportedType: 'Không thể thu hồi thẻ sự kiện cuộc gọi.',
   editIvReused: 'Dữ liệu cập nhật không hợp lệ. Vui lòng thử lại.',
   deviceRegistered: 'Đã đồng bộ thiết bị nhắn tin.',
   backupSaved: 'Đã lưu mã PIN đồng bộ tin nhắn.',

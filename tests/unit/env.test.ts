@@ -284,4 +284,38 @@ describe('parseEnv (fail-fast Zod validation)', () => {
       expect((error as EnvValidationError).message).not.toContain(malformedKey);
     }
   });
+
+  it('M12: hỗ trợ 3 biến Metered phía Server dạng optional, kiểm tra domain chặt chống SSRF và không lộ giá trị lỗi', () => {
+    const withoutMetered = parseEnv(createBaseEnv());
+    expect(withoutMetered.METERED_DOMAIN).toBeUndefined();
+    expect(withoutMetered.METERED_SECRET_KEY).toBeUndefined();
+    expect(withoutMetered.METERED_TURN_API_KEY).toBeUndefined();
+
+    const withMetered = parseEnv(
+      createBaseEnv({
+        METERED_DOMAIN: 'TOMATO-SOCIAL.METERED.LIVE',
+        METERED_SECRET_KEY: 'synthetic-metered-secret-key-for-test',
+        METERED_TURN_API_KEY: 'synthetic-metered-turn-api-key-for-test',
+      }),
+    );
+    expect(withMetered.METERED_DOMAIN).toBe('tomato-social.metered.live');
+    expect(withMetered.METERED_SECRET_KEY).toBe('synthetic-metered-secret-key-for-test');
+    expect(withMetered.METERED_TURN_API_KEY).toBe('synthetic-metered-turn-api-key-for-test');
+
+    for (const invalidDomain of [
+      'https://tomato-social.metered.live',
+      'tomato-social.metered.live/path',
+      '127.0.0.1',
+      'localhost',
+      '169.254.169.254',
+    ]) {
+      try {
+        parseEnv(createBaseEnv({ METERED_DOMAIN: invalidDomain }));
+        expect.unreachable(`Phải từ chối METERED_DOMAIN không hợp lệ: ${invalidDomain}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(EnvValidationError);
+        expect((error as EnvValidationError).message).not.toContain(invalidDomain);
+      }
+    }
+  });
 });
