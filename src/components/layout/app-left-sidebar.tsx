@@ -46,15 +46,25 @@ export function AppLeftSidebar() {
 
   return (
     <>
-      {/* Desktop Hover-Expand Sidebar (Zero Layout Shift: giữ khung 72px, mở rộng trượt nổi 232px với z-30) */}
+      {/* Desktop Hover-Expand Sidebar (Zero Layout Shift: giữ khung 72px, mở rộng trượt nổi 232px khi hover với z-30) */}
       <aside
         aria-label="Điều hướng chính"
-        className="group fixed left-0 top-14 z-30 hidden h-[calc(100vh-3.5rem)] w-[72px] flex-col justify-between overflow-hidden border-r bg-background/95 px-3 py-4 backdrop-blur transition-[width,box-shadow] duration-200 ease-out focus-within:w-[232px] focus-within:shadow-xl hover:w-[232px] hover:shadow-xl md:flex"
+        onMouseLeave={(event) => {
+          if (
+            typeof document !== 'undefined' &&
+            document.activeElement instanceof HTMLElement &&
+            event.currentTarget.contains(document.activeElement)
+          ) {
+            document.activeElement.blur();
+          }
+        }}
+        className="group fixed left-0 top-14 z-30 hidden h-[calc(100vh-3.5rem)] w-[72px] flex-col justify-between overflow-hidden border-r bg-background/95 px-3 py-4 backdrop-blur transition-[width,box-shadow] duration-200 ease-out hover:w-[232px] hover:shadow-xl md:flex"
       >
         <nav aria-label="Menu điều hướng" className="flex flex-col gap-1.5">
           <Link
             href="/"
             aria-current={isHomeActive ? 'page' : undefined}
+            onClick={(event) => event.currentTarget.blur()}
             className={cn(
               'flex h-11 items-center rounded-xl transition-colors',
               isHomeActive
@@ -65,7 +75,7 @@ export function AppLeftSidebar() {
             <span className="flex size-12 shrink-0 items-center justify-center">
               <Home className="size-5" aria-hidden="true" />
             </span>
-            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
+            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-hover:opacity-100">
               Trang chủ
             </span>
           </Link>
@@ -73,6 +83,7 @@ export function AppLeftSidebar() {
           <Link
             href="/messages"
             aria-current={isMessagesActive ? 'page' : undefined}
+            onClick={(event) => event.currentTarget.blur()}
             aria-label={
               unreadMessagesCount > 0
                 ? `Tin nhắn (${unreadMessagesCount} cuộc trò chuyện chưa đọc)`
@@ -96,7 +107,7 @@ export function AppLeftSidebar() {
                 </span>
               ) : null}
             </span>
-            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
+            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-hover:opacity-100">
               Tin nhắn
             </span>
           </Link>
@@ -104,6 +115,7 @@ export function AppLeftSidebar() {
           <Link
             href="/settings/privacy"
             aria-current={isSettingsActive ? 'page' : undefined}
+            onClick={(event) => event.currentTarget.blur()}
             className={cn(
               'flex h-11 items-center rounded-xl transition-colors',
               isSettingsActive
@@ -114,7 +126,7 @@ export function AppLeftSidebar() {
             <span className="flex size-12 shrink-0 items-center justify-center">
               <Settings className="size-5" aria-hidden="true" />
             </span>
-            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
+            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-hover:opacity-100">
               Cài đặt
             </span>
           </Link>
@@ -124,7 +136,10 @@ export function AppLeftSidebar() {
           <button
             type="button"
             disabled={loggingOut}
-            onClick={() => void handleLogout()}
+            onClick={(event) => {
+              event.currentTarget.blur();
+              void handleLogout();
+            }}
             aria-label="Đăng xuất"
             className="flex h-11 w-full items-center rounded-xl font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
           >
@@ -135,7 +150,7 @@ export function AppLeftSidebar() {
                 <LogOut className="size-5" aria-hidden="true" />
               )}
             </span>
-            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
+            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-hover:opacity-100">
               {loggingOut ? 'Đang đăng xuất...' : 'Đăng xuất'}
             </span>
           </button>
