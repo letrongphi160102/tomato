@@ -1,5 +1,11 @@
 import 'server-only';
 
+import {
+  generateOtpCode,
+  hashScopedOtpCode,
+  maskEmailAddress,
+  verifyScopedOtpCode,
+} from '@/core/crypto/otp';
 import type {
   ConversationInboxState,
   E2eeBackupKdfParamsRecord,
@@ -10,9 +16,26 @@ import type {
   UserE2eeDeviceRow,
   UserE2eeKeyBackupRow,
 } from '@/core/db/schema';
+import { buildE2eePinResetOtpEmail, getEmailProvider, type EmailProvider } from '@/core/email';
 import { logger } from '@/core/logger';
 import { getRealtimeProvider, type RealtimeProvider } from '@/core/realtime';
-import { CHAT_RATE_LIMITS, getRateLimiter, type RateLimiter } from '@/core/redis';
+import {
+  CHAT_RATE_LIMITS,
+  PIN_RESET_OTP_COOLDOWN_SECONDS,
+  PIN_RESET_OTP_MAX_ATTEMPTS,
+  PIN_RESET_OTP_TTL_MINUTES,
+  PIN_RESET_OTP_TTL_SECONDS,
+  getPinResetOtpStore,
+  getRateLimiter,
+  type PinResetOtpStore,
+  type RateLimiter,
+} from '@/core/redis';
+import {
+  getAuditLogService,
+  type AuditAction,
+  type AuditLogService,
+} from '@/core/security/audit-log.service';
+import type { RequestClientContext } from '@/core/security/client-context';
 import { formatZodErrorDetails } from '@/core/security/http-response';
 import { computeDeviceKeyFingerprint } from '@/lib/e2ee/utils';
 import type { AuthenticatedPrincipal } from '@/modules/auth/auth.policy';
@@ -35,6 +58,7 @@ import {
   MESSAGE_EDIT_WINDOW_MS,
   MESSAGE_RECALL_WINDOW_MS,
   chatPublicIdParamSchema,
+  confirmPinResetInputSchema,
   createDirectConversationInputSchema,
   editMessageInputSchema,
   emptyStrictObjectSchema,
@@ -64,17 +88,39 @@ export interface E2eeDeviceKeyDto {
   readonly devicePublicId: string;
   readonly deviceLabel: string;
   readonly keyFingerprint: string;
+  readonly isSyncKey: boolean;
   readonly identityPublicKeyJwk: E2eePublicJwkRecord;
   readonly signingPublicKeyJwk: E2eePublicJwkRecord;
   readonly createdAt: string;
   readonly lastSeenAt: string;
 }
 
+export interface E2eeHistoricalSigningKeyDto {
+  readonly keyFingerprint: string;
+  readonly identityPublicKeyJwk: E2eePublicJwkRecord;
+  readonly signingPublicKeyJwk: E2eePublicJwkRecord;
+}
+
 export interface UserE2eeKeyBundleDto {
   readonly userPublicId: string;
   readonly devices: readonly E2eeDeviceKeyDto[];
+  readonly historicalSigningKeys?: readonly E2eeHistoricalSigningKeyDto[];
   readonly hasKeyBackup: boolean;
   readonly backupKeyFingerprint: string | null;
+  readonly backupVersion?: number | null;
+}
+
+export interface RequestPinResetOtpResult {
+  readonly maskedEmail: string;
+  readonly resendAfterSeconds: number;
+  readonly expiresInMinutes: number;
+  readonly message: string;
+}
+
+export interface ConfirmPinResetResult {
+  readonly backup: E2eeKeyBackupDto;
+  readonly device: E2eeDeviceKeyDto;
+  readonly message: string;
 }
 
 export interface E2eeKeyBackupDto {
@@ -198,10 +244,19 @@ function toDeviceDto(row: UserE2eeDeviceRow): E2eeDeviceKeyDto {
     devicePublicId: row.publicId,
     deviceLabel: row.deviceLabel,
     keyFingerprint: row.keyFingerprint,
+    isSyncKey: Boolean(row.isSyncKey),
     identityPublicKeyJwk: row.identityPublicKeyJwk,
     signingPublicKeyJwk: row.signingPublicKeyJwk,
     createdAt: row.createdAt.toISOString(),
     lastSeenAt: row.lastSeenAt.toISOString(),
+  };
+}
+
+function toHistoricalSigningKeyDto(row: UserE2eeDeviceRow): E2eeHistoricalSigningKeyDto {
+  return {
+    keyFingerprint: row.keyFingerprint,
+    identityPublicKeyJwk: row.identityPublicKeyJwk,
+    signingPublicKeyJwk: row.signingPublicKeyJwk,
   };
 }
 
@@ -328,22 +383,36 @@ export interface ChatServiceDependencies {
   readonly rateLimiter?: Pick<RateLimiter, 'consume'>;
   readonly realtimeProvider?: RealtimeProvider;
   readonly notificationService?: NotificationService | null;
+  readonly pinResetOtpStore?: PinResetOtpStore;
+  readonly emailProvider?: EmailProvider;
+  readonly auditLogService?: AuditLogService | null;
   readonly now?: () => Date;
   /** Móc nối dọn tệp đính kèm trên Storage khi thu hồi tin nhắn (sẵn sàng cho M11). */
   readonly onAttachmentRecalled?: (storageKey: string) => Promise<void>;
 }
+
+const DEFAULT_CLIENT_CONTEXT: RequestClientContext = Object.freeze({
+  ipAddress: null,
+  rateLimitIpKey: 'unknown',
+  userAgent: null,
+});
 
 export class ChatService {
   private readonly repository: ChatRepository;
   private readonly rateLimiter: Pick<RateLimiter, 'consume'>;
   private readonly realtimeProvider: RealtimeProvider;
   private readonly notificationService: NotificationService | null;
+  private readonly pinResetOtpStoreOverride?: PinResetOtpStore;
+  private readonly emailProviderOverride?: EmailProvider;
+  private readonly auditLogServiceOverride?: AuditLogService | null;
+  private readonly hasCustomRepository: boolean;
   private readonly now: () => Date;
   private readonly hasCustomNow: boolean;
   private readonly onAttachmentRecalled: ((storageKey: string) => Promise<void>) | null;
 
   constructor(deps: ChatServiceDependencies = {}) {
     this.repository = deps.repository ?? new ChatRepository();
+    this.hasCustomRepository = deps.repository !== undefined;
     this.rateLimiter = deps.rateLimiter ?? getRateLimiter();
     this.realtimeProvider = deps.realtimeProvider ?? getRealtimeProvider();
     this.notificationService =
@@ -352,9 +421,53 @@ export class ChatService {
         : deps.repository === undefined
           ? getNotificationService()
           : null;
+    this.pinResetOtpStoreOverride = deps.pinResetOtpStore;
+    this.emailProviderOverride = deps.emailProvider;
+    this.auditLogServiceOverride = deps.auditLogService;
     this.now = deps.now ?? (() => new Date());
     this.hasCustomNow = deps.now !== undefined;
     this.onAttachmentRecalled = deps.onAttachmentRecalled ?? null;
+  }
+
+  private resolvePinResetOtpStore(): PinResetOtpStore {
+    return this.pinResetOtpStoreOverride ?? getPinResetOtpStore();
+  }
+
+  private resolveEmailProvider(): EmailProvider {
+    return this.emailProviderOverride ?? getEmailProvider();
+  }
+
+  private resolveAuditLogService(): AuditLogService | null {
+    if (this.auditLogServiceOverride !== undefined) {
+      return this.auditLogServiceOverride;
+    }
+    return this.hasCustomRepository ? null : getAuditLogService();
+  }
+
+  private async recordAuditInTx(
+    params: {
+      readonly userId: string;
+      readonly action: AuditAction;
+      readonly context?: RequestClientContext;
+      readonly metadata?: Record<string, unknown>;
+    },
+    tx?: Parameters<Parameters<ChatRepository['runInRlsTx']>[1]>[0],
+  ): Promise<void> {
+    const audit = this.resolveAuditLogService();
+    if (!audit) {
+      return;
+    }
+    const ctx = params.context ?? DEFAULT_CLIENT_CONTEXT;
+    await audit.record(
+      {
+        userId: params.userId,
+        action: params.action,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+        metadata: params.metadata,
+      },
+      tx,
+    );
   }
 
   private async resolveAuthoritativeServerNow(
@@ -512,16 +625,53 @@ export class ChatService {
         devices = [provisioned.device];
       }
 
-      const ownBackup =
+      const [ownBackup, historicalRevoked] = await Promise.all([
         targetUser!.id === actor.user.id
-          ? await this.repository.findKeyBackupByUserId(actor.user.id, tx)
-          : null;
+          ? this.repository.findKeyBackupByUserId(actor.user.id, tx)
+          : Promise.resolve(null),
+        typeof this.repository.listHistoricalRevokedDevicesForUser === 'function'
+          ? this.repository.listHistoricalRevokedDevicesForUser(targetUser!.id, 50, tx)
+          : Promise.resolve([]),
+      ]);
+
+      // Bảo đảm Khóa Đồng bộ (nếu có) luôn đứng vị trí đầu tiên và không bao giờ bị cắt mất ở giới hạn 10 thiết bị.
+      const ownBackupFp = ownBackup?.keyFingerprint?.toLowerCase() ?? null;
+      const prioritizedDevices = [...devices].sort((a, b) => {
+        const aIsSync =
+          Boolean(a.isSyncKey) ||
+          (ownBackupFp !== null && a.keyFingerprint.toLowerCase() === ownBackupFp);
+        const bIsSync =
+          Boolean(b.isSyncKey) ||
+          (ownBackupFp !== null && b.keyFingerprint.toLowerCase() === ownBackupFp);
+        if (aIsSync !== bIsSync) {
+          return aIsSync ? -1 : 1;
+        }
+        return 0;
+      });
+
+      const selectedActiveDevices = prioritizedDevices.slice(0, MAX_ACTIVE_E2EE_DEVICES_PER_USER);
+      const selectedActiveFps = new Set(selectedActiveDevices.map((d) => d.keyFingerprint));
+      const overflowActiveForVerify = prioritizedDevices
+        .slice(MAX_ACTIVE_E2EE_DEVICES_PER_USER)
+        .filter((d) => !selectedActiveFps.has(d.keyFingerprint));
+
+      const historicalSigningKeys = [...overflowActiveForVerify, ...historicalRevoked]
+        .filter((d) => !selectedActiveFps.has(d.keyFingerprint))
+        .slice(0, 50)
+        .map(toHistoricalSigningKeyDto);
 
       return {
         userPublicId: targetUser!.publicId,
-        devices: devices.slice(0, MAX_ACTIVE_E2EE_DEVICES_PER_USER).map(toDeviceDto),
+        devices: selectedActiveDevices.map((row) => ({
+          ...toDeviceDto(row),
+          isSyncKey:
+            Boolean(row.isSyncKey) ||
+            (ownBackupFp !== null && row.keyFingerprint.toLowerCase() === ownBackupFp),
+        })),
+        historicalSigningKeys,
         hasKeyBackup: ownBackup !== null,
         backupKeyFingerprint: ownBackup?.keyFingerprint ?? null,
+        backupVersion: ownBackup?.version ?? null,
       };
     });
   }
@@ -529,6 +679,7 @@ export class ChatService {
   async upsertKeyBackup(
     actor: AuthenticatedPrincipal,
     rawInput: unknown,
+    context?: RequestClientContext,
   ): Promise<{ readonly backup: E2eeKeyBackupDto; readonly message: string }> {
     assertChatAuthorized(actor, 'e2ee:backup:write');
     await this.consumeRateLimitOrThrow(
@@ -546,9 +697,48 @@ export class ChatService {
       });
     }
 
+    if (parsed.data.identityPublicKeyJwk && parsed.data.signingPublicKeyJwk) {
+      const computedFingerprint = await computeDeviceKeyFingerprint(
+        parsed.data.identityPublicKeyJwk,
+        parsed.data.signingPublicKeyJwk,
+      );
+      if (computedFingerprint !== parsed.data.keyFingerprint) {
+        throw new ChatDomainError({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          message: CHAT_MESSAGES.validationFailed,
+          details: [
+            {
+              field: 'keyFingerprint',
+              message: 'Key fingerprint không khớp với cặp khóa công khai đồng bộ P-256.',
+            },
+          ],
+        });
+      }
+    }
+
     const currentTime = this.now();
-    const saved = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
-      return this.repository.upsertKeyBackup(
+    const { saved, wasUpdate } = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const existing =
+        typeof this.repository.findKeyBackupByUserId === 'function'
+          ? await this.repository.findKeyBackupByUserId(actor.user.id, tx)
+          : null;
+
+      // Bất biến bảo mật: Đổi mã PIN chỉ được phép giữ nguyên `keyFingerprint` gốc.
+      // Mọi thay đổi sang cặp khóa đồng bộ mới BẮT BUỘC phải xác thực email qua luồng Quên mã PIN.
+      if (
+        existing &&
+        existing.keyFingerprint.toLowerCase() !== parsed.data.keyFingerprint.toLowerCase()
+      ) {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CONFLICT',
+          message: CHAT_MESSAGES.backupKeyChangeRequiresReset,
+        });
+      }
+
+      const nextVersion = existing ? existing.version + 1 : 1;
+      const savedRow = await this.repository.upsertKeyBackup(
         {
           userId: actor.user.id,
           encryptedKeyBlob: parsed.data.encryptedKeyBlob,
@@ -556,16 +746,57 @@ export class ChatService {
           kdfParams: parsed.data.kdfParams,
           iv: parsed.data.iv,
           keyFingerprint: parsed.data.keyFingerprint,
-          version: parsed.data.version ?? 1,
+          version: nextVersion,
           now: currentTime,
         },
         tx,
       );
+
+      if (parsed.data.identityPublicKeyJwk && parsed.data.signingPublicKeyJwk) {
+        await this.repository.upsertUserE2eeDevice(
+          {
+            userId: actor.user.id,
+            sessionFamilyId: null,
+            deviceLabel: parsed.data.deviceLabel ?? 'Khóa đồng bộ tin nhắn',
+            identityPublicKeyJwk: parsed.data.identityPublicKeyJwk,
+            signingPublicKeyJwk: parsed.data.signingPublicKeyJwk,
+            keyFingerprint: parsed.data.keyFingerprint,
+            isSyncKey: true,
+            maxActiveDevices: MAX_ACTIVE_E2EE_DEVICES_PER_USER,
+            now: currentTime,
+          },
+          tx,
+        );
+      } else if (typeof this.repository.markDeviceAsSyncKeyByFingerprint === 'function') {
+        await this.repository.markDeviceAsSyncKeyByFingerprint(
+          {
+            userId: actor.user.id,
+            keyFingerprint: parsed.data.keyFingerprint,
+            now: currentTime,
+          },
+          tx,
+        );
+      }
+
+      await this.recordAuditInTx(
+        {
+          userId: actor.user.id,
+          action: existing ? 'E2EE_PIN_CHANGED' : 'E2EE_PIN_BACKUP_CREATED',
+          context,
+          metadata: {
+            backupVersion: nextVersion,
+            keyFingerprintPrefix: parsed.data.keyFingerprint.slice(0, 12),
+          },
+        },
+        tx,
+      );
+
+      return { saved: savedRow, wasUpdate: existing !== null };
     });
 
     return {
       backup: toBackupDto(saved),
-      message: CHAT_MESSAGES.backupSaved,
+      message: wasUpdate ? CHAT_MESSAGES.backupPinChanged : CHAT_MESSAGES.backupSaved,
     };
   }
 
@@ -584,6 +815,310 @@ export class ChatService {
 
     return {
       backup: row ? toBackupDto(row) : null,
+    };
+  }
+
+  /**
+   * Bước 1 Quên mã PIN tin nhắn:
+   * - Chỉ cho phép khi tài khoản đã thiết lập mã PIN (`existing !== null`).
+   * - Tự truy vấn email đã xác minh của chính `actor.user.id` từ DB (tuyệt đối không nhận từ body).
+   * - Sinh OTP 6 chữ số, chỉ lưu bản băm HMAC-SHA256 vào Redis (TTL 10 phút), gửi email và trả email đã che.
+   */
+  async requestPinResetOtp(
+    actor: AuthenticatedPrincipal,
+    rawInput: unknown,
+    context: RequestClientContext = DEFAULT_CLIENT_CONTEXT,
+  ): Promise<RequestPinResetOtpResult> {
+    assertChatAuthorized(actor, 'e2ee:backup:reset');
+
+    await this.consumeRateLimitOrThrow(
+      `chat:e2ee:pin-reset:request:ip:${context.rateLimitIpKey}`,
+      CHAT_RATE_LIMITS.pinResetRequestByIp,
+    );
+    await this.consumeRateLimitOrThrow(
+      `chat:e2ee:pin-reset:request:user-hourly:${actor.user.id}`,
+      CHAT_RATE_LIMITS.pinResetRequestByUserHourly,
+    );
+
+    const parsed = emptyStrictObjectSchema.safeParse(rawInput ?? {});
+    if (!parsed.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    const { verifiedEmail } = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const existing = await this.repository.findKeyBackupByUserId(actor.user.id, tx);
+      if (!existing) {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CONFLICT',
+          message: CHAT_MESSAGES.backupNotFoundForReset,
+        });
+      }
+
+      const email = await this.repository.findVerifiedEmailForUser(actor.user.id, tx);
+      if (!email) {
+        throw new ChatDomainError({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          message: CHAT_MESSAGES.pinResetEmailUnavailable,
+        });
+      }
+
+      return { verifiedEmail: email };
+    });
+
+    // Áp dụng cooldown 60s giữa các lần gửi lại SAU khi xác nhận tài khoản đủ điều kiện đặt lại.
+    await this.consumeRateLimitOrThrow(
+      `chat:e2ee:pin-reset:request:cooldown:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.pinResetRequestCooldown,
+    );
+
+    const otpCode = generateOtpCode();
+    const otpHashHex = hashScopedOtpCode(otpCode, {
+      userId: actor.user.id,
+      scope: 'e2ee_pin_reset',
+    });
+    const otpStore = this.resolvePinResetOtpStore();
+    await otpStore.issueOtp(actor.user.id, otpHashHex, PIN_RESET_OTP_TTL_SECONDS);
+
+    const maskedEmail = maskEmailAddress(verifiedEmail);
+    const renderedEmail = buildE2eePinResetOtpEmail({
+      displayName: actor.user.fullName,
+      otpCode,
+      expiresInMinutes: PIN_RESET_OTP_TTL_MINUTES,
+    });
+
+    try {
+      await this.resolveEmailProvider().send({
+        to: verifiedEmail,
+        subject: renderedEmail.subject,
+        html: renderedEmail.html,
+        text: renderedEmail.text,
+      });
+    } catch (error) {
+      await otpStore.clearOtp(actor.user.id).catch(() => undefined);
+      logger.error(
+        {
+          component: 'chat-service',
+          stage: 'pin_reset_email_send',
+          errorName: error instanceof Error ? error.name : 'Error',
+        },
+        'Không thể gửi email mã xác nhận đặt lại mã PIN',
+      );
+      throw new ChatDomainError({
+        status: 500,
+        code: 'INTERNAL_ERROR',
+        message: 'Không thể gửi mã xác nhận qua email lúc này. Vui lòng thử lại sau.',
+      });
+    }
+
+    await this.recordAuditInTx({
+      userId: actor.user.id,
+      action: 'E2EE_PIN_RESET_REQUESTED',
+      context,
+      metadata: {
+        maskedEmail,
+      },
+    }).catch(() => undefined);
+
+    return {
+      maskedEmail,
+      resendAfterSeconds: PIN_RESET_OTP_COOLDOWN_SECONDS,
+      expiresInMinutes: PIN_RESET_OTP_TTL_MINUTES,
+      message: CHAT_MESSAGES.pinResetOtpSent,
+    };
+  }
+
+  /**
+   * Bước 2 Quên mã PIN tin nhắn:
+   * - Xác minh OTP 6 chữ số qua `timingSafeEqual` (sai 5 lần tự hủy OTP trong Redis).
+   * - Xóa OTP nguyên tử bằng CAS + DEL (chống dùng lại OTP lần 2 / race condition).
+   * - Trong 1 DB transaction nguyên tử: cập nhật `user_e2ee_key_backups` với khóa đồng bộ mới (tăng `version`),
+   *   thu hồi cờ sync cũ & đăng ký khóa công khai đồng bộ mới vào `user_e2ee_devices`, ghi `audit_logs`.
+   */
+  async confirmPinReset(
+    actor: AuthenticatedPrincipal,
+    rawInput: unknown,
+    context: RequestClientContext = DEFAULT_CLIENT_CONTEXT,
+  ): Promise<ConfirmPinResetResult> {
+    assertChatAuthorized(actor, 'e2ee:backup:reset');
+
+    await this.consumeRateLimitOrThrow(
+      `chat:e2ee:pin-reset:confirm:ip:${context.rateLimitIpKey}`,
+      CHAT_RATE_LIMITS.pinResetConfirmByIp,
+    );
+    await this.consumeRateLimitOrThrow(
+      `chat:e2ee:pin-reset:confirm:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.pinResetConfirmByUser,
+    );
+
+    const parsed = confirmPinResetInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    // Server tự tính lại SHA-256 fingerprint từ cặp khóa công khai P-256 mới để chống giả mạo.
+    const computedFingerprint = await computeDeviceKeyFingerprint(
+      parsed.data.identityPublicKeyJwk,
+      parsed.data.signingPublicKeyJwk,
+    );
+    if (computedFingerprint !== parsed.data.keyFingerprint) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: [
+          {
+            field: 'keyFingerprint',
+            message: 'Key fingerprint không khớp với cặp khóa công khai đồng bộ P-256.',
+          },
+        ],
+      });
+    }
+
+    const existingBeforeOtp = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      return this.repository.findKeyBackupByUserId(actor.user.id, tx);
+    });
+    if (!existingBeforeOtp) {
+      throw new ChatDomainError({
+        status: 409,
+        code: 'CONFLICT',
+        message: CHAT_MESSAGES.backupNotFoundForReset,
+      });
+    }
+
+    const otpStore = this.resolvePinResetOtpStore();
+    const otpRecord = await otpStore.getOtpRecord(actor.user.id);
+    if (!otpRecord) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'TOKEN_INVALID',
+        message: CHAT_MESSAGES.pinResetOtpInvalidOrExpired,
+        details: [{ field: 'otpCode', message: CHAT_MESSAGES.pinResetOtpInvalidOrExpired }],
+      });
+    }
+
+    if (otpRecord.attempts >= PIN_RESET_OTP_MAX_ATTEMPTS) {
+      await otpStore.clearOtp(actor.user.id);
+      throw new ChatDomainError({
+        status: 400,
+        code: 'TOKEN_INVALID',
+        message: CHAT_MESSAGES.pinResetOtpRevokedMaxAttempts,
+        details: [{ field: 'otpCode', message: CHAT_MESSAGES.pinResetOtpRevokedMaxAttempts }],
+      });
+    }
+
+    const isOtpValid = verifyScopedOtpCode(parsed.data.otpCode, otpRecord.otpHashHex, {
+      userId: actor.user.id,
+      scope: 'e2ee_pin_reset',
+    });
+
+    if (!isOtpValid) {
+      const attemptOutcome = await otpStore.recordFailedAttempt(
+        actor.user.id,
+        otpRecord.otpHashHex,
+        PIN_RESET_OTP_MAX_ATTEMPTS,
+      );
+      const errorMessage = attemptOutcome.exhausted
+        ? CHAT_MESSAGES.pinResetOtpRevokedMaxAttempts
+        : CHAT_MESSAGES.pinResetOtpIncorrectWithRemaining(attemptOutcome.remainingAttempts);
+      throw new ChatDomainError({
+        status: 400,
+        code: 'TOKEN_INVALID',
+        message: errorMessage,
+        details: [{ field: 'otpCode', message: errorMessage }],
+      });
+    }
+
+    // Xóa OTP nguyên tử bằng CAS + DEL trước khi ghi DB để chống dùng lại OTP song song (replay race).
+    const consumed = await otpStore.consumeOtpIfMatches(actor.user.id, otpRecord.otpHashHex);
+    if (!consumed) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'TOKEN_INVALID',
+        message: CHAT_MESSAGES.pinResetOtpInvalidOrExpired,
+        details: [{ field: 'otpCode', message: CHAT_MESSAGES.pinResetOtpInvalidOrExpired }],
+      });
+    }
+
+    const currentTime = this.now();
+    const { savedBackup, savedDevice } = await this.repository.runInRlsTx(
+      actor.user.id,
+      async (tx) => {
+        const existingInTx = await this.repository.findKeyBackupByUserId(actor.user.id, tx);
+        if (!existingInTx) {
+          throw new ChatDomainError({
+            status: 409,
+            code: 'CONFLICT',
+            message: CHAT_MESSAGES.backupNotFoundForReset,
+          });
+        }
+
+        const nextVersion = existingInTx.version + 1;
+        const backupRow = await this.repository.upsertKeyBackup(
+          {
+            userId: actor.user.id,
+            encryptedKeyBlob: parsed.data.encryptedKeyBlob,
+            kdfSalt: parsed.data.kdfSalt,
+            kdfParams: parsed.data.kdfParams,
+            iv: parsed.data.iv,
+            keyFingerprint: computedFingerprint,
+            version: nextVersion,
+            now: currentTime,
+          },
+          tx,
+        );
+
+        const deviceOutcome = await this.repository.upsertUserE2eeDevice(
+          {
+            userId: actor.user.id,
+            sessionFamilyId: null,
+            deviceLabel: parsed.data.deviceLabel ?? 'Khóa đồng bộ tin nhắn',
+            identityPublicKeyJwk: parsed.data.identityPublicKeyJwk,
+            signingPublicKeyJwk: parsed.data.signingPublicKeyJwk,
+            keyFingerprint: computedFingerprint,
+            isSyncKey: true,
+            maxActiveDevices: MAX_ACTIVE_E2EE_DEVICES_PER_USER,
+            now: currentTime,
+          },
+          tx,
+        );
+
+        await this.recordAuditInTx(
+          {
+            userId: actor.user.id,
+            action: 'E2EE_PIN_RESET_COMPLETED',
+            context,
+            metadata: {
+              backupVersion: nextVersion,
+              previousKeyFingerprintPrefix: existingInTx.keyFingerprint.slice(0, 12),
+              newKeyFingerprintPrefix: computedFingerprint.slice(0, 12),
+            },
+          },
+          tx,
+        );
+
+        return {
+          savedBackup: backupRow,
+          savedDevice: deviceOutcome.device,
+        };
+      },
+    );
+
+    return {
+      backup: toBackupDto(savedBackup),
+      device: toDeviceDto(savedDevice),
+      message: CHAT_MESSAGES.pinResetCompleted,
     };
   }
 

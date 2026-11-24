@@ -81,7 +81,59 @@ export const upsertE2eeBackupInputSchema = z
       .trim()
       .toLowerCase()
       .regex(SHA256_HEX_REGEX, 'Key fingerprint không hợp lệ.'),
-    version: z.literal(1).optional(),
+    version: z.number().int().min(1).max(32_767).optional(),
+    identityPublicKeyJwk: p256PublicJwkSchema.optional(),
+    signingPublicKeyJwk: p256PublicJwkSchema.optional(),
+    deviceLabel: z.string().trim().min(1).max(64).optional(),
+  })
+  .strict()
+  .refine(
+    (data) =>
+      (data.identityPublicKeyJwk === undefined && data.signingPublicKeyJwk === undefined) ||
+      (data.identityPublicKeyJwk !== undefined && data.signingPublicKeyJwk !== undefined),
+    {
+      message: 'Cần cung cấp đầy đủ cặp khóa công khai đồng bộ.',
+      path: ['identityPublicKeyJwk'],
+    },
+  );
+
+export const confirmPinResetInputSchema = z
+  .object({
+    otpCode: z
+      .string()
+      .trim()
+      .regex(/^\d{6}$/, 'Mã xác nhận phải gồm đúng 6 chữ số.'),
+    encryptedKeyBlob: z
+      .string()
+      .trim()
+      .min(32)
+      .max(16_384)
+      .regex(BASE64URL_REGEX, 'Bản sao lưu mã hóa không hợp lệ.'),
+    kdfSalt: z
+      .string()
+      .trim()
+      .min(16)
+      .max(64)
+      .regex(BASE64URL_REGEX, 'Muối dẫn xuất khóa không hợp lệ.'),
+    kdfParams: z
+      .object({
+        alg: z.literal('PBKDF2-SHA256'),
+        iterations: z
+          .number()
+          .int()
+          .min(MIN_PIN_BACKUP_PBKDF2_ITERATIONS)
+          .max(MAX_PIN_BACKUP_PBKDF2_ITERATIONS),
+      })
+      .strict(),
+    iv: z.string().trim().min(12).max(32).regex(BASE64URL_REGEX, 'Vector khởi tạo không hợp lệ.'),
+    keyFingerprint: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .regex(SHA256_HEX_REGEX, 'Key fingerprint không hợp lệ.'),
+    identityPublicKeyJwk: p256PublicJwkSchema,
+    signingPublicKeyJwk: p256PublicJwkSchema,
+    deviceLabel: z.string().trim().min(1).max(64).optional(),
   })
   .strict();
 

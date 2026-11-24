@@ -18,6 +18,18 @@ import {
   type LoginFailureRecordResult,
 } from '@/core/redis/login-brute-force';
 import {
+  InMemoryPinResetOtpStore,
+  PIN_RESET_OTP_COOLDOWN_SECONDS,
+  PIN_RESET_OTP_MAX_ATTEMPTS,
+  PIN_RESET_OTP_TTL_MINUTES,
+  PIN_RESET_OTP_TTL_SECONDS,
+  RedisPinResetOtpStore,
+  type PinResetOtpFailedAttemptResult,
+  type PinResetOtpRecord,
+  type PinResetOtpStore,
+  type RedisPinResetOtpStoreOptions,
+} from '@/core/redis/pin-reset-otp-store';
+import {
   AUTH_RATE_LIMITS,
   CHAT_RATE_LIMITS,
   NOTIFICATION_RATE_LIMITS,
@@ -47,6 +59,12 @@ export {
   LOGIN_CAPTCHA_REQUIRED_ATTEMPT,
   LOGIN_PAIR_FAILURE_TTL_SECONDS,
   LoginBruteForceGuard,
+  InMemoryPinResetOtpStore,
+  PIN_RESET_OTP_COOLDOWN_SECONDS,
+  PIN_RESET_OTP_MAX_ATTEMPTS,
+  PIN_RESET_OTP_TTL_MINUTES,
+  PIN_RESET_OTP_TTL_SECONDS,
+  RedisPinResetOtpStore,
   RateLimiter,
   computeLoginBackoffSeconds,
   hashLoginPairKey,
@@ -55,6 +73,10 @@ export {
   type LoginBruteForceState,
   type LoginBruteForceStore,
   type LoginFailureRecordResult,
+  type PinResetOtpFailedAttemptResult,
+  type PinResetOtpRecord,
+  type PinResetOtpStore,
+  type RedisPinResetOtpStoreOptions,
   type RateLimitResult,
   type RateLimitRule,
   type RateLimitStrategy,
@@ -85,6 +107,7 @@ const globalForRedis = globalThis as typeof globalThis & {
   __tomatoRedisClient?: RedisClient;
   __tomatoRateLimiter?: RateLimiter;
   __tomatoLoginBruteForceGuard?: LoginBruteForceGuard;
+  __tomatoPinResetOtpStore?: PinResetOtpStore;
 };
 
 export function getRedisClient(): RedisClient {
@@ -106,6 +129,13 @@ export function getLoginBruteForceGuard(): LoginBruteForceGuard {
     globalForRedis.__tomatoLoginBruteForceGuard = new LoginBruteForceGuard(getRedisClient());
   }
   return globalForRedis.__tomatoLoginBruteForceGuard;
+}
+
+export function getPinResetOtpStore(): PinResetOtpStore {
+  if (!globalForRedis.__tomatoPinResetOtpStore) {
+    globalForRedis.__tomatoPinResetOtpStore = new RedisPinResetOtpStore(getRedisClient());
+  }
+  return globalForRedis.__tomatoPinResetOtpStore;
 }
 
 export async function checkRedisHealth(timeoutMs = 2_000): Promise<boolean> {
@@ -146,6 +176,7 @@ export async function checkRedisHealth(timeoutMs = 2_000): Promise<boolean> {
 export async function closeRedisClient(): Promise<void> {
   globalForRedis.__tomatoRateLimiter = undefined;
   globalForRedis.__tomatoLoginBruteForceGuard = undefined;
+  globalForRedis.__tomatoPinResetOtpStore = undefined;
   if (globalForRedis.__tomatoRedisClient) {
     const client = globalForRedis.__tomatoRedisClient;
     globalForRedis.__tomatoRedisClient = undefined;

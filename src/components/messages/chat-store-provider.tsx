@@ -8,16 +8,19 @@ import {
   canAutoMarkConversationRead,
   ChatStoreContext,
   clearChatRamMemorySingleton,
+  computeHighestVisibleMessageSeq,
   DEFAULT_MESSAGES_PAGE_LIMIT,
   getOrInitUserChatRamCache,
   PEER_KEY_BUNDLE_CACHE_TTL_MS,
   purgeDecryptedMessageCacheByPublicId,
   putLruConversationThreadCache,
   putLruDecryptedMessageCache,
+  resolvePinSyncState,
   shouldRenderFloatingMessagesWidget,
   type CachedConversationThreadState,
   type ChatStoreContextValue,
   type DecryptedMessageViewItem,
+  type PinSyncState,
 } from '@/components/messages/chat-store-context';
 import {
   getConversationPreviewText,
@@ -35,13 +38,14 @@ import {
   clearE2eeClientBootstrapState,
   ensureE2eeDeviceRegisteredSingleton,
   fetchServerKeyBackupLazySingleton,
+  setCachedServerKeyBackupInSession,
 } from '@/lib/e2ee/client-bootstrap';
 import {
   getBackupDeviceKeyMaterial,
   getOrCreatePrimaryDeviceKeyMaterial,
   listLocalDeviceKeyMaterials,
 } from '@/lib/e2ee/keystore';
-import type { E2eeTargetDevicePublicKey } from '@/lib/e2ee/types';
+import { E2eeCryptoError, type E2eeTargetDevicePublicKey } from '@/lib/e2ee/types';
 import type {
   ChatMessageDto,
   ConversationListResult,
@@ -55,6 +59,30 @@ import type {
   UserE2eeKeyBundleDto,
 } from '@/modules/chat';
 import type { PresenceStatusDto } from '@/modules/presence/presence.service';
+
+const PEER_SYNC_KEY_REFRESH_COOLDOWN_MS = 15_000;
+
+function buildVerificationDevices(
+  bundle: UserE2eeKeyBundleDto | null | undefined,
+): readonly E2eeTargetDevicePublicKey[] | undefined {
+  if (!bundle) {
+    return undefined;
+  }
+  const combined: E2eeTargetDevicePublicKey[] = [...bundle.devices];
+  const seen = new Set(combined.map((d) => d.keyFingerprint));
+  for (const hist of bundle.historicalSigningKeys ?? []) {
+    if (!seen.has(hist.keyFingerprint)) {
+      seen.add(hist.keyFingerprint);
+      combined.push({
+        devicePublicId: hist.keyFingerprint,
+        keyFingerprint: hist.keyFingerprint,
+        identityPublicKeyJwk: hist.identityPublicKeyJwk,
+        signingPublicKeyJwk: hist.signingPublicKeyJwk,
+      });
+    }
+  }
+  return combined.length > 0 ? combined : undefined;
+}
 
 export interface ChatStoreProviderProps {
   readonly currentUserPublicId: string;
@@ -112,6 +140,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   );
   const [threadVersion, setThreadVersion] = React.useState(0);
 
+  const pinSyncState: PinSyncState = resolvePinSyncState(ownKeyBundle, hasLocalRestoredBackup);
+
   const pathnameRef = React.useRef<string | null>(pathname);
   const isMessagesViewportActiveRef = React.useRef<boolean>(false);
   const floatingActiveConvIdRef = React.useRef<string | null>(null);
@@ -119,13 +149,15 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   const primaryConvsRef = React.useRef<readonly ConversationSummaryDto[]>(primaryConversations);
   const pendingConvsRef = React.useRef<readonly ConversationSummaryDto[]>(pendingConversations);
   const ownKeyBundleRef = React.useRef<UserE2eeKeyBundleDto | null>(ownKeyBundle);
+  const pinSyncStateRef = React.useRef<PinSyncState>(pinSyncState);
+  const peerSyncKeyRefreshAtRef = React.useRef<Map<string, number>>(new Map());
   const inFlightPeerKeysRef = React.useRef<Map<string, Promise<UserE2eeKeyBundleDto | null>>>(
     new Map(),
   );
   const inFlightThreadLoadByConvRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightSingleMsgSyncRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightReadReqRef = React.useRef<Map<string, Promise<void>>>(new Map());
-  const inFlightOwnStatusRef = React.useRef<Promise<void> | null>(null);
+  const inFlightOwnStatusRef = React.useRef<Promise<UserE2eeKeyBundleDto | null> | null>(null);
   const prevReadReceiptsEnabledRef = React.useRef<boolean | undefined>(
     realtime?.readReceiptsEnabled,
   );
@@ -155,6 +187,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   React.useEffect(() => {
     ownKeyBundleRef.current = ownKeyBundle;
   }, [ownKeyBundle]);
+
+  React.useEffect(() => {
+    pinSyncStateRef.current = pinSyncState;
+  }, [pinSyncState]);
 
   const bumpThreadVersion = React.useCallback(() => {
     setThreadVersion((v) => v + 1);
@@ -356,18 +392,145 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   );
 
   /**
+   * Nạp thông tin khóa công khai của bản thân và kiểm tra lười (lazy check) trạng thái bản sao lưu PIN:
+   * - Sử dụng Singleton E2EE Bootstrap để không gọi trùng `POST /api/v1/e2ee/devices`.
+   * - Chỉ gọi `GET /api/v1/e2ee/backup` khi `bundle.hasKeyBackup === true` và máy hiện tại chưa khôi phục khóa đó (hoặc `forceBackupFetch`).
+   */
+  const refreshOwnE2eeStatus = React.useCallback(
+    async (options?: {
+      readonly forceBackupFetch?: boolean;
+      readonly forceRefresh?: boolean;
+    }): Promise<UserE2eeKeyBundleDto | null> => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const mustFetch = Boolean(options?.forceRefresh || options?.forceBackupFetch);
+      if (!mustFetch && store.ownKeyBundle !== null) {
+        return store.ownKeyBundle;
+      }
+      if (inFlightOwnStatusRef.current && !mustFetch) {
+        return inFlightOwnStatusRef.current;
+      }
+
+      const task = (async (): Promise<UserE2eeKeyBundleDto | null> => {
+        const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
+        await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+        try {
+          const [keysRes, localBackup] = await Promise.all([
+            authFetch(`/api/v1/e2ee/users/${encodeURIComponent(currentUserPublicId)}/keys`),
+            getBackupDeviceKeyMaterial(currentUserPublicId),
+          ]);
+
+          if (!keysRes.ok) {
+            return targetStore.ownKeyBundle;
+          }
+
+          const bundle = (await keysRes.json()) as UserE2eeKeyBundleDto;
+          targetStore.ownKeyBundle = bundle;
+          ownKeyBundleRef.current = bundle;
+          setOwnKeyBundleState(bundle);
+
+          const alreadyRestoredLocally = Boolean(
+            localBackup &&
+            bundle.backupKeyFingerprint &&
+            localBackup.keyFingerprint.toLowerCase() === bundle.backupKeyFingerprint.toLowerCase(),
+          );
+          targetStore.hasLocalRestoredBackup = alreadyRestoredLocally;
+          setHasLocalRestoredBackupState(alreadyRestoredLocally);
+          pinSyncStateRef.current = resolvePinSyncState(bundle, alreadyRestoredLocally);
+
+          if (!bundle.hasKeyBackup) {
+            targetStore.serverKeyBackup = null;
+            setServerKeyBackupState(null);
+            return bundle;
+          }
+
+          if (!alreadyRestoredLocally || options?.forceBackupFetch) {
+            const backup = await fetchServerKeyBackupLazySingleton(currentUserPublicId, {
+              hasKeyBackupOnServer: bundle.hasKeyBackup,
+              expectedBackupFingerprint: bundle.backupKeyFingerprint,
+              forceRefresh: options?.forceBackupFetch,
+            });
+            targetStore.serverKeyBackup = backup;
+            setServerKeyBackupState(backup);
+          }
+
+          return bundle;
+        } catch {
+          return targetStore.ownKeyBundle;
+        }
+      })();
+
+      inFlightOwnStatusRef.current = task;
+      try {
+        return await task;
+      } finally {
+        if (inFlightOwnStatusRef.current === task) {
+          inFlightOwnStatusRef.current = null;
+        }
+      }
+    },
+    [currentUserPublicId],
+  );
+
+  /**
+   * Làm mới nhẹ bộ khóa của đối phương khi gửi/sửa tin nếu cache hiện chưa thấy Khóa Đồng bộ (`isSyncKey === true`),
+   * nhằm tránh bỏ sót Khóa Đồng bộ mà đối phương vừa thiết lập (có cooldown 15s/đối phương để không spam API).
+   */
+  const ensureFreshPeerKeyBundleForEncryption = React.useCallback(
+    async (peerPublicId: string): Promise<UserE2eeKeyBundleDto | null> => {
+      const initial = await ensurePeerKeyBundle(peerPublicId);
+      if (initial && initial.devices.some((d) => d.isSyncKey)) {
+        return initial;
+      }
+      const norm = peerPublicId.trim().toLowerCase();
+      const lastRefreshAt = peerSyncKeyRefreshAtRef.current.get(norm) ?? 0;
+      const nowMs = Date.now();
+      if (nowMs - lastRefreshAt < PEER_SYNC_KEY_REFRESH_COOLDOWN_MS) {
+        return initial;
+      }
+      peerSyncKeyRefreshAtRef.current.set(norm, nowMs);
+      return (await ensurePeerKeyBundle(peerPublicId, { forceRefresh: true })) ?? initial;
+    },
+    [ensurePeerKeyBundle],
+  );
+
+  /**
+   * Tập hợp toàn bộ thiết bị khác + Khóa Đồng bộ của chính người gửi để bọc khóa (`wrappedKeys`),
+   * đảm bảo 100% tin gửi/sửa đều mở được khi đồng bộ mã PIN trên thiết bị khác.
+   */
+  const buildOwnSenderOtherDevices = React.useCallback(
+    async (ownBundle: UserE2eeKeyBundleDto | null): Promise<E2eeTargetDevicePublicKey[]> => {
+      const result: E2eeTargetDevicePublicKey[] = [...(ownBundle?.devices ?? [])];
+      const seen = new Set(result.map((d) => d.keyFingerprint));
+      const localBackup = await getBackupDeviceKeyMaterial(currentUserPublicId);
+      if (localBackup && !seen.has(localBackup.keyFingerprint)) {
+        result.unshift({
+          devicePublicId: localBackup.devicePublicId,
+          keyFingerprint: localBackup.keyFingerprint,
+          isSyncKey: true,
+          identityPublicKeyJwk: localBackup.identityPublicKeyJwk,
+          signingPublicKeyJwk: localBackup.signingPublicKeyJwk,
+        });
+      }
+      return result;
+    },
+    [currentUserPublicId],
+  );
+
+  /**
    * Giải mã 1 tin nhắn E2EE có bộ đệm memoization theo `(messagePublicId, editedAt, recalledAt)`:
-   * Mỗi tin nhắn chỉ giải mã WebCrypto đúng 1 lần duy nhất trong suốt phiên làm việc.
+   * - Xác minh chữ ký ECDSA trên cả thiết bị đang hoạt động lẫn `historicalSigningKeys` đã đăng ký của người gửi.
+   * - Thử giải mã bằng tất cả các khóa riêng hợp lệ trong IndexedDB (khóa thiết bị + khóa đồng bộ PIN + khóa bootstrap).
+   * - Nếu gặp `UNTRUSTED_SIGNING_KEY` do cache khóa cũ, tự động làm mới bộ khóa người gửi 1 lần và thử lại.
    */
   const decryptSingleMessageCached = React.useCallback(
     async (
       dto: ChatMessageDto,
-      senderDevices?: readonly E2eeTargetDevicePublicKey[],
+      senderBundleOrDevices?: UserE2eeKeyBundleDto | readonly E2eeTargetDevicePublicKey[] | null,
     ): Promise<DecryptedMessageViewItem> => {
       if (dto.recalledAt) {
         return {
           dto,
-          plaintext: 'Tin nhắn đã được thu hồi',
+          plaintext: RECALLED_MESSAGE_PLACEHOLDER,
           decryptionFailed: false,
         };
       }
@@ -390,18 +553,46 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         };
       }
 
-      try {
+      const expectedSenderDevices = Array.isArray(senderBundleOrDevices)
+        ? senderBundleOrDevices
+        : buildVerificationDevices(
+            senderBundleOrDevices as UserE2eeKeyBundleDto | null | undefined,
+          );
+
+      const attemptDecrypt = async (
+        devicesForVerify: readonly E2eeTargetDevicePublicKey[] | undefined,
+      ) => {
         await getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId);
         const localMaterials = await listLocalDeviceKeyMaterials(currentUserPublicId);
-        const decrypted = await decryptDirectMessage({
+        return decryptDirectMessage({
           conversationPublicId: dto.conversationPublicId,
           senderPublicId: dto.senderPublicId,
           clientMsgId: dto.clientMsgId,
-          ciphertext: dto.ciphertext,
-          cryptoHeader: dto.cryptoHeader,
+          ciphertext: dto.ciphertext!,
+          cryptoHeader: dto.cryptoHeader!,
           receiverKeyMaterials: localMaterials,
-          expectedSenderDevices: senderDevices,
+          expectedSenderDevices: devicesForVerify,
         });
+      };
+
+      try {
+        let decrypted;
+        try {
+          decrypted = await attemptDecrypt(expectedSenderDevices);
+        } catch (firstError) {
+          if (
+            firstError instanceof E2eeCryptoError &&
+            firstError.code === 'UNTRUSTED_SIGNING_KEY'
+          ) {
+            const refreshedBundle = dto.isOwnMessage
+              ? await refreshOwnE2eeStatus({ forceRefresh: true })
+              : await ensurePeerKeyBundle(dto.senderPublicId, { forceRefresh: true });
+            const refreshedDevices = buildVerificationDevices(refreshedBundle);
+            decrypted = await attemptDecrypt(refreshedDevices);
+          } else {
+            throw firstError;
+          }
+        }
 
         putLruDecryptedMessageCache(store.decryptedMessagesByCacheKey, cacheKey, {
           plaintext: decrypted.text,
@@ -416,85 +607,12 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       } catch {
         return {
           dto,
-          plaintext: 'Đồng bộ mã PIN để xem tin nhắn từ thiết bị trước',
+          plaintext: 'Nhập mã PIN để đồng bộ các tin nhắn trước đây',
           decryptionFailed: true,
         };
       }
     },
-    [currentUserPublicId],
-  );
-
-  /**
-   * Nạp thông tin khóa công khai của bản thân và kiểm tra lười (lazy check) trạng thái bản sao lưu PIN:
-   * - Sử dụng Singleton E2EE Bootstrap để không gọi trùng `POST /api/v1/e2ee/devices`.
-   * - Chỉ gọi `GET /api/v1/e2ee/backup` khi `bundle.hasKeyBackup === true` và máy hiện tại chưa khôi phục khóa đó.
-   */
-  const refreshOwnE2eeStatus = React.useCallback(
-    async (options?: { readonly forceBackupFetch?: boolean }) => {
-      const store = getOrInitUserChatRamCache(currentUserPublicId);
-      if (!options?.forceBackupFetch && store.ownKeyBundle !== null) {
-        return;
-      }
-      if (inFlightOwnStatusRef.current && !options?.forceBackupFetch) {
-        return inFlightOwnStatusRef.current;
-      }
-
-      const task = (async () => {
-        const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
-        await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
-        try {
-          const [keysRes, localBackup] = await Promise.all([
-            authFetch(`/api/v1/e2ee/users/${encodeURIComponent(currentUserPublicId)}/keys`),
-            getBackupDeviceKeyMaterial(currentUserPublicId),
-          ]);
-
-          if (!keysRes.ok) {
-            return;
-          }
-
-          const bundle = (await keysRes.json()) as UserE2eeKeyBundleDto;
-          targetStore.ownKeyBundle = bundle;
-          ownKeyBundleRef.current = bundle;
-          setOwnKeyBundleState(bundle);
-
-          const alreadyRestoredLocally = Boolean(
-            localBackup &&
-            bundle.backupKeyFingerprint &&
-            localBackup.keyFingerprint.toLowerCase() === bundle.backupKeyFingerprint.toLowerCase(),
-          );
-          targetStore.hasLocalRestoredBackup = alreadyRestoredLocally;
-          setHasLocalRestoredBackupState(alreadyRestoredLocally);
-
-          if (!bundle.hasKeyBackup) {
-            targetStore.serverKeyBackup = null;
-            setServerKeyBackupState(null);
-            return;
-          }
-
-          if (!alreadyRestoredLocally || options?.forceBackupFetch) {
-            const backup = await fetchServerKeyBackupLazySingleton(currentUserPublicId, {
-              hasKeyBackupOnServer: bundle.hasKeyBackup,
-              expectedBackupFingerprint: bundle.backupKeyFingerprint,
-              forceRefresh: options?.forceBackupFetch,
-            });
-            targetStore.serverKeyBackup = backup;
-            setServerKeyBackupState(backup);
-          }
-        } catch {
-          // Bỏ qua lỗi mạng tạm thời.
-        }
-      })();
-
-      inFlightOwnStatusRef.current = task;
-      try {
-        await task;
-      } finally {
-        if (inFlightOwnStatusRef.current === task) {
-          inFlightOwnStatusRef.current = null;
-        }
-      }
-    },
-    [currentUserPublicId],
+    [currentUserPublicId, ensurePeerKeyBundle, refreshOwnE2eeStatus],
   );
 
   const resolveConversationById = React.useCallback(
@@ -750,6 +868,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }
         }
 
+        const needsPinSyncNow = pinSyncStateRef.current === 'needs_restore';
         const previewEntries = await Promise.all(
           data.items.map(async (conv) => {
             if (!conv.lastMessage) {
@@ -758,10 +877,18 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             if (conv.lastMessage.recalledAt !== null) {
               return [conv.public_id, RECALLED_MESSAGE_PLACEHOLDER] as const;
             }
-            const dec = await decryptSingleMessageCached(conv.lastMessage);
+            const cachedPeer = !conv.lastMessage.isOwnMessage
+              ? getCachedPeerKeyBundle(conv.peer.public_id)
+              : null;
+            const dec = await decryptSingleMessageCached(
+              conv.lastMessage,
+              conv.lastMessage.isOwnMessage ? ownKeyBundleRef.current : cachedPeer,
+            );
             return [
               conv.public_id,
-              getConversationPreviewText(conv.lastMessage, dec.plaintext, dec.decryptionFailed),
+              getConversationPreviewText(conv.lastMessage, dec.plaintext, dec.decryptionFailed, {
+                needsPinSync: needsPinSyncNow,
+              }),
             ] as const;
           }),
         );
@@ -810,6 +937,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       activeStatusEnabled,
       currentUserPublicId,
       decryptSingleMessageCached,
+      getCachedPeerKeyBundle,
       selectConversation,
       setPendingConversations,
       setPendingCount,
@@ -850,10 +978,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         const decryptedNew = await Promise.all(
           data.items.map((item) => {
-            const expectedDevices = item.isOwnMessage
-              ? ownKeyBundleRef.current?.devices
-              : peerBundle?.devices;
-            return decryptSingleMessageCached(item, expectedDevices);
+            const senderBundle = item.isOwnMessage ? ownKeyBundleRef.current : peerBundle;
+            return decryptSingleMessageCached(item, senderBundle);
           }),
         );
 
@@ -891,15 +1017,19 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               latest.dto,
               latest.plaintext,
               latest.decryptionFailed,
+              { needsPinSync: pinSyncStateRef.current === 'needs_restore' },
             ),
           }));
 
-          // Chỉ tự động đánh dấu đã đọc khi thỏa mãn đủ 4 điều kiện (đang ở `/messages`, khung chat đang mount, đúng đoạn chat đang mở và cửa sổ đang hiển thị/focus).
+          // Chỉ tự động đánh dấu đã đọc đối với tin nhắn THỰC SỰ HIỂN THỊ ĐƯỢC trên màn hình
+          // (bảo toàn logic "Đã xem": tuyệt đối không đánh dấu đã đọc tin đang bị ẩn chờ nhập PIN).
+          const highestVisibleNewSeq = computeHighestVisibleMessageSeq(decryptedNew);
           if (
             !latest.dto.isOwnMessage &&
-            checkCanAutoMarkRead(conversationPublicId, nextHighestSeq)
+            highestVisibleNewSeq > 0 &&
+            checkCanAutoMarkRead(conversationPublicId, highestVisibleNewSeq)
           ) {
-            void markConversationReadOptimistic(conversationPublicId, nextHighestSeq);
+            void markConversationReadOptimistic(conversationPublicId, highestVisibleNewSeq);
           }
         }
       } catch {
@@ -924,19 +1054,47 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
    * - Nếu mở lần đầu: chờ `ensureE2eeDeviceRegisteredSingleton` sẵn sàng, tải trang gần nhất `limit = 25` tin nhắn và giải mã.
    * - Khử trùng lặp bằng `inFlightThreadLoadByConvRef` và đảm bảo khối `finally` luôn tắt `loadingInitial: false`.
    */
+  const resolveSafeAutoReadSeq = React.useCallback(
+    (
+      conv: ConversationSummaryDto,
+      threadItems?: readonly DecryptedMessageViewItem[] | null,
+    ): number => {
+      const needsPin = pinSyncStateRef.current === 'needs_restore';
+      if (needsPin) {
+        // Trình duyệt mới chưa nhập PIN: CHỈ được đánh dấu đã đọc tới tin thực sự hiển thị được trên màn hình.
+        return threadItems && threadItems.length > 0
+          ? computeHighestVisibleMessageSeq(threadItems)
+          : 0;
+      }
+      if (threadItems && threadItems.some((m) => m.decryptionFailed)) {
+        return computeHighestVisibleMessageSeq(threadItems);
+      }
+      return threadItems && threadItems.length > 0
+        ? computeHighestVisibleMessageSeq(threadItems)
+        : conv.lastSeq;
+    },
+    [],
+  );
+
   const openConversationThread = React.useCallback(
     async (conv: ConversationSummaryDto, options?: { readonly forceReload?: boolean }) => {
       selectConversation(conv);
 
-      if (
-        conv.myState.inboxState === 'primary' &&
-        (isConversationUnread(conv) || checkCanAutoMarkRead(conv.public_id, conv.lastSeq))
-      ) {
-        void markConversationReadOptimistic(conv.public_id, conv.lastSeq);
-      }
-
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       const cachedThread = store.threadsByConvId.get(conv.public_id);
+
+      // Khi chưa đồng bộ PIN (`needs_restore`), KHÔNG tự đánh dấu đã đọc theo `conv.lastSeq` thô trước khi giải mã xong.
+      const preDecryptSafeSeq = resolveSafeAutoReadSeq(
+        conv,
+        cachedThread?.hasInitialized ? cachedThread.items : null,
+      );
+      if (
+        conv.myState.inboxState === 'primary' &&
+        preDecryptSafeSeq > 0 &&
+        (isConversationUnread(conv) || checkCanAutoMarkRead(conv.public_id, preDecryptSafeSeq))
+      ) {
+        void markConversationReadOptimistic(conv.public_id, preDecryptSafeSeq);
+      }
       if (
         cachedThread &&
         cachedThread.hasInitialized &&
@@ -979,7 +1137,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               `/api/v1/conversations/${encodeURIComponent(conv.public_id)}/messages?limit=${DEFAULT_MESSAGES_PAGE_LIMIT}`,
             ),
             ensurePeerKeyBundle(conv.peer.public_id),
-            ownKeyBundleRef.current ? Promise.resolve() : refreshOwnE2eeStatus(),
+            ownKeyBundleRef.current
+              ? Promise.resolve(ownKeyBundleRef.current)
+              : refreshOwnE2eeStatus(),
           ]);
 
           if (!msgRes.ok) {
@@ -1000,23 +1160,18 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           const msgData = (await msgRes.json()) as MessageListResult;
           const decryptedItems = await Promise.all(
             msgData.items.map((item) => {
-              const expectedDevices = item.isOwnMessage
-                ? ownKeyBundleRef.current?.devices
-                : currentPeerBundle?.devices;
-              return decryptSingleMessageCached(item, expectedDevices);
+              const senderBundle = item.isOwnMessage ? ownKeyBundleRef.current : currentPeerBundle;
+              return decryptSingleMessageCached(item, senderBundle);
             }),
           );
 
           let highestSeq = conv.lastSeq;
-          let highestVisibleSeq = 0;
           for (const item of msgData.items) {
             if (item.seq > highestSeq) {
               highestSeq = item.seq;
             }
-            if (item.seq > highestVisibleSeq) {
-              highestVisibleSeq = item.seq;
-            }
           }
+          const highestVisibleSeq = computeHighestVisibleMessageSeq(decryptedItems);
 
           updateThreadState(conv.public_id, () => ({
             conversationPublicId: conv.public_id,
@@ -1036,8 +1191,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           );
           if (
             conv.myState.inboxState === 'primary' &&
-            msgData.items.length > 0 &&
-            highestVisibleSeq > effectiveReadFloor
+            highestVisibleSeq > effectiveReadFloor &&
+            checkCanAutoMarkRead(conv.public_id, highestVisibleSeq)
           ) {
             void markConversationReadOptimistic(conv.public_id, highestVisibleSeq);
           }
@@ -1090,6 +1245,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       ensurePeerKeyBundle,
       markConversationReadOptimistic,
       refreshOwnE2eeStatus,
+      resolveSafeAutoReadSeq,
       selectConversation,
       updateThreadState,
     ],
@@ -1143,10 +1299,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         const msgData = (await msgRes.json()) as MessageListResult;
         const decryptedOlder = await Promise.all(
           msgData.items.map((item) => {
-            const expectedDevices = item.isOwnMessage
-              ? ownKeyBundleRef.current?.devices
-              : peerBundle?.devices;
-            return decryptSingleMessageCached(item, expectedDevices);
+            const senderBundle = item.isOwnMessage ? ownKeyBundleRef.current : peerBundle;
+            return decryptSingleMessageCached(item, senderBundle);
           }),
         );
 
@@ -1256,9 +1410,12 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
       try {
         await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
-        const [senderDevice, peerKeyBundle] = await Promise.all([
+        const [senderDevice, peerKeyBundle, ownBundle] = await Promise.all([
           getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId),
-          ensurePeerKeyBundle(peerPublicId),
+          ensureFreshPeerKeyBundleForEncryption(peerPublicId),
+          ownKeyBundleRef.current
+            ? Promise.resolve(ownKeyBundleRef.current)
+            : refreshOwnE2eeStatus({ forceRefresh: true }),
         ]);
 
         if (!peerKeyBundle || peerKeyBundle.devices.length === 0) {
@@ -1267,6 +1424,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           );
         }
 
+        const senderOtherDevices = await buildOwnSenderOtherDevices(ownBundle);
+
         const envelope = await encryptDirectMessage({
           conversationPublicId: convId,
           senderPublicId: currentUserPublicId,
@@ -1274,7 +1433,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           plaintext: trimmed,
           senderDevice,
           recipientDevices: peerKeyBundle.devices,
-          senderOtherDevices: ownKeyBundleRef.current?.devices ?? [],
+          senderOtherDevices,
           sentAt: nowIso,
         });
 
@@ -1381,8 +1540,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
     },
     [
+      buildOwnSenderOtherDevices,
       currentUserPublicId,
-      ensurePeerKeyBundle,
+      ensureFreshPeerKeyBundleForEncryption,
+      refreshOwnE2eeStatus,
       selectConversation,
       setPreviewsByConvId,
       setPrimaryConversations,
@@ -1425,11 +1586,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }
           const body = (await res.json()) as { readonly message: ChatMessageDto };
           const updatedDto = body.message;
-          const expectedDevices = updatedDto.isOwnMessage
-            ? ownKeyBundleRef.current?.devices
-            : peerBundle?.devices;
+          const senderBundle = updatedDto.isOwnMessage ? ownKeyBundleRef.current : peerBundle;
 
-          const decrypted = await decryptSingleMessageCached(updatedDto, expectedDevices);
+          const decrypted = await decryptSingleMessageCached(updatedDto, senderBundle);
 
           if (store.threadsByConvId.has(conversationPublicId)) {
             updateThreadState(conversationPublicId, (prev) => {
@@ -1490,6 +1649,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
                 updatedDto,
                 decrypted.plaintext,
                 decrypted.decryptionFailed,
+                { needsPinSync: pinSyncStateRef.current === 'needs_restore' },
               ),
             }));
           }
@@ -1703,9 +1863,12 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       const targetMsgId = params.message.dto.public_id;
 
       await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
-      const [senderDevice, peerKeyBundle] = await Promise.all([
+      const [senderDevice, peerKeyBundle, ownBundle] = await Promise.all([
         getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId),
-        ensurePeerKeyBundle(peerPublicId),
+        ensureFreshPeerKeyBundleForEncryption(peerPublicId),
+        ownKeyBundleRef.current
+          ? Promise.resolve(ownKeyBundleRef.current)
+          : refreshOwnE2eeStatus({ forceRefresh: true }),
       ]);
 
       if (!peerKeyBundle || peerKeyBundle.devices.length === 0) {
@@ -1714,6 +1877,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         );
       }
 
+      const senderOtherDevices = await buildOwnSenderOtherDevices(ownBundle);
+
       const envelope = await reEncryptEditedDirectMessage({
         conversationPublicId: convId,
         senderPublicId: currentUserPublicId,
@@ -1721,7 +1886,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         plaintext: trimmed,
         senderDevice,
         recipientDevices: peerKeyBundle.devices,
-        senderOtherDevices: ownKeyBundleRef.current?.devices ?? [],
+        senderOtherDevices,
         sentAt: params.message.dto.createdAt,
         previousIv: params.message.dto.cryptoHeader?.iv ?? null,
       });
@@ -1824,8 +1989,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
     },
     [
+      buildOwnSenderOtherDevices,
       currentUserPublicId,
-      ensurePeerKeyBundle,
+      ensureFreshPeerKeyBundleForEncryption,
+      refreshOwnE2eeStatus,
       resolveConversationById,
       selectConversation,
       setPendingConversations,
@@ -1928,14 +2095,13 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               !nextLast.isOwnMessage && conv
                 ? await ensurePeerKeyBundle(conv.peer.public_id)
                 : null;
-            const expectedDevices = nextLast.isOwnMessage
-              ? ownKeyBundleRef.current?.devices
-              : peerBundle?.devices;
-            const dec = await decryptSingleMessageCached(nextLast, expectedDevices);
+            const senderBundle = nextLast.isOwnMessage ? ownKeyBundleRef.current : peerBundle;
+            const dec = await decryptSingleMessageCached(nextLast, senderBundle);
             nextPreviewText = getConversationPreviewText(
               nextLast,
               dec.plaintext,
               dec.decryptionFailed,
+              { needsPinSync: pinSyncStateRef.current === 'needs_restore' },
             );
           }
         }
@@ -2205,17 +2371,170 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     return () => clearTimeout(timer);
   }, [loadConversations, readReceiptsEnabled, selectConversation, setPrimaryConversations]);
 
+  /**
+   * Đồng bộ tức thì toàn bộ RAM cache ngay sau khi Tạo / Khôi phục / Đổi / Đặt lại mã PIN:
+   * 1. Chờ `refreshOwnE2eeStatus({ forceRefresh: true })` hoàn tất để `ownKeyBundleRef` và `pinSyncState` mới nhất sẵn sàng.
+   * 2. Xóa toàn bộ bản ghi lỗi trong `decryptedMessagesByCacheKey`.
+   * 3. Giải mã lại lập tức TẤT CẢ các luồng tin nhắn đang có trong `threadsByConvId` & dòng xem trước hội thoại.
+   * 4. Gọi `bumpThreadVersion()` để cả `/messages` lẫn `FloatingMessagesWidget` hiện nội dung tức thì (0 lần F5).
+   * 5. Kiểm tra & đánh dấu đã đọc các tin vừa hiển thị trong hội thoại đang mở (nếu thỏa `canAutoMarkConversationRead`).
+   */
+  const syncAfterPinOperation = React.useCallback(
+    async (options: {
+      readonly mode: 'created' | 'restored' | 'changed' | 'reset';
+      readonly updatedBackup?: E2eeKeyBackupDto | null;
+    }) => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      if (options.updatedBackup !== undefined) {
+        setCachedServerKeyBackupInSession(currentUserPublicId, options.updatedBackup);
+        store.serverKeyBackup = options.updatedBackup;
+        setServerKeyBackupState(options.updatedBackup);
+      }
+
+      const latestOwnBundle = await refreshOwnE2eeStatus({
+        forceRefresh: true,
+        forceBackupFetch: options.mode === 'changed' || options.mode === 'reset',
+      });
+
+      // Xóa sạch toàn bộ bản ghi giải mã thất bại khỏi RAM cache trước khi giải mã lại.
+      for (const [cacheKey, entry] of Array.from(store.decryptedMessagesByCacheKey.entries())) {
+        if (entry.decryptionFailed) {
+          store.decryptedMessagesByCacheKey.delete(cacheKey);
+        }
+      }
+
+      const allConvs = [...primaryConvsRef.current, ...pendingConvsRef.current];
+      const peerByConvId = new Map<string, string>();
+      for (const conv of allConvs) {
+        peerByConvId.set(conv.public_id, conv.peer.public_id);
+      }
+      if (selectedConvRef.current) {
+        peerByConvId.set(selectedConvRef.current.public_id, selectedConvRef.current.peer.public_id);
+      }
+
+      // Giải mã lại toàn bộ các luồng tin nhắn đã nạp trong RAM.
+      const reDecryptedByConvId = new Map<string, readonly DecryptedMessageViewItem[]>();
+      for (const [convId, thread] of Array.from(store.threadsByConvId.entries())) {
+        const peerId = peerByConvId.get(convId);
+        const peerBundle = peerId ? await ensurePeerKeyBundle(peerId) : null;
+        const reDecryptedItems = await Promise.all(
+          thread.items.map(async (item) => {
+            if (!item.decryptionFailed) {
+              return item;
+            }
+            const senderBundle = item.dto.isOwnMessage ? latestOwnBundle : peerBundle;
+            return decryptSingleMessageCached(item.dto, senderBundle);
+          }),
+        );
+        reDecryptedByConvId.set(convId, reDecryptedItems);
+        putLruConversationThreadCache(store.threadsByConvId, convId, {
+          ...thread,
+          items: reDecryptedItems,
+          lastAccessedAt: Date.now(),
+        });
+      }
+
+      // Giải mã lại toàn bộ dòng xem trước danh sách hội thoại (`primary` & `pending`).
+      const nextNeedsPinSync = pinSyncStateRef.current === 'needs_restore';
+      if (allConvs.length > 0) {
+        const previewEntries = await Promise.all(
+          allConvs.map(async (conv) => {
+            if (!conv.lastMessage) {
+              return [conv.public_id, getConversationPreviewText(null)] as const;
+            }
+            if (conv.lastMessage.recalledAt !== null) {
+              return [conv.public_id, RECALLED_MESSAGE_PLACEHOLDER] as const;
+            }
+            const peerBundle = !conv.lastMessage.isOwnMessage
+              ? await ensurePeerKeyBundle(conv.peer.public_id)
+              : null;
+            const senderBundle = conv.lastMessage.isOwnMessage ? latestOwnBundle : peerBundle;
+            const dec = await decryptSingleMessageCached(conv.lastMessage, senderBundle);
+            return [
+              conv.public_id,
+              getConversationPreviewText(conv.lastMessage, dec.plaintext, dec.decryptionFailed, {
+                needsPinSync: nextNeedsPinSync,
+              }),
+            ] as const;
+          }),
+        );
+
+        setPreviewsByConvId((prev) => {
+          const next = { ...prev };
+          for (const [cid, text] of previewEntries) {
+            next[cid] = text;
+          }
+          return next;
+        });
+      }
+
+      bumpThreadVersion();
+
+      // Đánh dấu đã đọc các tin vừa hiển thị trong hội thoại đang thực sự mở trên màn hình.
+      const openCandidateIds = new Set<string>();
+      if (selectedConvRef.current?.public_id) {
+        openCandidateIds.add(selectedConvRef.current.public_id);
+      }
+      if (floatingActiveConvIdRef.current) {
+        openCandidateIds.add(floatingActiveConvIdRef.current);
+      }
+      for (const convId of openCandidateIds) {
+        const conv = resolveConversationById(convId);
+        const items = reDecryptedByConvId.get(convId) ?? store.threadsByConvId.get(convId)?.items;
+        if (!conv || !items || conv.myState.inboxState !== 'primary') {
+          continue;
+        }
+        const highestVisibleSeq = computeHighestVisibleMessageSeq(items);
+        if (highestVisibleSeq > 0 && checkCanAutoMarkRead(convId, highestVisibleSeq)) {
+          void markConversationReadOptimistic(convId, highestVisibleSeq);
+        }
+      }
+
+      // Làm mới ngầm danh sách hội thoại từ Server để bảo toàn tuyệt đối bộ lọc xóa M10 (`cleared_before_seq`, `message_user_deletions`).
+      void loadConversations('primary', { background: true });
+      if (store.hasLoadedPending || store.activeTab === 'pending') {
+        void loadConversations('pending', { background: true });
+      }
+    },
+    [
+      bumpThreadVersion,
+      checkCanAutoMarkRead,
+      currentUserPublicId,
+      decryptSingleMessageCached,
+      ensurePeerKeyBundle,
+      loadConversations,
+      markConversationReadOptimistic,
+      refreshOwnE2eeStatus,
+      resolveConversationById,
+      setPreviewsByConvId,
+    ],
+  );
+
   const setMessagesViewportActive = React.useCallback(
     (active: boolean) => {
       isMessagesViewportActiveRef.current = active;
       if (active) {
         const current = selectedConvRef.current;
-        if (current && checkCanAutoMarkRead(current.public_id, current.lastSeq)) {
-          void markConversationReadOptimistic(current.public_id, current.lastSeq);
+        if (current) {
+          const thread = getOrInitUserChatRamCache(currentUserPublicId).threadsByConvId.get(
+            current.public_id,
+          );
+          const safeSeq = resolveSafeAutoReadSeq(
+            current,
+            thread?.hasInitialized ? thread.items : null,
+          );
+          if (safeSeq > 0 && checkCanAutoMarkRead(current.public_id, safeSeq)) {
+            void markConversationReadOptimistic(current.public_id, safeSeq);
+          }
         }
       }
     },
-    [checkCanAutoMarkRead, markConversationReadOptimistic],
+    [
+      checkCanAutoMarkRead,
+      currentUserPublicId,
+      markConversationReadOptimistic,
+      resolveSafeAutoReadSeq,
+    ],
   );
 
   const setFloatingViewportConversation = React.useCallback(
@@ -2223,12 +2542,27 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       floatingActiveConvIdRef.current = conversationPublicId;
       if (conversationPublicId) {
         const target = resolveConversationById(conversationPublicId);
-        if (target && checkCanAutoMarkRead(target.public_id, target.lastSeq)) {
-          void markConversationReadOptimistic(target.public_id, target.lastSeq);
+        if (target) {
+          const thread = getOrInitUserChatRamCache(currentUserPublicId).threadsByConvId.get(
+            target.public_id,
+          );
+          const safeSeq = resolveSafeAutoReadSeq(
+            target,
+            thread?.hasInitialized ? thread.items : null,
+          );
+          if (safeSeq > 0 && checkCanAutoMarkRead(target.public_id, safeSeq)) {
+            void markConversationReadOptimistic(target.public_id, safeSeq);
+          }
         }
       }
     },
-    [checkCanAutoMarkRead, markConversationReadOptimistic, resolveConversationById],
+    [
+      checkCanAutoMarkRead,
+      currentUserPublicId,
+      markConversationReadOptimistic,
+      resolveConversationById,
+      resolveSafeAutoReadSeq,
+    ],
   );
 
   // Tự động giải mã bù các tin nhắn bị `decryptionFailed: true` nếu thread được mở trước khi E2EE Bootstrap hoàn tất.
@@ -2248,7 +2582,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     }
 
     void (async () => {
-      await refreshOwnE2eeStatus();
+      const latestOwn = await refreshOwnE2eeStatus();
       for (const convId of convIdsToRetry) {
         const currentThread = store.threadsByConvId.get(convId);
         if (!currentThread) {
@@ -2264,10 +2598,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             if (!item.decryptionFailed) {
               return item;
             }
-            const expectedDevices = item.dto.isOwnMessage
-              ? ownKeyBundleRef.current?.devices
-              : peerBundle?.devices;
-            return decryptSingleMessageCached(item.dto, expectedDevices);
+            const senderBundle = item.dto.isOwnMessage ? latestOwn : peerBundle;
+            return decryptSingleMessageCached(item.dto, senderBundle);
           }),
         );
         updateThreadState(convId, (prev) => ({
@@ -2608,8 +2940,15 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
       for (const convId of candidateIds) {
         const conv = resolveConversationById(convId);
-        if (conv && checkCanAutoMarkRead(conv.public_id, conv.lastSeq)) {
-          void markConversationReadOptimistic(conv.public_id, conv.lastSeq);
+        if (!conv) {
+          continue;
+        }
+        const thread = getOrInitUserChatRamCache(currentUserPublicId).threadsByConvId.get(
+          conv.public_id,
+        );
+        const safeSeq = resolveSafeAutoReadSeq(conv, thread?.hasInitialized ? thread.items : null);
+        if (safeSeq > 0 && checkCanAutoMarkRead(conv.public_id, safeSeq)) {
+          void markConversationReadOptimistic(conv.public_id, safeSeq);
         }
       }
     };
@@ -2619,10 +2958,17 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.removeEventListener('focus', handleVisibilityOrFocus);
     };
-  }, [checkCanAutoMarkRead, markConversationReadOptimistic, resolveConversationById]);
+  }, [
+    checkCanAutoMarkRead,
+    currentUserPublicId,
+    markConversationReadOptimistic,
+    resolveConversationById,
+    resolveSafeAutoReadSeq,
+  ]);
 
   const contextValue = React.useMemo<ChatStoreContextValue>(
     () => ({
+      currentUserPublicId,
       activeTab,
       primaryConversations,
       pendingConversations,
@@ -2637,6 +2983,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       ownKeyBundle,
       serverKeyBackup,
       hasLocalRestoredBackup,
+      pinSyncState,
       threadVersion,
       setActiveTab,
       selectConversation,
@@ -2659,12 +3006,14 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       declineSelectedPendingConversation,
       removeBlockedPeerConversationLocally,
       refreshOwnE2eeStatus,
+      syncAfterPinOperation,
       clearAllChatCache,
     }),
     [
       acceptSelectedPendingConversation,
       activeTab,
       clearAllChatCache,
+      currentUserPublicId,
       declineSelectedPendingConversation,
       deleteConversationForMe,
       deleteMessageForMe,
@@ -2684,6 +3033,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       ownKeyBundle,
       pendingConversations,
       pendingCount,
+      pinSyncState,
       presences,
       previewsByConvId,
       primaryConversations,
@@ -2697,6 +3047,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setActiveTab,
       setFloatingViewportConversation,
       setMessagesViewportActive,
+      syncAfterPinOperation,
       threadVersion,
       unreadConversationsCount,
     ],

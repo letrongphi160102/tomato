@@ -21,7 +21,7 @@ const MAX_ARRAY_ITEMS = 50;
 
 // Danh sách mẫu tên khóa nhạy cảm bắt buộc loại bỏ/che hoàn toàn trước khi gửi sự kiện sang Sentry.
 const SENSITIVE_KEY_PATTERN =
-  /(password|passwd|pwd|pass|token|otp|ticket|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url|^mac$|ciphertext|crypto[_-]?header|wrapped[_-]?key|encrypted[_-]?key[_-]?blob|kdf[_-]?salt|recovery[_-]?pin|^pin$|bootstrap[_-]?key[_-]?pair|private[_-]?jwk)/i;
+  /(password|passwd|pwd|pass|token|otp|ticket|secret|pepper|cookie|set-cookie|authorization|proxy-authorization|csrf|hash|private[_-]?key|api[_-]?key|api-key|credential|email|e-mail|phone|dateofbirth|date_of_birth|dob|fullname|full_name|ip_address|ipaddress|x-forwarded-for|x-real-ip|x-vercel-forwarded-for|cf-connecting-ip|dsn|database_url|redis_url|^mac$|ciphertext|crypto[_-]?header|wrapped[_-]?key|encrypted[_-]?key[_-]?blob|kdf[_-]?salt|recovery[_-]?pin|current[_-]?pin|new[_-]?pin|confirm[_-]?pin|^pin$|bootstrap[_-]?key[_-]?pair|private[_-]?jwk)/i;
 
 const SENSITIVE_HEADER_KEYS = new Set([
   'authorization',
@@ -69,11 +69,11 @@ const CONNECTION_URL_REGEX = /\b(?:postgres(?:ql)?|rediss?):\/\/[^\s"'`]+/gi;
 const DRIZZLE_PARAMS_REGEX = /(\bparams:\s*)[^\r\n]+/gi;
 const SMTP_AUTH_REGEX = /\b(AUTH\s+(?:PLAIN|LOGIN))\s+[^\r\n]+/gi;
 const INLINE_JSON_SECRET_REGEX =
-  /("(?:password|currentPassword|newPassword|confirmPassword|passwd|pwd|otp|otpCode|otp_code|token|accessToken|access_token|refreshToken|refresh_token|csrfToken|csrf_token|captchaToken|captcha_token|resetToken|reset_token|ticket|passwordChangeTicket|secret|pepper|apiKey|api_key|api-key|cookie|authorization)"\s*:\s*)"[^"]*"/gi;
+  /("(?:password|currentPassword|newPassword|confirmPassword|passwd|pwd|otp|otpCode|otp_code|pin|recoveryPin|currentPin|current_pin|newPin|new_pin|confirmPin|confirm_pin|token|accessToken|access_token|refreshToken|refresh_token|csrfToken|csrf_token|captchaToken|captcha_token|resetToken|reset_token|ticket|passwordChangeTicket|secret|pepper|apiKey|api_key|api-key|cookie|authorization)"\s*:\s*)"[^"]*"/gi;
 const INLINE_SECRET_HEADER_REGEX =
   /\b(Cookie|Set-Cookie|X-CSRF-Token|Authorization|Proxy-Authorization|Api-Key|X-Api-Key)\s*:\s*[^\r\n|]+/gi;
 const SENSITIVE_QUERY_PARAM_REGEX =
-  /([?&](?:token|reset_token|access_token|refresh_token|otp|otpCode|otp_code|code|password|currentPassword|newPassword|passwd|pwd|ticket|csrf|csrfToken|csrf_token|secret|pepper|key|api_key|api-key|authorization|email|captchaToken|captcha_token)=)[^&#\s"'`]+/gi;
+  /([?&](?:token|reset_token|access_token|refresh_token|otp|otpCode|otp_code|pin|currentPin|newPin|code|password|currentPassword|newPassword|passwd|pwd|ticket|csrf|csrfToken|csrf_token|secret|pepper|key|api_key|api-key|authorization|email|captchaToken|captcha_token)=)[^&#\s"'`]+/gi;
 const EMAIL_ADDRESS_REGEX = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 
 /**

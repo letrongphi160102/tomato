@@ -8,6 +8,8 @@ export const MESSAGE_EDIT_WINDOW_MS = 5 * 60 * 1000;
 export const MESSAGE_RECALL_WINDOW_MS = 5 * 60 * 1000;
 export const MAX_MESSAGE_EDIT_COUNT = 5;
 export const RECALLED_MESSAGE_PLACEHOLDER = 'Tin nhắn đã được thu hồi';
+export const PIN_SYNC_REQUIRED_PREVIEW = 'Nhập mã PIN để xem tin nhắn';
+export const UNAVAILABLE_OLD_MESSAGE_PREVIEW = 'Tin nhắn không khả dụng trên thiết bị này';
 
 /**
  * Kiểm tra tin nhắn có còn đủ điều kiện hiển thị nút "Chỉnh sửa" trên UI hay không.
@@ -95,6 +97,7 @@ export function getConversationPreviewText(
   lastMessage: ChatMessageDto | null,
   decryptedPlaintext?: string,
   decryptionFailed?: boolean,
+  options?: { readonly needsPinSync?: boolean },
 ): string {
   if (!lastMessage) {
     return 'Bắt đầu cuộc trò chuyện';
@@ -103,7 +106,7 @@ export function getConversationPreviewText(
     return RECALLED_MESSAGE_PLACEHOLDER;
   }
   if (decryptionFailed) {
-    return 'Tin nhắn riêng tư';
+    return options?.needsPinSync ? PIN_SYNC_REQUIRED_PREVIEW : UNAVAILABLE_OLD_MESSAGE_PREVIEW;
   }
   const text = decryptedPlaintext ?? '';
   return `${lastMessage.isOwnMessage ? 'Bạn: ' : ''}${text}`;

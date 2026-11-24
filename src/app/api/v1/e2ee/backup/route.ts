@@ -2,6 +2,7 @@ import { handleChatRouteError, parseChatJsonBody } from '@/app/api/v1/e2ee/_util
 import {
   createAuthJsonResponse,
   enforceCsrfAndOrigin,
+  extractRequestClientContext,
   getAuthCookiesFromRequest,
 } from '@/core/security';
 import { getSessionService } from '@/modules/auth';
@@ -32,8 +33,9 @@ export async function PUT(request: Request) {
     const cookies = getAuthCookiesFromRequest(request);
     const principal = await getSessionService().authenticateAccessToken(cookies.accessToken);
     const body = await parseChatJsonBody(request);
+    const context = extractRequestClientContext(request);
 
-    const result = await getChatService().upsertKeyBackup(principal, body);
+    const result = await getChatService().upsertKeyBackup(principal, body, context);
     return createAuthJsonResponse(result, { status: 200 });
   } catch (error) {
     return handleChatRouteError(error, 'PUT /api/v1/e2ee/backup');

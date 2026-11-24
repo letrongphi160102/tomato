@@ -15,6 +15,45 @@ export const PEER_KEY_BUNDLE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export type DecryptedMessageViewItem = GroupableMessageItem;
 
+export type PinSyncState = 'loading' | 'must_create' | 'needs_restore' | 'synced';
+
+/**
+ * Suy dẫn chính xác trạng thái đồng bộ mã PIN trên thiết bị hiện tại:
+ * - `loading`: chưa tải xong hồ sơ khóa từ Server.
+ * - `must_create`: tài khoản chưa từng tạo mã PIN (`hasKeyBackup === false`).
+ * - `needs_restore`: tài khoản đã có mã PIN nhưng IndexedDB thiết bị này chưa có khóa khớp `backupKeyFingerprint`.
+ * - `synced`: thiết bị đã có đúng khóa đồng bộ phiên bản mới nhất (tránh lặp đòi PIN với tin cũ trước lần đặt lại).
+ */
+export function resolvePinSyncState(
+  ownKeyBundle: UserE2eeKeyBundleDto | null,
+  hasLocalRestoredBackup: boolean,
+): PinSyncState {
+  if (!ownKeyBundle) {
+    return 'loading';
+  }
+  if (!ownKeyBundle.hasKeyBackup) {
+    return 'must_create';
+  }
+  return hasLocalRestoredBackup ? 'synced' : 'needs_restore';
+}
+
+/**
+ * Tìm số thứ tự `seq` lớn nhất trong số các tin nhắn THỰC SỰ HIỂN THỊ ĐƯỢC trên màn hình:
+ * loại trừ tin đang gửi (`sending`), tin lỗi gửi (`sendError`) và đặc biệt là các tin cũ đang bị ẩn chờ mở khóa bằng mã PIN (`decryptionFailed`).
+ * Dùng để bảo toàn logic "Đã xem": tuyệt đối không tự gửi `POST .../read` cho các tin nhắn đang bị ẩn.
+ */
+export function computeHighestVisibleMessageSeq(
+  items: readonly DecryptedMessageViewItem[],
+): number {
+  let highest = 0;
+  for (const item of items) {
+    if (!item.decryptionFailed && !item.sending && !item.sendError && item.dto.seq > highest) {
+      highest = item.dto.seq;
+    }
+  }
+  return highest;
+}
+
 export interface CachedConversationThreadState {
   readonly conversationPublicId: string;
   readonly items: readonly DecryptedMessageViewItem[];
@@ -28,6 +67,7 @@ export interface CachedConversationThreadState {
 }
 
 export interface ChatStoreContextValue {
+  readonly currentUserPublicId: string;
   readonly activeTab: 'primary' | 'pending';
   readonly primaryConversations: readonly ConversationSummaryDto[];
   readonly pendingConversations: readonly ConversationSummaryDto[];
@@ -42,6 +82,7 @@ export interface ChatStoreContextValue {
   readonly ownKeyBundle: UserE2eeKeyBundleDto | null;
   readonly serverKeyBackup: E2eeKeyBackupDto | null;
   readonly hasLocalRestoredBackup: boolean;
+  readonly pinSyncState: PinSyncState;
   readonly threadVersion: number;
   readonly setActiveTab: (tab: 'primary' | 'pending') => void;
   readonly selectConversation: (conv: ConversationSummaryDto | null) => void;
@@ -93,6 +134,11 @@ export interface ChatStoreContextValue {
   readonly removeBlockedPeerConversationLocally: (conversationPublicId: string) => void;
   readonly refreshOwnE2eeStatus: (options?: {
     readonly forceBackupFetch?: boolean;
+    readonly forceRefresh?: boolean;
+  }) => Promise<UserE2eeKeyBundleDto | null>;
+  readonly syncAfterPinOperation: (options: {
+    readonly mode: 'created' | 'restored' | 'changed' | 'reset';
+    readonly updatedBackup?: E2eeKeyBackupDto | null;
   }) => Promise<void>;
   readonly clearAllChatCache: () => void;
 }

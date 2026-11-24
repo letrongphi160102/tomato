@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  boolean,
   char,
   index,
   jsonb,
@@ -35,6 +36,7 @@ export const userE2eeDevices = pgTable(
     identityPublicKeyJwk: jsonb('identity_public_key_jwk').$type<E2eePublicJwkRecord>().notNull(),
     signingPublicKeyJwk: jsonb('signing_public_key_jwk').$type<E2eePublicJwkRecord>().notNull(),
     keyFingerprint: char('key_fingerprint', { length: 64 }).notNull(),
+    isSyncKey: boolean('is_sync_key').notNull().default(false),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -44,6 +46,9 @@ export const userE2eeDevices = pgTable(
     index('idx_user_e2ee_devices_user_active')
       .on(table.userId, table.createdAt.desc())
       .where(sql`${table.revokedAt} IS NULL`),
+    uniqueIndex('idx_user_e2ee_devices_user_active_sync')
+      .on(table.userId)
+      .where(sql`${table.isSyncKey} = true AND ${table.revokedAt} IS NULL`),
   ],
 );
 

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 
 import { ChangePasswordCard } from '@/components/settings/change-password-card';
+import { MessagePinCard } from '@/components/settings/message-pin-card';
 import { SecuritySessionsPanel } from '@/components/settings/security-sessions-panel';
 
 export const metadata: Metadata = {
@@ -14,6 +15,10 @@ export default function SecuritySettingsPage() {
   return (
     <div className="space-y-8">
       <ChangePasswordCard />
+
+      <section id="message-pin" aria-label="Mã PIN tin nhắn">
+        <MessagePinCard />
+      </section>
 
       <section id="devices" aria-label="Thiết bị đăng nhập">
         <SecuritySessionsPanel />

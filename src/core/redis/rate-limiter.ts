@@ -247,6 +247,31 @@ export const CHAT_RATE_LIMITS = Object.freeze({
     windowSeconds: 15 * 60,
     strategy: 'sliding_window',
   }),
+  pinResetRequestByIp: Object.freeze({
+    limit: 10,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  pinResetRequestByUserHourly: Object.freeze({
+    limit: 5,
+    windowSeconds: 60 * 60,
+    strategy: 'sliding_window',
+  }),
+  pinResetRequestCooldown: Object.freeze({
+    limit: 1,
+    windowSeconds: 60,
+    strategy: 'fixed_window',
+  }),
+  pinResetConfirmByIp: Object.freeze({
+    limit: 15,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
+  pinResetConfirmByUser: Object.freeze({
+    limit: 10,
+    windowSeconds: 15 * 60,
+    strategy: 'sliding_window',
+  }),
   listConversationsByUser: Object.freeze({
     limit: 60,
     windowSeconds: 60,

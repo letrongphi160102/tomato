@@ -12,18 +12,27 @@ import {
   MessageCircle,
   MoreHorizontal,
   Pencil,
+  Share2,
   Shield,
   UserCheck,
   UserPlus,
   UserX,
 } from 'lucide-react';
 
+import { ShareProfileModal } from '@/components/profile/share-profile-modal';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
 import { FollowListModal, type FollowListType } from '@/components/social/follow-list-modal';
 import { FollowRequestsModal } from '@/components/social/follow-requests-modal';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { authFetch } from '@/lib/auth-client';
 import type { PresenceStatusDto } from '@/modules/presence/presence.service';
 import type { UserProfileDto } from '@/modules/profile';
@@ -47,7 +56,7 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
   );
   const [followLoading, setFollowLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [shareModalOpen, setShareModalOpen] = React.useState(false);
   const [confirmUnfollowOpen, setConfirmUnfollowOpen] = React.useState(false);
   const [confirmBlockOpen, setConfirmBlockOpen] = React.useState(false);
   const [blocking, setBlocking] = React.useState(false);
@@ -55,8 +64,6 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
   const [blockedLocally, setBlockedLocally] = React.useState(false);
   const [activeListModal, setActiveListModal] = React.useState<FollowListType | null>(null);
   const [requestsModalOpen, setRequestsModalOpen] = React.useState(false);
-
-  const menuRef = React.useRef<HTMLDivElement | null>(null);
 
   const isMutualFollow =
     !profile.isOwnProfile && profile.followStatus === 'following' && profile.followedBy;
@@ -95,32 +102,6 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
 
     return () => controller.abort();
   }, [canDisplayPresence, profile.public_id]);
-
-  React.useEffect(() => {
-    if (!menuOpen) {
-      return;
-    }
-    function handlePointerDown(event: MouseEvent) {
-      if (
-        menuRef.current &&
-        event.target instanceof Node &&
-        !menuRef.current.contains(event.target)
-      ) {
-        setMenuOpen(false);
-      }
-    }
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        setMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [menuOpen]);
 
   async function executeFollowMutation(method: 'POST' | 'DELETE') {
     if (followLoading) {
@@ -331,6 +312,26 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
                         </span>
                       </Button>
                     ) : null}
+
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label="Tùy chọn khác"
+                          className="size-8 rounded-lg"
+                        >
+                          <MoreHorizontal className="size-4" aria-hidden="true" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-48">
+                        <DropdownMenuItem onSelect={() => setShareModalOpen(true)}>
+                          <Share2 className="size-4" aria-hidden="true" />
+                          <span>Chia sẻ tài khoản</span>
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 ) : (
                   <div className="flex items-center gap-2">
@@ -363,42 +364,36 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
                       </Link>
                     </Button>
 
-                    <div ref={menuRef} className="relative">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        aria-label="Tùy chọn khác"
-                        aria-haspopup="menu"
-                        aria-expanded={menuOpen}
-                        onClick={() => setMenuOpen((prev) => !prev)}
-                        className="size-8 rounded-lg"
-                      >
-                        <MoreHorizontal className="size-4" aria-hidden="true" />
-                      </Button>
-
-                      {menuOpen ? (
-                        <div
-                          role="menu"
-                          aria-label="Tùy chọn tài khoản"
-                          className="absolute right-0 z-30 mt-1.5 w-44 origin-top-right rounded-xl border bg-background p-1 shadow-lg"
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label="Tùy chọn khác"
+                          className="size-8 rounded-lg"
                         >
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMenuOpen(false);
-                              setBlockError(null);
-                              setConfirmBlockOpen(true);
-                            }}
-                            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium text-destructive transition-colors hover:bg-destructive/10"
-                          >
-                            <Ban className="size-4" aria-hidden="true" />
-                            <span>Chặn</span>
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
+                          <MoreHorizontal className="size-4" aria-hidden="true" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-48">
+                        <DropdownMenuItem onSelect={() => setShareModalOpen(true)}>
+                          <Share2 className="size-4" aria-hidden="true" />
+                          <span>Chia sẻ tài khoản</span>
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          className="font-medium text-destructive focus:bg-destructive/10 focus:text-destructive"
+                          onSelect={() => {
+                            setBlockError(null);
+                            setConfirmBlockOpen(true);
+                          }}
+                        >
+                          <Ban className="size-4" aria-hidden="true" />
+                          <span>Chặn</span>
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 )}
               </div>
@@ -560,6 +555,12 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
         loading={followLoading}
         onClose={() => setConfirmUnfollowOpen(false)}
         onConfirm={() => executeFollowMutation('DELETE')}
+      />
+
+      <ShareProfileModal
+        open={shareModalOpen}
+        handle={profile.handle}
+        onClose={() => setShareModalOpen(false)}
       />
 
       <ConfirmDialog

@@ -25,4 +25,16 @@ export const CHAT_MESSAGES = Object.freeze({
   editIvReused: 'Dữ liệu cập nhật không hợp lệ. Vui lòng thử lại.',
   deviceRegistered: 'Đã đồng bộ thiết bị nhắn tin.',
   backupSaved: 'Đã lưu mã PIN đồng bộ tin nhắn.',
+  backupPinChanged: 'Đã đổi mã PIN tin nhắn thành công.',
+  backupKeyChangeRequiresReset:
+    'Không thể thay thế khóa đồng bộ trực tiếp. Vui lòng sử dụng tính năng Quên mã PIN để đặt lại.',
+  backupNotFoundForReset: 'Tài khoản chưa thiết lập mã PIN tin nhắn.',
+  pinResetEmailUnavailable: 'Không tìm thấy địa chỉ email đã xác minh cho tài khoản này.',
+  pinResetOtpSent: 'Đã gửi mã xác nhận gồm 6 chữ số tới email tài khoản của bạn.',
+  pinResetOtpInvalidOrExpired: 'Mã xác nhận không đúng hoặc đã hết hạn. Vui lòng thử lại.',
+  pinResetOtpRevokedMaxAttempts:
+    'Bạn đã nhập sai mã xác nhận quá 5 lần. Mã đã bị hủy, vui lòng gửi mã mới.',
+  pinResetOtpIncorrectWithRemaining: (remaining: number) =>
+    `Mã xác nhận không đúng. Bạn còn ${remaining} lần thử.`,
+  pinResetCompleted: 'Đã đặt lại mã PIN tin nhắn thành công.',
 });

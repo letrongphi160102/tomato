@@ -18,6 +18,7 @@ export type ChatAction =
   | 'e2ee:keys:read'
   | 'e2ee:backup:read'
   | 'e2ee:backup:write'
+  | 'e2ee:backup:reset'
   | 'chat:conversation:list'
   | 'chat:conversation:create_or_get'
   | 'chat:conversation:view'
@@ -87,6 +88,7 @@ export function authorizeChatAction(
     case 'e2ee:device:register':
     case 'e2ee:backup:read':
     case 'e2ee:backup:write':
+    case 'e2ee:backup:reset':
     case 'chat:conversation:list': {
       return true;
     }

@@ -16,6 +16,11 @@ export interface OtpHashContext {
   readonly purpose: VerificationTokenPurpose;
 }
 
+export interface ScopedOtpHashContext {
+  readonly userId: string;
+  readonly scope: 'e2ee_pin_reset';
+}
+
 /**
  * Sinh mã OTP 6 chữ số phân bố đều bằng CSPRNG (`crypto.randomInt`),
  * tránh hoàn toàn lỗi lệch phân bố (modulo bias).
@@ -69,4 +74,59 @@ export function verifyOtpCode(
 
   const computedHash = hashOtpCode(otp, context, secretOverride);
   return timingSafeEqualHex(computedHash, expectedHashHex);
+}
+
+/**
+ * Băm OTP 6 chữ số theo miền nghiệp vụ riêng biệt (ví dụ `e2ee_pin_reset`) dùng chung `OTP_SECRET`
+ * để lưu bản băm HMAC-SHA256 an toàn trong Redis (tuyệt đối không lưu OTP dạng rõ).
+ */
+export function hashScopedOtpCode(
+  otp: string,
+  context: ScopedOtpHashContext,
+  secretOverride?: string,
+): string {
+  if (!OTP_DIGITS_REGEX.test(otp)) {
+    throw new Error('Mã OTP phải gồm đúng 6 chữ số');
+  }
+  if (!context.userId.trim()) {
+    throw new Error('Ngữ cảnh băm OTP bắt buộc có userId hợp lệ');
+  }
+
+  const secret = resolveOtpSecret(secretOverride);
+  const message = `${context.scope}:${context.userId}:${otp}`;
+  return createHmac('sha256', secret).update(message, 'utf8').digest('hex');
+}
+
+export function verifyScopedOtpCode(
+  otp: string,
+  expectedHashHex: string,
+  context: ScopedOtpHashContext,
+  secretOverride?: string,
+): boolean {
+  if (
+    !OTP_DIGITS_REGEX.test(otp) ||
+    expectedHashHex.length !== HMAC_SHA256_HEX_LENGTH ||
+    !context.userId.trim()
+  ) {
+    return false;
+  }
+
+  const computedHash = hashScopedOtpCode(otp, context, secretOverride);
+  return timingSafeEqualHex(computedHash, expectedHashHex);
+}
+
+/**
+ * Che một phần địa chỉ email để hiển thị thân thiện trên giao diện (ví dụ `l***@gmail.com`).
+ */
+export function maskEmailAddress(rawEmail: string): string {
+  const trimmed = rawEmail.trim();
+  const atIndex = trimmed.indexOf('@');
+  if (atIndex <= 0 || atIndex === trimmed.length - 1) {
+    return '***';
+  }
+
+  const localPart = trimmed.slice(0, atIndex);
+  const domainPart = trimmed.slice(atIndex + 1);
+  const visiblePrefix = localPart.slice(0, 1);
+  return `${visiblePrefix}***@${domainPart}`;
 }

@@ -312,6 +312,7 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
             deviceLabel: params.deviceLabel,
             identityPublicKeyJwk: params.identityPublicKeyJwk,
             signingPublicKeyJwk: params.signingPublicKeyJwk,
+            isSyncKey: Boolean(params.isSyncKey) || existing.isSyncKey,
             revokedAt: null,
             lastSeenAt: params.now,
           };
@@ -329,6 +330,7 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
             identityPublicKeyJwk: params.identityPublicKeyJwk,
             signingPublicKeyJwk: params.signingPublicKeyJwk,
             keyFingerprint: params.keyFingerprint,
+            isSyncKey: Boolean(params.isSyncKey),
             revokedAt: null,
             lastSeenAt: params.now,
             createdAt: params.now,

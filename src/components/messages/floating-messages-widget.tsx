@@ -6,6 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   ArrowLeft,
   Check,
+  KeyRound,
   Loader2,
   Lock,
   Maximize2,
@@ -33,6 +34,11 @@ import {
   isConversationUnread,
 } from '@/components/messages/message-grouping';
 import { NewMessageModal } from '@/components/messages/new-message-modal';
+import {
+  MandatoryPinSetupPanel,
+  PinBackupModal,
+  type PinBackupModalMode,
+} from '@/components/messages/pin-backup-modal';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
@@ -58,6 +64,7 @@ export function FloatingMessagesWidget() {
   const [editDraftText, setEditDraftText] = React.useState('');
   const [chatError, setChatError] = React.useState<string | null>(null);
   const [newMessageModalOpen, setNewMessageModalOpen] = React.useState(false);
+  const [pinModalMode, setPinModalMode] = React.useState<PinBackupModalMode | null>(null);
   const [confirmDeleteConvTarget, setConfirmDeleteConvTarget] =
     React.useState<ConversationSummaryDto | null>(null);
   const [confirmRecallTarget, setConfirmRecallTarget] =
@@ -103,6 +110,11 @@ export function FloatingMessagesWidget() {
   const previewsByConvId = chatStore?.previewsByConvId ?? {};
   const presences = chatStore?.presences ?? {};
   const selectedConversation = chatStore?.selectedConversation ?? null;
+  const currentUserPublicId = chatStore?.currentUserPublicId ?? '';
+  const serverKeyBackup = chatStore?.serverKeyBackup ?? null;
+  const pinSyncState = chatStore?.pinSyncState ?? 'loading';
+  const needsMandatoryPinCreate = pinSyncState === 'must_create';
+  const needsPinRestore = pinSyncState === 'needs_restore';
 
   const activeMiniConversation = React.useMemo<ConversationSummaryDto | null>(() => {
     if (!activeMiniConvId) {
@@ -306,9 +318,15 @@ export function FloatingMessagesWidget() {
       ? (activeMiniConversation?.peerLastReadSeq ?? null)
       : null;
 
+  const visibleMessages = React.useMemo(
+    () => messages.filter((m) => !m.decryptionFailed),
+    [messages],
+  );
+  const hiddenUndecryptedCount = messages.length - visibleMessages.length;
+
   const clusteredMessages = React.useMemo(
-    () => buildClusteredMessageEntries(messages, effectivePeerLastReadSeq),
-    [effectivePeerLastReadSeq, messages],
+    () => buildClusteredMessageEntries(visibleMessages, effectivePeerLastReadSeq),
+    [effectivePeerLastReadSeq, visibleMessages],
   );
 
   if (!isAllowedOnCurrentRoute) {
@@ -582,7 +600,31 @@ export function FloatingMessagesWidget() {
             aria-label="Cửa sổ tin nhắn thu gọn"
             className="flex h-[520px] max-h-[calc(100vh-5.5rem)] w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl sm:w-[368px]"
           >
-            {!activeMiniConversation ? (
+            {needsMandatoryPinCreate && currentUserPublicId ? (
+              <>
+                <header className="flex items-center justify-between border-b px-4 py-3">
+                  <h2 className="text-sm font-bold text-foreground">Tin nhắn</h2>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Đóng cửa sổ tin nhắn"
+                    title="Đóng"
+                    onClick={handleCloseWidget}
+                    className="size-8 rounded-full text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-4" aria-hidden="true" />
+                  </Button>
+                </header>
+                <MandatoryPinSetupPanel
+                  currentUserPublicId={currentUserPublicId}
+                  compact
+                  onCompleted={async (payload) => {
+                    await chatStore?.syncAfterPinOperation(payload);
+                  }}
+                />
+              </>
+            ) : !activeMiniConversation ? (
               <>
                 {/* Header Màn hình Danh sách hội thoại */}
                 <header className="flex items-center justify-between border-b px-4 py-3">
@@ -663,6 +705,23 @@ export function FloatingMessagesWidget() {
                     ) : null}
                   </button>
                 </div>
+
+                {needsPinRestore ? (
+                  <div className="flex items-center justify-between gap-2 border-b bg-primary/5 px-3 py-2">
+                    <p className="text-[11px] leading-snug text-foreground">
+                      Nhập mã PIN để đồng bộ các tin nhắn trước đây
+                    </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setPinModalMode('restore')}
+                      className="h-6 shrink-0 rounded-lg px-2 text-[11px]"
+                    >
+                      Nhập mã PIN
+                    </Button>
+                  </div>
+                ) : null}
 
                 {/* Danh sách hội thoại */}
                 <div className="relative flex-1 overflow-y-auto">
@@ -952,6 +1011,31 @@ export function FloatingMessagesWidget() {
                     </div>
                   ) : (
                     <div className="flex flex-col">
+                      {needsPinRestore && hiddenUndecryptedCount > 0 ? (
+                        <div className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-primary/20 bg-primary/5 px-2.5 py-2">
+                          <div className="flex items-center gap-1.5 text-[11px] leading-snug text-foreground">
+                            <KeyRound
+                              className="size-3.5 shrink-0 text-primary"
+                              aria-hidden="true"
+                            />
+                            <span>Nhập mã PIN để đồng bộ các tin nhắn trước đây</span>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setPinModalMode('restore')}
+                            className="h-6 shrink-0 rounded-lg px-2 text-[11px]"
+                          >
+                            Nhập mã PIN
+                          </Button>
+                        </div>
+                      ) : pinSyncState === 'synced' && hiddenUndecryptedCount > 0 ? (
+                        <p className="mb-3 text-center text-[10px] text-muted-foreground">
+                          Một số tin nhắn cũ hơn không khả dụng trên thiết bị này.
+                        </p>
+                      ) : null}
+
                       {clusteredMessages.map((entry, idx) => (
                         <MessageBubbleRow
                           key={entry.item.dto.clientMsgId}
@@ -1150,6 +1234,21 @@ export function FloatingMessagesWidget() {
           }
         }}
       />
+
+      {currentUserPublicId ? (
+        <PinBackupModal
+          key={pinModalMode ? `mini-pin-${pinModalMode}` : 'mini-pin-closed'}
+          open={pinModalMode !== null}
+          initialMode={pinModalMode ?? 'restore'}
+          allowClose
+          currentUserPublicId={currentUserPublicId}
+          existingBackup={serverKeyBackup}
+          onClose={() => setPinModalMode(null)}
+          onCompleted={async (payload) => {
+            await chatStore?.syncAfterPinOperation(payload);
+          }}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={confirmRecallTarget !== null}

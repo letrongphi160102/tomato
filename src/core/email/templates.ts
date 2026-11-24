@@ -35,6 +35,12 @@ export interface PasswordChangeOtpEmailData {
   readonly expiresInMinutes: number;
 }
 
+export interface E2eePinResetOtpEmailData {
+  readonly displayName: string;
+  readonly otpCode: string;
+  readonly expiresInMinutes: number;
+}
+
 export interface AccountLockedAlertEmailData {
   readonly displayName: string;
   readonly occurredAt: Date;
@@ -539,6 +545,53 @@ export function buildAccountLockedAlertEmail(
       : ['Để mở khóa tài khoản, vui lòng sử dụng tính năng Quên mật khẩu trên TOMATO.']),
     '',
     'Lưu ý: Khi đặt lại mật khẩu thành công, toàn bộ phiên đăng nhập cũ sẽ bị đăng xuất tự động.',
+    '',
+    '-- Đội ngũ bảo mật TOMATO',
+  ].join('\n');
+
+  return {
+    subject,
+    html: wrapEmailLayout(subject, bodyHtml),
+    text,
+  };
+}
+
+/**
+ * Mẫu email gửi mã xác nhận 6 chữ số khi người dùng yêu cầu đặt lại mã PIN tin nhắn (Quên mã PIN).
+ */
+export function buildE2eePinResetOtpEmail(data: E2eePinResetOtpEmailData): RenderedEmailTemplate {
+  const safeName = escapeHtml(data.displayName);
+  const safeOtp = escapeHtml(data.otpCode);
+  // Tuyệt đối không đưa mã xác nhận vào dòng Subject để tránh lộ trên màn hình khóa / log MTA.
+  const subject = '[TOMATO] Mã xác nhận đặt lại mã PIN tin nhắn';
+
+  const bodyHtml = `
+    <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;color:#171717;">Đặt lại mã PIN tin nhắn</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#404040;">
+      Xin chào <strong>${safeName}</strong>,
+    </p>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#404040;">
+      Bạn vừa yêu cầu đặt lại mã PIN đồng bộ tin nhắn trên TOMATO. Vui lòng nhập mã xác nhận gồm 6 chữ số dưới đây để tiếp tục:
+    </p>
+    <div style="margin:0 0 20px;padding:18px 20px;background-color:#fef2f2;border:1px solid #fecaca;border-radius:10px;text-align:center;">
+      <span style="display:inline-block;font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;font-size:32px;font-weight:700;letter-spacing:0.35em;color:#b91c1c;">${safeOtp}</span>
+    </div>
+    <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#525252;">
+      Mã xác nhận này có hiệu lực trong <strong>${data.expiresInMinutes} phút</strong> và sẽ bị hủy ngay nếu nhập sai quá 5 lần.
+    </p>
+    <p style="margin:0;font-size:13px;line-height:1.6;color:#737373;">
+      <strong>Lưu ý bảo mật:</strong> Tuyệt đối không chia sẻ mã xác nhận này cho bất kỳ ai. Nếu bạn không yêu cầu đặt lại mã PIN, hãy bỏ qua email này và kiểm tra lại các thiết bị đang đăng nhập.
+    </p>
+  `;
+
+  const text = [
+    `Xin chào ${data.displayName},`,
+    '',
+    'Bạn vừa yêu cầu đặt lại mã PIN đồng bộ tin nhắn trên TOMATO.',
+    `Mã xác nhận 6 chữ số của bạn là: ${data.otpCode}`,
+    '',
+    `Mã có hiệu lực trong ${data.expiresInMinutes} phút và sẽ bị hủy ngay nếu nhập sai quá 5 lần.`,
+    'Lưu ý bảo mật: Tuyệt đối không chia sẻ mã này cho bất kỳ ai. Nếu bạn không thực hiện yêu cầu này, hãy bỏ qua email.',
     '',
     '-- Đội ngũ bảo mật TOMATO',
   ].join('\n');

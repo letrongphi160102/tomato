@@ -26,6 +26,7 @@ export interface E2eeDeviceKeyPairMaterial {
 export interface E2eeTargetDevicePublicKey {
   readonly devicePublicId: string;
   readonly keyFingerprint: string;
+  readonly isSyncKey?: boolean;
   readonly identityPublicKeyJwk: E2eePublicJwk;
   readonly signingPublicKeyJwk: E2eePublicJwk;
 }

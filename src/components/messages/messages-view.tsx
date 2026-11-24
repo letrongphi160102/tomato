@@ -36,7 +36,7 @@ import {
   isConversationUnread,
 } from '@/components/messages/message-grouping';
 import { NewMessageModal } from '@/components/messages/new-message-modal';
-import { PinBackupModal } from '@/components/messages/pin-backup-modal';
+import { PinBackupModal, type PinBackupModalMode } from '@/components/messages/pin-backup-modal';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
@@ -70,7 +70,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const [chatError, setChatError] = React.useState<string | null>(null);
   const [infoDrawerOpen, setInfoDrawerOpen] = React.useState(false);
   const [newMessageModalOpen, setNewMessageModalOpen] = React.useState(false);
-  const [pinModalOpen, setPinModalOpen] = React.useState(false);
+  const [pinModalMode, setPinModalMode] = React.useState<PinBackupModalMode | null>(null);
   const [confirmBlockOpen, setConfirmBlockOpen] = React.useState(false);
   const [confirmDeleteConvTarget, setConfirmDeleteConvTarget] =
     React.useState<ConversationSummaryDto | null>(null);
@@ -120,7 +120,9 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const presences = chatStore?.presences ?? {};
   const ownKeyBundle = chatStore?.ownKeyBundle ?? null;
   const serverKeyBackup = chatStore?.serverKeyBackup ?? null;
-  const hasLocalRestoredBackup = chatStore?.hasLocalRestoredBackup ?? false;
+  const pinSyncState = chatStore?.pinSyncState ?? 'loading';
+  const needsMandatoryPinCreate = pinSyncState === 'must_create';
+  const needsPinRestore = pinSyncState === 'needs_restore';
 
   const activeThread =
     selectedConversation && chatStore
@@ -588,9 +590,15 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       ? (selectedConversation?.peerLastReadSeq ?? null)
       : null;
 
+  const visibleMessages = React.useMemo(
+    () => messages.filter((m) => !m.decryptionFailed),
+    [messages],
+  );
+  const hiddenUndecryptedCount = messages.length - visibleMessages.length;
+
   const clusteredMessages = React.useMemo(
-    () => buildClusteredMessageEntries(messages, effectivePeerLastReadSeq),
-    [effectivePeerLastReadSeq, messages],
+    () => buildClusteredMessageEntries(visibleMessages, effectivePeerLastReadSeq),
+    [effectivePeerLastReadSeq, visibleMessages],
   );
 
   return (
@@ -616,13 +624,21 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                 type="button"
                 variant="ghost"
                 size="icon"
-                aria-label="Đồng bộ tin nhắn bằng mã PIN"
-                title="Đồng bộ tin nhắn"
-                onClick={() => setPinModalOpen(true)}
+                aria-label="Mã PIN tin nhắn"
+                title="Mã PIN tin nhắn"
+                onClick={() =>
+                  setPinModalMode(
+                    needsMandatoryPinCreate
+                      ? 'create_mandatory'
+                      : needsPinRestore
+                        ? 'restore'
+                        : 'change',
+                  )
+                }
                 className="relative size-8 rounded-full"
               >
                 <KeyRound className="size-4" aria-hidden="true" />
-                {serverKeyBackup && !hasLocalRestoredBackup ? (
+                {needsPinRestore ? (
                   <span
                     aria-hidden="true"
                     className="absolute right-1 top-1 size-2 rounded-full bg-amber-500"
@@ -682,19 +698,19 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
             </button>
           </div>
 
-          {serverKeyBackup && !hasLocalRestoredBackup ? (
+          {needsPinRestore ? (
             <div className="flex items-center justify-between gap-2 border-b bg-primary/5 px-4 py-2.5">
-              <p className="text-xs text-foreground">
-                Nhập mã PIN để đồng bộ tin nhắn từ thiết bị trước của bạn.
+              <p className="text-xs leading-snug text-foreground">
+                Nhập mã PIN để đồng bộ các tin nhắn trước đây
               </p>
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() => setPinModalOpen(true)}
+                onClick={() => setPinModalMode('restore')}
                 className="h-7 shrink-0 rounded-lg px-2.5 text-xs"
               >
-                Nhập PIN
+                Nhập mã PIN
               </Button>
             </div>
           ) : null}
@@ -986,6 +1002,28 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                     </div>
                   ) : (
                     <div className="flex flex-col">
+                      {needsPinRestore && hiddenUndecryptedCount > 0 ? (
+                        <div className="mx-auto mb-4 flex w-full max-w-md items-center justify-between gap-3 rounded-xl border border-primary/20 bg-primary/5 px-3.5 py-2.5">
+                          <div className="flex items-center gap-2 text-xs text-foreground">
+                            <KeyRound className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                            <span>Nhập mã PIN để đồng bộ các tin nhắn trước đây</span>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setPinModalMode('restore')}
+                            className="h-7 shrink-0 rounded-lg px-2.5 text-xs"
+                          >
+                            Nhập mã PIN
+                          </Button>
+                        </div>
+                      ) : pinSyncState === 'synced' && hiddenUndecryptedCount > 0 ? (
+                        <p className="mx-auto mb-4 max-w-md text-center text-[11px] text-muted-foreground">
+                          Một số tin nhắn cũ hơn không khả dụng trên thiết bị này.
+                        </p>
+                      ) : null}
+
                       {clusteredMessages.map((entry, idx) => (
                         <MessageBubbleRow
                           key={entry.item.dto.clientMsgId}
@@ -1241,18 +1279,21 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       />
 
       <PinBackupModal
-        key={pinModalOpen ? 'pin-open' : 'pin-closed'}
-        open={pinModalOpen}
+        key={
+          needsMandatoryPinCreate
+            ? 'pin-mandatory-create'
+            : pinModalMode
+              ? `pin-${pinModalMode}`
+              : 'pin-closed'
+        }
+        open={needsMandatoryPinCreate || pinModalMode !== null}
+        initialMode={needsMandatoryPinCreate ? 'create_mandatory' : (pinModalMode ?? 'restore')}
+        allowClose={!needsMandatoryPinCreate}
         currentUserPublicId={currentUserPublicId}
         existingBackup={serverKeyBackup}
-        hasLocalRestoredBackup={hasLocalRestoredBackup}
-        onClose={() => setPinModalOpen(false)}
-        onBackupSynced={() => {
-          void chatStore?.refreshOwnE2eeStatus({ forceBackupFetch: true });
-          if (selectedConversation) {
-            void chatStore?.openConversationThread(selectedConversation, { forceReload: true });
-          }
-          void chatStore?.loadConversations(activeTab, { background: true });
+        onClose={() => setPinModalMode(null)}
+        onCompleted={async (payload) => {
+          await chatStore?.syncAfterPinOperation(payload);
         }}
       />
 

@@ -23,6 +23,10 @@ export const AUDIT_ACTIONS = [
   'PRIVACY_UPDATED',
   'USER_BLOCKED',
   'USER_UNBLOCKED',
+  'E2EE_PIN_BACKUP_CREATED',
+  'E2EE_PIN_CHANGED',
+  'E2EE_PIN_RESET_REQUESTED',
+  'E2EE_PIN_RESET_COMPLETED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -37,7 +41,7 @@ export interface AuditLogInput {
 
 // Danh sách mẫu tên trường nhạy cảm tuyệt đối không được phép ghi vào bảng audit_logs.
 const SENSITIVE_KEY_PATTERN =
-  /(password|passwd|pwd|token|otp|ticket|secret|pepper|cookie|authorization|csrf|hash|private[_-]?key|api[_-]?key|credential)/i;
+  /(password|passwd|pwd|token|otp|ticket|secret|pepper|cookie|authorization|csrf|hash|private[_-]?key|api[_-]?key|credential|recovery[_-]?pin|current[_-]?pin|new[_-]?pin|^pin$|encrypted[_-]?key[_-]?blob|kdf[_-]?salt)/i;
 
 // Phòng thủ chiều sâu: ngăn chuỗi giống JWT, header Bearer, hash Argon2, cookie phiên hoặc URL chứa token/OTP
 // vô tình lọt vào giá trị metadata ngay cả khi nằm giữa chuỗi tự do hoặc gán dưới tên khóa thông thường.

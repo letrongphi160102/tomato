@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 
 import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
 import {
@@ -11,6 +11,7 @@ import {
   type DbExecutor,
 } from '@/core/db';
 import {
+  authIdentities,
   blocks,
   conversationParticipants,
   conversations,
@@ -124,6 +125,26 @@ export class ChatRepository {
     return rows[0] ?? null;
   }
 
+  async findVerifiedEmailForUser(
+    userId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<string | null> {
+    const rows = await executor
+      .select({
+        email: authIdentities.identifierNormalized,
+      })
+      .from(authIdentities)
+      .where(
+        and(
+          eq(authIdentities.userId, userId),
+          eq(authIdentities.provider, 'email_password'),
+          isNotNull(authIdentities.verifiedAt),
+        ),
+      )
+      .limit(1);
+    return rows[0]?.email ?? null;
+  }
+
   async lockUsersInCanonicalOrder(
     userIds: readonly string[],
     tx: DatabaseTransaction,
@@ -220,11 +241,71 @@ export class ChatRepository {
     userId: string,
     executor: DbExecutor = this.getDefaultDb(),
   ): Promise<UserE2eeDeviceRow[]> {
+    // Luôn ưu tiên Khóa Đồng bộ (`is_sync_key = true`) lên đầu danh sách để không bao giờ bị cắt mất ở giới hạn 10 thiết bị.
     return executor
       .select()
       .from(userE2eeDevices)
       .where(and(eq(userE2eeDevices.userId, userId), isNull(userE2eeDevices.revokedAt)))
-      .orderBy(desc(userE2eeDevices.createdAt), asc(userE2eeDevices.id));
+      .orderBy(
+        desc(userE2eeDevices.isSyncKey),
+        desc(userE2eeDevices.lastSeenAt),
+        desc(userE2eeDevices.createdAt),
+        asc(userE2eeDevices.id),
+      );
+  }
+
+  async listHistoricalRevokedDevicesForUser(
+    userId: string,
+    limit: number = 50,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<UserE2eeDeviceRow[]> {
+    return executor
+      .select()
+      .from(userE2eeDevices)
+      .where(and(eq(userE2eeDevices.userId, userId), isNotNull(userE2eeDevices.revokedAt)))
+      .orderBy(desc(userE2eeDevices.revokedAt), desc(userE2eeDevices.createdAt))
+      .limit(limit);
+  }
+
+  async markDeviceAsSyncKeyByFingerprint(
+    params: {
+      readonly userId: string;
+      readonly keyFingerprint: string;
+      readonly now: Date;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<UserE2eeDeviceRow | null> {
+    // Gỡ cờ sync key và thu hồi mọi khóa đồng bộ cũ khác dấu vân tay trước khi gán khóa đồng bộ mới (tôn trọng UNIQUE partial index).
+    await tx
+      .update(userE2eeDevices)
+      .set({
+        isSyncKey: false,
+        revokedAt: params.now,
+      })
+      .where(
+        and(
+          eq(userE2eeDevices.userId, params.userId),
+          eq(userE2eeDevices.isSyncKey, true),
+          ne(userE2eeDevices.keyFingerprint, params.keyFingerprint),
+        ),
+      );
+
+    const updated = await tx
+      .update(userE2eeDevices)
+      .set({
+        isSyncKey: true,
+        revokedAt: null,
+        lastSeenAt: params.now,
+      })
+      .where(
+        and(
+          eq(userE2eeDevices.userId, params.userId),
+          eq(userE2eeDevices.keyFingerprint, params.keyFingerprint),
+        ),
+      )
+      .returning();
+
+    return updated[0] ?? null;
   }
 
   async upsertUserE2eeDevice(
@@ -235,6 +316,7 @@ export class ChatRepository {
       readonly identityPublicKeyJwk: E2eePublicJwkRecord;
       readonly signingPublicKeyJwk: E2eePublicJwkRecord;
       readonly keyFingerprint: string;
+      readonly isSyncKey?: boolean;
       readonly maxActiveDevices: number;
       readonly now: Date;
     },
@@ -243,6 +325,25 @@ export class ChatRepository {
     readonly device: UserE2eeDeviceRow;
     readonly revokedDevicePublicIds: readonly string[];
   }> {
+    const isSyncKey = params.isSyncKey === true;
+
+    if (isSyncKey) {
+      // Đảm bảo chỉ có tối đa 1 Khóa Đồng bộ hoạt động trên mỗi tài khoản (tuân thủ UNIQUE partial index).
+      await tx
+        .update(userE2eeDevices)
+        .set({
+          isSyncKey: false,
+          revokedAt: params.now,
+        })
+        .where(
+          and(
+            eq(userE2eeDevices.userId, params.userId),
+            eq(userE2eeDevices.isSyncKey, true),
+            ne(userE2eeDevices.keyFingerprint, params.keyFingerprint),
+          ),
+        );
+    }
+
     const upsertedRows = await tx
       .insert(userE2eeDevices)
       .values({
@@ -254,6 +355,7 @@ export class ChatRepository {
         identityPublicKeyJwk: params.identityPublicKeyJwk,
         signingPublicKeyJwk: params.signingPublicKeyJwk,
         keyFingerprint: params.keyFingerprint,
+        isSyncKey,
         revokedAt: null,
         lastSeenAt: params.now,
         createdAt: params.now,
@@ -265,6 +367,8 @@ export class ChatRepository {
           deviceLabel: params.deviceLabel,
           identityPublicKeyJwk: params.identityPublicKeyJwk,
           signingPublicKeyJwk: params.signingPublicKeyJwk,
+          // Bảo toàn cờ `is_sync_key` nếu thiết bị đã là khóa đồng bộ trước đó.
+          isSyncKey: isSyncKey ? true : sql`${userE2eeDevices.isSyncKey}`,
           revokedAt: null,
           lastSeenAt: params.now,
         },
@@ -274,12 +378,16 @@ export class ChatRepository {
     const currentDevice = upsertedRows[0]!;
 
     // Kiểm tra tổng số thiết bị đang hoạt động của user; nếu vượt quá `maxActiveDevices` (10),
-    // tự động thu hồi các thiết bị cũ nhất (ưu tiên giữ lại khóa sao lưu PIN nếu có).
+    // tự động thu hồi các thiết bị cũ nhất (tuyệt đối KHÔNG thu hồi Khóa Đồng bộ PIN).
     const activeDevices = await tx
       .select()
       .from(userE2eeDevices)
       .where(and(eq(userE2eeDevices.userId, params.userId), isNull(userE2eeDevices.revokedAt)))
-      .orderBy(desc(userE2eeDevices.lastSeenAt), desc(userE2eeDevices.createdAt));
+      .orderBy(
+        desc(userE2eeDevices.isSyncKey),
+        desc(userE2eeDevices.lastSeenAt),
+        desc(userE2eeDevices.createdAt),
+      );
 
     const revokedDevicePublicIds: string[] = [];
     if (activeDevices.length > params.maxActiveDevices) {
@@ -287,7 +395,7 @@ export class ChatRepository {
       const backupFingerprint = backupRow?.keyFingerprint ?? null;
 
       const removable = activeDevices.filter(
-        (d) => d.id !== currentDevice.id && d.keyFingerprint !== backupFingerprint,
+        (d) => d.id !== currentDevice.id && !d.isSyncKey && d.keyFingerprint !== backupFingerprint,
       );
       const excessCount = activeDevices.length - params.maxActiveDevices;
       const toRevoke = removable.slice(-excessCount);

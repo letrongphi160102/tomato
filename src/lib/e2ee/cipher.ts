@@ -154,24 +154,58 @@ export async function encryptDirectMessage(
   const ciphertext = bytesToBase64Url(new Uint8Array(encryptedContentBuf));
   const contentIvB64 = bytesToBase64Url(contentIv);
 
-  // Tập hợp danh sách thiết bị nhận (bao gồm thiết bị của người nhận + thiết bị hiện tại & thiết bị khác của người gửi).
+  // Tập hợp danh sách thiết bị nhận theo thứ tự ưu tiên chặt chẽ (tối đa MAX_E2EE_TARGET_DEVICES = 20):
+  // 1. Thiết bị đang gửi (`senderDevice`) — luôn có mặt để thiết bị hiện tại đọc lại được.
+  // 2. Khóa Công khai Đồng bộ (`isSyncKey === true`) của cả người nhận lẫn người gửi — TUYỆT ĐỐI không bao giờ bị cắt.
+  // 3. Các thiết bị hoạt động còn lại cân bằng xen kẽ giữa 2 phía.
   const uniqueTargets = new Map<string, E2eeTargetDevicePublicKey>();
-  for (const dev of params.recipientDevices) {
-    uniqueTargets.set(dev.keyFingerprint, dev);
-  }
-  if (params.senderOtherDevices) {
-    for (const dev of params.senderOtherDevices) {
-      uniqueTargets.set(dev.keyFingerprint, dev);
+  const addTargetIfSpace = (dev: E2eeTargetDevicePublicKey) => {
+    if (uniqueTargets.has(dev.keyFingerprint) || uniqueTargets.size >= MAX_E2EE_TARGET_DEVICES) {
+      return;
     }
-  }
-  uniqueTargets.set(params.senderDevice.keyFingerprint, {
+    uniqueTargets.set(dev.keyFingerprint, dev);
+  };
+
+  addTargetIfSpace({
     devicePublicId: params.senderDevice.devicePublicId,
     keyFingerprint: params.senderDevice.keyFingerprint,
+    isSyncKey: params.senderDevice.isBackupKey === true,
     identityPublicKeyJwk: params.senderDevice.identityPublicKeyJwk,
     signingPublicKeyJwk: params.senderDevice.signingPublicKeyJwk,
   });
 
-  const targetList = Array.from(uniqueTargets.values()).slice(0, MAX_E2EE_TARGET_DEVICES);
+  for (const dev of params.recipientDevices) {
+    if (dev.isSyncKey) {
+      addTargetIfSpace(dev);
+    }
+  }
+  if (params.senderOtherDevices) {
+    for (const dev of params.senderOtherDevices) {
+      if (dev.isSyncKey) {
+        addTargetIfSpace(dev);
+      }
+    }
+  }
+
+  const remainingRecipient = params.recipientDevices.filter(
+    (d) => !uniqueTargets.has(d.keyFingerprint),
+  );
+  const remainingSender = (params.senderOtherDevices ?? []).filter(
+    (d) => !uniqueTargets.has(d.keyFingerprint),
+  );
+  const maxLoop = Math.max(remainingRecipient.length, remainingSender.length);
+  for (let idx = 0; idx < maxLoop && uniqueTargets.size < MAX_E2EE_TARGET_DEVICES; idx += 1) {
+    const recDev = remainingRecipient[idx];
+    if (recDev) {
+      addTargetIfSpace(recDev);
+    }
+    const sndDev = remainingSender[idx];
+    if (sndDev) {
+      addTargetIfSpace(sndDev);
+    }
+  }
+
+  const targetList = Array.from(uniqueTargets.values());
   const wrappedKeys: Record<string, WrappedMessageKeyPayload> = {};
 
   for (const target of targetList) {
@@ -392,20 +426,21 @@ export async function decryptDirectMessage(
     );
   }
 
-  // Bước 2: Tìm entry bọc khóa khớp với một trong các khóa riêng của người dùng hiện tại.
-  let matchedMaterial: E2eeDeviceKeyPairMaterial | null = null;
-  let wrappedEntry: WrappedMessageKeyPayload | null = null;
+  // Bước 2: Thử mở bọc khóa phiên bằng TẤT CẢ các khóa riêng hợp lệ đang có trong IndexedDB
+  // (bao gồm khóa thiết bị chính, khóa hộp thư mặc định và khóa đồng bộ khôi phục từ mã PIN).
+  const candidatePairs: {
+    readonly material: E2eeDeviceKeyPairMaterial;
+    readonly wrappedEntry: WrappedMessageKeyPayload;
+  }[] = [];
 
   for (const material of params.receiverKeyMaterials) {
     const candidate = header.wrappedKeys?.[material.keyFingerprint];
     if (candidate) {
-      matchedMaterial = material;
-      wrappedEntry = candidate;
-      break;
+      candidatePairs.push({ material, wrappedEntry: candidate });
     }
   }
 
-  if (!matchedMaterial || !wrappedEntry) {
+  if (candidatePairs.length === 0) {
     throw new E2eeCryptoError(
       'MISSING_WRAPPED_KEY',
       'Tin nhắn này được gửi trước khi thiết bị hiện tại được đồng bộ.',
@@ -415,70 +450,77 @@ export async function decryptDirectMessage(
   const aadBytes = utf8ToBytes(aadString);
   const contentIv = base64UrlToBytes(header.iv);
 
-  try {
-    const ephemeralPubKey = await subtle.importKey(
-      'jwk',
-      normalizePublicP256Jwk(wrappedEntry.ephemeralPublicKeyJwk),
-      { name: 'ECDH', namedCurve: 'P-256' },
-      false,
-      [],
-    );
+  let lastDecryptError: unknown = null;
+  for (const { material, wrappedEntry } of candidatePairs) {
+    try {
+      const ephemeralPubKey = await subtle.importKey(
+        'jwk',
+        normalizePublicP256Jwk(wrappedEntry.ephemeralPublicKeyJwk),
+        { name: 'ECDH', namedCurve: 'P-256' },
+        false,
+        [],
+      );
 
-    const wrappingKey = await deriveWrappingAesKey({
-      privateKey: matchedMaterial.identityPrivateKey,
-      publicKey: ephemeralPubKey,
-      conversationPublicId: params.conversationPublicId,
-      targetKeyFingerprint: matchedMaterial.keyFingerprint,
-      hkdfSalt: contentIv,
-    });
+      const wrappingKey = await deriveWrappingAesKey({
+        privateKey: material.identityPrivateKey,
+        publicKey: ephemeralPubKey,
+        conversationPublicId: params.conversationPublicId,
+        targetKeyFingerprint: material.keyFingerprint,
+        hkdfSalt: contentIv,
+      });
 
-    const rawMessageKeyBuf = await subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: base64UrlToBytes(wrappedEntry.iv),
-        additionalData: aadBytes,
-        tagLength: 128,
-      },
-      wrappingKey,
-      base64UrlToBytes(wrappedEntry.wrappedKey),
-    );
+      const rawMessageKeyBuf = await subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: base64UrlToBytes(wrappedEntry.iv),
+          additionalData: aadBytes,
+          tagLength: 128,
+        },
+        wrappingKey,
+        base64UrlToBytes(wrappedEntry.wrappedKey),
+      );
 
-    const contentCryptoKey = await subtle.importKey(
-      'raw',
-      rawMessageKeyBuf,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['decrypt'],
-    );
+      const contentCryptoKey = await subtle.importKey(
+        'raw',
+        rawMessageKeyBuf,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['decrypt'],
+      );
 
-    const decryptedBuf = await subtle.decrypt(
-      {
-        name: 'AES-GCM',
-        iv: contentIv,
-        additionalData: aadBytes,
-        tagLength: 128,
-      },
-      contentCryptoKey,
-      base64UrlToBytes(params.ciphertext),
-    );
+      const decryptedBuf = await subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: contentIv,
+          additionalData: aadBytes,
+          tagLength: 128,
+        },
+        contentCryptoKey,
+        base64UrlToBytes(params.ciphertext),
+      );
 
-    const parsed = JSON.parse(bytesToUtf8(decryptedBuf)) as Partial<DecryptedDirectMessagePayload>;
-    if (typeof parsed.text !== 'string') {
-      throw new Error('Invalid payload');
+      const parsed = JSON.parse(
+        bytesToUtf8(decryptedBuf),
+      ) as Partial<DecryptedDirectMessagePayload>;
+      if (typeof parsed.text !== 'string') {
+        throw new Error('Invalid payload');
+      }
+
+      return {
+        v: 1,
+        text: sanitizeChatPlaintext(parsed.text),
+        sentAt: typeof parsed.sentAt === 'string' ? parsed.sentAt : new Date().toISOString(),
+      };
+    } catch (error) {
+      lastDecryptError = error;
     }
-
-    return {
-      v: 1,
-      text: sanitizeChatPlaintext(parsed.text),
-      sentAt: typeof parsed.sentAt === 'string' ? parsed.sentAt : new Date().toISOString(),
-    };
-  } catch (error) {
-    if (error instanceof E2eeCryptoError) {
-      throw error;
-    }
-    throw new E2eeCryptoError(
-      'AAD_OR_CIPHERTEXT_TAMPERED',
-      'Không thể giải mã tin nhắn: dữ liệu hoặc ngữ cảnh xác thực không khớp.',
-    );
   }
+
+  if (lastDecryptError instanceof E2eeCryptoError) {
+    throw lastDecryptError;
+  }
+  throw new E2eeCryptoError(
+    'AAD_OR_CIPHERTEXT_TAMPERED',
+    'Không thể giải mã tin nhắn: dữ liệu hoặc ngữ cảnh xác thực không khớp.',
+  );
 }
