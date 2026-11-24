@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import type { GroupableMessageItem } from '@/components/messages/message-grouping';
+import type { DecryptedMessageMediaPayload } from '@/lib/e2ee/types';
 import type {
   ConversationSummaryDto,
   E2eeKeyBackupDto,
@@ -11,6 +12,7 @@ import type { PresenceStatusDto } from '@/modules/presence/presence.service';
 export const DEFAULT_MESSAGES_PAGE_LIMIT = 25;
 export const MAX_LRU_CACHED_CONVERSATION_THREADS = 10;
 export const MAX_LRU_CACHED_DECRYPTED_MESSAGES = 500;
+export const MAX_LRU_CACHED_MEDIA_OBJECT_URLS = 60;
 export const PEER_KEY_BUNDLE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export type DecryptedMessageViewItem = GroupableMessageItem;
@@ -112,6 +114,21 @@ export interface ChatStoreContextValue {
     readonly plaintext: string;
     readonly retryClientMsgId?: string;
   }) => Promise<void>;
+  readonly sendOptimisticImageMessage: (params: {
+    readonly conversation: ConversationSummaryDto;
+    readonly file: File | Blob;
+  }) => Promise<void>;
+  readonly sendOptimisticVoiceMessage: (params: {
+    readonly conversation: ConversationSummaryDto;
+    readonly audioBlob: Blob;
+    readonly mimeType: string;
+    readonly durationMs: number;
+    readonly waveform: readonly number[];
+  }) => Promise<void>;
+  readonly resolveMessageMediaObjectUrl: (
+    message: DecryptedMessageViewItem,
+  ) => Promise<string | null>;
+  readonly getCachedMediaObjectUrl: (messagePublicId: string) => string | null;
   readonly editTextMessage: (params: {
     readonly conversation: ConversationSummaryDto;
     readonly message: DecryptedMessageViewItem;
@@ -155,7 +172,15 @@ export function useChatStore(): ChatStoreContextValue | null {
 
 export interface DecryptedMessageCacheEntry {
   readonly plaintext: string;
+  readonly media?: DecryptedMessageMediaPayload;
   readonly decryptionFailed: boolean;
+}
+
+export interface DecryptedMediaObjectUrlCacheEntry {
+  readonly messagePublicId: string;
+  readonly conversationPublicId: string;
+  readonly objectUrl: string;
+  readonly mimeType: string;
 }
 
 export interface PeerKeyBundleCacheEntry {
@@ -180,9 +205,21 @@ export interface UserChatRamCache {
   hasLocalRestoredBackup: boolean;
   readonly threadsByConvId: Map<string, CachedConversationThreadState>;
   readonly decryptedMessagesByCacheKey: Map<string, DecryptedMessageCacheEntry>;
+  readonly mediaObjectUrlsByMsgId: Map<string, DecryptedMediaObjectUrlCacheEntry>;
   readonly peerKeyBundlesByUserId: Map<string, PeerKeyBundleCacheEntry>;
   readonly lastSentReadSeqByConvId: Map<string, number>;
   readonly unreadPrimaryConvIds: Set<string>;
+}
+
+function safeRevokeObjectUrl(url: string | undefined): void {
+  if (!url || typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') {
+    return;
+  }
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    // Bỏ qua nếu trình duyệt đã giải phóng ObjectURL trước đó.
+  }
 }
 
 let activeUserChatRamCache: UserChatRamCache | null = null;
@@ -191,6 +228,11 @@ export function getOrInitUserChatRamCache(userPublicId: string): UserChatRamCach
   const norm = userPublicId.trim().toLowerCase();
   if (activeUserChatRamCache && activeUserChatRamCache.userPublicId === norm) {
     return activeUserChatRamCache;
+  }
+
+  // Khi chuyển tài khoản: bắt buộc giải phóng sạch mọi ObjectURL đã giải mã của tài khoản trước.
+  if (activeUserChatRamCache) {
+    clearChatRamMemorySingleton();
   }
 
   activeUserChatRamCache = {
@@ -210,6 +252,7 @@ export function getOrInitUserChatRamCache(userPublicId: string): UserChatRamCach
     hasLocalRestoredBackup: false,
     threadsByConvId: new Map(),
     decryptedMessagesByCacheKey: new Map(),
+    mediaObjectUrlsByMsgId: new Map(),
     peerKeyBundlesByUserId: new Map(),
     lastSentReadSeqByConvId: new Map(),
     unreadPrimaryConvIds: new Set(),
@@ -220,6 +263,15 @@ export function getOrInitUserChatRamCache(userPublicId: string): UserChatRamCach
 
 export function clearChatRamMemorySingleton(): void {
   if (activeUserChatRamCache) {
+    for (const entry of activeUserChatRamCache.mediaObjectUrlsByMsgId.values()) {
+      safeRevokeObjectUrl(entry.objectUrl);
+    }
+    for (const thread of activeUserChatRamCache.threadsByConvId.values()) {
+      for (const item of thread.items) {
+        safeRevokeObjectUrl(item.localPreviewUrl);
+      }
+    }
+    activeUserChatRamCache.mediaObjectUrlsByMsgId.clear();
     activeUserChatRamCache.threadsByConvId.clear();
     activeUserChatRamCache.decryptedMessagesByCacheKey.clear();
     activeUserChatRamCache.peerKeyBundlesByUserId.clear();
@@ -234,6 +286,54 @@ export function clearChatRamMemorySingleton(): void {
     activeUserChatRamCache.serverKeyBackup = null;
   }
   activeUserChatRamCache = null;
+}
+
+export function putLruMediaObjectUrlCache(
+  map: Map<string, DecryptedMediaObjectUrlCacheEntry>,
+  entry: DecryptedMediaObjectUrlCacheEntry,
+): void {
+  const existing = map.get(entry.messagePublicId);
+  if (existing) {
+    if (existing.objectUrl !== entry.objectUrl) {
+      safeRevokeObjectUrl(existing.objectUrl);
+    }
+    map.delete(entry.messagePublicId);
+  }
+  map.set(entry.messagePublicId, entry);
+  while (map.size > MAX_LRU_CACHED_MEDIA_OBJECT_URLS) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    const evicted = map.get(oldestKey);
+    if (evicted) {
+      safeRevokeObjectUrl(evicted.objectUrl);
+    }
+    map.delete(oldestKey);
+  }
+}
+
+export function revokeMediaObjectUrlByMessageId(
+  map: Map<string, DecryptedMediaObjectUrlCacheEntry>,
+  messagePublicId: string,
+): void {
+  const existing = map.get(messagePublicId);
+  if (existing) {
+    safeRevokeObjectUrl(existing.objectUrl);
+    map.delete(messagePublicId);
+  }
+}
+
+export function revokeMediaObjectUrlsByConversationId(
+  map: Map<string, DecryptedMediaObjectUrlCacheEntry>,
+  conversationPublicId: string,
+): void {
+  for (const [key, entry] of Array.from(map.entries())) {
+    if (entry.conversationPublicId === conversationPublicId) {
+      safeRevokeObjectUrl(entry.objectUrl);
+      map.delete(key);
+    }
+  }
 }
 
 /**

@@ -29,6 +29,7 @@ export type ApiErrorCode =
   | 'CHAT_MESSAGE_EDIT_LIMIT_REACHED'
   | 'CHAT_MESSAGE_ALREADY_RECALLED'
   | 'CHAT_MESSAGE_EDIT_UNSUPPORTED_TYPE'
+  | 'PAYLOAD_TOO_LARGE'
   | 'INTERNAL_ERROR';
 
 export interface ApiErrorDetail {

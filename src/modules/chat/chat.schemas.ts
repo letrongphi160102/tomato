@@ -5,13 +5,20 @@ import { z } from 'zod';
 
 export const MAX_ACTIVE_E2EE_DEVICES_PER_USER = 10;
 export const MAX_WRAPPED_KEYS_PER_MESSAGE = 20;
-export const MAX_MESSAGE_CIPHERTEXT_LENGTH = 16_384;
+export const MAX_MESSAGE_CIPHERTEXT_LENGTH = 32_768;
 export const MAX_PENDING_MESSAGES_BEFORE_ACCEPT = 3;
 export const MAX_MESSAGE_EDIT_COUNT = 5;
 export const MESSAGE_EDIT_WINDOW_MS = 5 * 60 * 1000;
 export const MESSAGE_RECALL_WINDOW_MS = 5 * 60 * 1000;
 export const MIN_PIN_BACKUP_PBKDF2_ITERATIONS = 600_000;
 export const MAX_PIN_BACKUP_PBKDF2_ITERATIONS = 2_000_000;
+
+/** Giới hạn dung lượng bản mã đính kèm (ảnh HD <= 10 MB + 64B tag GCM; voice <= 5 MB + 64B tag GCM). */
+export const MAX_IMAGE_CIPHERTEXT_BYTES = 10 * 1024 * 1024 + 64;
+export const MAX_VOICE_CIPHERTEXT_BYTES = 5 * 1024 * 1024 + 64;
+export const ATTACHMENT_UPLOAD_TOKEN_TTL_MS = 5 * 60 * 1000;
+export const ATTACHMENT_ORPHAN_EXPIRY_MS = 60 * 60 * 1000;
+export const ATTACHMENT_LAZY_GC_BATCH_LIMIT = 5;
 
 // Chỉ chấp nhận UUIDv4 cho public_id; từ chối UUIDv7 nội bộ để chống nhầm lẫn khóa chính.
 const PUBLIC_UUID_V4_REGEX =
@@ -207,6 +214,24 @@ export const messageCryptoHeaderSchema = z
   })
   .strict();
 
+export const createAttachmentUploadTokenInputSchema = z
+  .object({
+    mediaKind: z.enum(['image', 'voice']),
+    ciphertextSizeBytes: z.number().int().positive(),
+    ciphertextSha256: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .regex(SHA256_HEX_REGEX, 'Mã kiểm tra toàn vẹn tệp không hợp lệ.'),
+  })
+  .strict();
+
+export const attachmentDownloadQuerySchema = z
+  .object({
+    download: z.enum(['1']).optional(),
+  })
+  .strict();
+
 export const sendMessageInputSchema = z
   .object({
     clientMsgId: z
@@ -223,8 +248,22 @@ export const sendMessageInputSchema = z
       .max(MAX_MESSAGE_CIPHERTEXT_LENGTH)
       .regex(BASE64URL_REGEX, 'Bản mã tin nhắn không hợp lệ.'),
     cryptoHeader: messageCryptoHeaderSchema,
+    attachmentPublicId: chatPublicIdParamSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((data, ctx) => {
+    if (
+      data.messageType !== 'image' &&
+      data.messageType !== 'voice' &&
+      data.attachmentPublicId !== undefined
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['attachmentPublicId'],
+        message: 'Tin nhắn văn bản không được kèm mã tệp đính kèm.',
+      });
+    }
+  });
 
 export const editMessageInputSchema = z
   .object({

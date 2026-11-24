@@ -1,6 +1,8 @@
+import { sanitizeDecryptedMessageMediaPayload } from '@/lib/e2ee/media-cipher';
 import {
   E2eeCryptoError,
   type DecryptedDirectMessagePayload,
+  type DecryptedMessageMediaPayload,
   type E2eeDeviceKeyPairMaterial,
   type E2eePublicJwk,
   type E2eeTargetDevicePublicKey,
@@ -89,6 +91,7 @@ export interface EncryptDirectMessageParams {
   readonly senderPublicId: string;
   readonly clientMsgId: string;
   readonly plaintext: string;
+  readonly media?: DecryptedMessageMediaPayload;
   readonly senderDevice: E2eeDeviceKeyPairMaterial;
   readonly recipientDevices: readonly E2eeTargetDevicePublicKey[];
   readonly senderOtherDevices?: readonly E2eeTargetDevicePublicKey[];
@@ -133,10 +136,18 @@ export async function encryptDirectMessage(
     ['encrypt'],
   );
 
+  const sanitizedMedia = params.media
+    ? sanitizeDecryptedMessageMediaPayload(params.media)
+    : undefined;
+  if (params.media && !sanitizedMedia) {
+    throw new E2eeCryptoError('MEDIA_INVALID_TYPE', 'Thông tin tệp đính kèm không hợp lệ.');
+  }
+
   const payloadObject: DecryptedDirectMessagePayload = {
     v: 1,
     text: cleanText,
     sentAt,
+    ...(sanitizedMedia ? { media: sanitizedMedia } : {}),
   };
   const plaintextBytes = utf8ToBytes(JSON.stringify(payloadObject));
 
@@ -506,10 +517,14 @@ export async function decryptDirectMessage(
         throw new Error('Invalid payload');
       }
 
+      const sanitizedMedia =
+        parsed.media !== undefined ? sanitizeDecryptedMessageMediaPayload(parsed.media) : undefined;
+
       return {
         v: 1,
         text: sanitizeChatPlaintext(parsed.text),
         sentAt: typeof parsed.sentAt === 'string' ? parsed.sentAt : new Date().toISOString(),
+        ...(sanitizedMedia ? { media: sanitizedMedia } : {}),
       };
     } catch (error) {
       lastDecryptError = error;

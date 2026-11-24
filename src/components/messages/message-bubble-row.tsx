@@ -4,6 +4,7 @@ import * as React from 'react';
 import { MoreHorizontal, Pencil, RotateCcw, Trash2, Undo2 } from 'lucide-react';
 
 import type { DecryptedMessageViewItem } from '@/components/messages/chat-store-context';
+import type { ImageLightboxTarget } from '@/components/messages/image-lightbox-modal';
 import {
   canDeleteMessageForMe,
   canEditMessage,
@@ -15,6 +16,7 @@ import {
   formatExactMessageTooltipTimeVi,
   type ClusteredMessageEntry,
 } from '@/components/messages/message-grouping';
+import { MessageMediaContent } from '@/components/messages/message-media-content';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import {
   DropdownMenu,
@@ -39,6 +41,7 @@ export interface MessageBubbleRowProps {
   readonly onRequestRecall: (item: DecryptedMessageViewItem) => void;
   readonly onDeleteForMe: (item: DecryptedMessageViewItem) => void;
   readonly onRetryFailed: (clientMsgId: string, plaintext: string) => void;
+  readonly onOpenLightbox?: (target: ImageLightboxTarget) => void;
 }
 
 export function MessageBubbleRow({
@@ -54,6 +57,7 @@ export function MessageBubbleRow({
   onRequestRecall,
   onDeleteForMe,
   onRetryFailed,
+  onOpenLightbox,
 }: MessageBubbleRowProps) {
   const {
     item,
@@ -138,13 +142,19 @@ export function MessageBubbleRow({
                 onClick={() => onTapToggle?.(item.dto.clientMsgId)}
                 className={cn(
                   'min-w-0 leading-relaxed break-words whitespace-pre-wrap transition-opacity focus:outline-none',
-                  isCompact ? 'px-3 py-1.5 text-xs' : 'px-3.5 py-2 text-sm',
+                  !isRecalled && item.dto.messageType === 'image' && !item.decryptionFailed
+                    ? 'overflow-hidden border border-border/60 p-0 shadow-2xs'
+                    : isCompact
+                      ? 'px-3 py-1.5 text-xs'
+                      : 'px-3.5 py-2 text-sm',
                   getMessageBubbleRadiusClasses(isMine, clusterPosition),
                   isRecalled
                     ? 'border border-dashed border-border/80 bg-transparent italic text-muted-foreground'
-                    : isMine
-                      ? 'bg-primary text-primary-foreground shadow-2xs'
-                      : 'border bg-muted/60 text-foreground shadow-2xs',
+                    : item.dto.messageType === 'image' && !item.decryptionFailed
+                      ? 'bg-muted/40'
+                      : isMine
+                        ? 'bg-primary text-primary-foreground shadow-2xs'
+                        : 'border bg-muted/60 text-foreground shadow-2xs',
                   !isRecalled && item.decryptionFailed ? 'italic opacity-80' : null,
                   item.sending ? 'opacity-85' : null,
                   item.sendError ? 'ring-1 ring-destructive/60 opacity-90' : null,
@@ -153,7 +163,19 @@ export function MessageBubbleRow({
                     : null,
                 )}
               >
-                {isRecalled ? RECALLED_MESSAGE_PLACEHOLDER : item.plaintext}
+                {isRecalled ? (
+                  RECALLED_MESSAGE_PLACEHOLDER
+                ) : !item.decryptionFailed &&
+                  (item.dto.messageType === 'image' || item.dto.messageType === 'voice') ? (
+                  <MessageMediaContent
+                    item={item}
+                    isMine={isMine}
+                    isCompact={isCompact}
+                    onOpenLightbox={onOpenLightbox}
+                  />
+                ) : (
+                  item.plaintext
+                )}
               </div>
             </TooltipTrigger>
             {tooltipLabel ? (
@@ -248,14 +270,16 @@ export function MessageBubbleRow({
             )}
           >
             <span>Không gửi được</span>
-            <button
-              type="button"
-              onClick={() => onRetryFailed(item.dto.clientMsgId, item.plaintext)}
-              className="inline-flex items-center gap-1 font-semibold underline hover:opacity-80"
-            >
-              <RotateCcw className={cn(isCompact ? 'size-2.5' : 'size-3')} aria-hidden="true" />
-              <span>Thử lại</span>
-            </button>
+            {item.dto.messageType === 'text' ? (
+              <button
+                type="button"
+                onClick={() => onRetryFailed(item.dto.clientMsgId, item.plaintext)}
+                className="inline-flex items-center gap-1 font-semibold underline hover:opacity-80"
+              >
+                <RotateCcw className={cn(isCompact ? 'size-2.5' : 'size-3')} aria-hidden="true" />
+                <span>Thử lại</span>
+              </button>
+            ) : null}
           </div>
         ) : null}
 

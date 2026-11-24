@@ -75,3 +75,9 @@ export const MESSAGE_TYPES = ['text', 'image', 'voice', 'call_event'] as const;
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 
 export const messageTypeEnum = pgEnum('message_type', MESSAGE_TYPES);
+
+export const ATTACHMENT_MEDIA_KINDS = ['image', 'voice'] as const;
+
+export type AttachmentMediaKind = (typeof ATTACHMENT_MEDIA_KINDS)[number];
+
+export const attachmentMediaKindEnum = pgEnum('attachment_media_kind', ATTACHMENT_MEDIA_KINDS);

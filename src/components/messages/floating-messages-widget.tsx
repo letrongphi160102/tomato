@@ -13,21 +13,23 @@ import {
   MessageCircle,
   PenSquare,
   RotateCcw,
-  Send,
   Trash2,
   X,
 } from 'lucide-react';
 
+import { ChatComposerWithMedia } from '@/components/messages/chat-media-composer';
 import {
   shouldRenderFloatingMessagesWidget,
   useChatStore,
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
 import { ConversationActionsMenu } from '@/components/messages/conversation-actions-menu';
-import { EmojiPickerPopover } from '@/components/messages/emoji-picker-popover';
+import {
+  ImageLightboxModal,
+  type ImageLightboxTarget,
+} from '@/components/messages/image-lightbox-modal';
 import { canRecallMessage, MAX_MESSAGE_EDIT_COUNT } from '@/components/messages/message-actions';
 import { MessageBubbleRow } from '@/components/messages/message-bubble-row';
-import { MessageEditBanner } from '@/components/messages/message-edit-banner';
 import {
   buildClusteredMessageEntries,
   formatConversationShortTimeVi,
@@ -82,6 +84,7 @@ export function FloatingMessagesWidget() {
   } | null>(null);
   const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
   const [actionBusy, setActionBusy] = React.useState(false);
+  const [lightboxTarget, setLightboxTarget] = React.useState<ImageLightboxTarget | null>(null);
 
   const messagesContainerRef = React.useRef<HTMLDivElement | null>(null);
   const composerInputRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -1070,6 +1073,7 @@ export function FloatingMessagesWidget() {
                           onRetryFailed={(clientMsgId, plaintext) =>
                             void handleRetryFailedMessage(clientMsgId, plaintext)
                           }
+                          onOpenLightbox={(target) => setLightboxTarget(target)}
                         />
                       ))}
                     </div>
@@ -1131,88 +1135,51 @@ export function FloatingMessagesWidget() {
                       </div>
                     ) : null}
 
-                    {editingMessage ? (
-                      <MessageEditBanner
-                        originalText={editingMessage.plaintext}
-                        compact
-                        saving={editSaving}
-                        onCancel={handleCancelEditMessage}
-                      />
-                    ) : null}
-
                     {recipientHasZeroKeys ? (
                       <div className="rounded-xl border border-dashed bg-muted/40 px-3 py-2 text-center text-[11px] text-muted-foreground">
                         @{activeMiniConversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị
                         nào.
                       </div>
                     ) : (
-                      <form
-                        onSubmit={(e) => void handleSendMessage(e)}
-                        className="flex items-end gap-1 rounded-2xl border bg-muted/30 px-2 py-1 focus-within:border-primary/60 focus-within:bg-background"
-                      >
-                        <EmojiPickerPopover
-                          disabled={!editingMessage && !activeMiniConversation.canSendMoreMessages}
-                          onSelectEmoji={(emoji) =>
-                            editingMessage
-                              ? setEditDraftText((prev) => `${prev}${emoji}`)
-                              : setDraftText((prev) => `${prev}${emoji}`)
+                      <ChatComposerWithMedia
+                        key={activeMiniConversation.public_id}
+                        compact
+                        canSendMedia={activeMiniConversation.canSendMedia}
+                        canSendMoreMessages={activeMiniConversation.canSendMoreMessages}
+                        draftText={draftText}
+                        editDraftText={editDraftText}
+                        editingOriginalText={editingMessage?.plaintext ?? null}
+                        editSaving={editSaving}
+                        composerInputRef={composerInputRef}
+                        onChangeDraftText={setDraftText}
+                        onChangeEditDraftText={setEditDraftText}
+                        onCancelEdit={handleCancelEditMessage}
+                        onSubmitTextOrEdit={handleSendMessage}
+                        onSendImageFile={async (file) => {
+                          if (!chatStore) {
+                            return;
                           }
-                        />
-
-                        <textarea
-                          ref={composerInputRef}
-                          rows={1}
-                          value={editingMessage ? editDraftText : draftText}
-                          disabled={
-                            editSaving ||
-                            (!editingMessage && !activeMiniConversation.canSendMoreMessages)
+                          isNearBottomRef.current = true;
+                          await chatStore.sendOptimisticImageMessage({
+                            conversation: activeMiniConversation,
+                            file,
+                          });
+                        }}
+                        onSendVoice={async (recorded) => {
+                          if (!chatStore) {
+                            return;
                           }
-                          placeholder={
-                            editingMessage
-                              ? 'Nhập nội dung mới...'
-                              : activeMiniConversation.canSendMoreMessages
-                                ? 'Nhắn tin...'
-                                : 'Đã gửi tối đa 3 tin chờ'
-                          }
-                          onChange={(e) =>
-                            editingMessage
-                              ? setEditDraftText(e.target.value)
-                              : setDraftText(e.target.value)
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape' && editingMessage && !editSaving) {
-                              e.preventDefault();
-                              handleCancelEditMessage();
-                              return;
-                            }
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              void handleSendMessage();
-                            }
-                          }}
-                          className="max-h-24 min-h-[32px] flex-1 resize-none bg-transparent py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-                        />
-
-                        <Button
-                          type="submit"
-                          size="sm"
-                          disabled={
-                            editSaving ||
-                            !(editingMessage ? editDraftText : draftText).trim() ||
-                            (!editingMessage && !activeMiniConversation.canSendMoreMessages)
-                          }
-                          aria-label={editingMessage ? 'Lưu chỉnh sửa' : 'Gửi tin nhắn'}
-                          className="h-7 rounded-xl px-2.5 text-xs"
-                        >
-                          {editSaving ? (
-                            <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-                          ) : editingMessage ? (
-                            <Check className="size-3" aria-hidden="true" />
-                          ) : (
-                            <Send className="size-3" aria-hidden="true" />
-                          )}
-                        </Button>
-                      </form>
+                          isNearBottomRef.current = true;
+                          await chatStore.sendOptimisticVoiceMessage({
+                            conversation: activeMiniConversation,
+                            audioBlob: recorded.audioBlob,
+                            mimeType: recorded.mimeType,
+                            durationMs: recorded.durationMs,
+                            waveform: recorded.waveform,
+                          });
+                        }}
+                        onError={setChatError}
+                      />
                     )}
                   </footer>
                 )}
@@ -1283,6 +1250,8 @@ export function FloatingMessagesWidget() {
         }}
         onConfirm={() => void handleConfirmDeleteConversation()}
       />
+
+      <ImageLightboxModal target={lightboxTarget} onClose={() => setLightboxTarget(null)} />
     </TooltipProvider>
   );
 }

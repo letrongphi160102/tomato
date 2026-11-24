@@ -64,6 +64,13 @@
       "when": 1795519312252,
       "tag": "0008_add_e2ee_sync_key_flag",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795528341984,
+      "tag": "0009_add_message_attachments_rls",
+      "breakpoints": true
     }
   ]
 }

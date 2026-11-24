@@ -616,6 +616,13 @@ describe('Security M10: Ma trận BOLA 5 nhân vật, Sửa/Thu hồi trong 5 ph
           }
         }
       },
+      setMessageTypeForTesting: (pid: string, messageType: MessageRow['messageType']) => {
+        for (const m of messagesById.values()) {
+          if (m.publicId === pid) {
+            messagesById.set(m.id, { ...m, messageType });
+          }
+        }
+      },
       getParticipantRow: (convPublicId: string, uid: string): ConversationParticipantRow | null => {
         for (const [cid, conv] of conversationsById.entries()) {
           if (conv.publicId === convPublicId) {
@@ -806,7 +813,8 @@ describe('Security M10: Ma trận BOLA 5 nhân vật, Sửa/Thu hồi trong 5 ph
     const msgEdit = await sendMsg('m10_msg_edit_1', 'Nội dung ban đầu');
     const msgRecall = await sendMsg('m10_msg_recall_1', 'Tin sẽ thu hồi');
     const msgExpire = await sendMsg('m10_msg_expire_1', 'Tin sẽ quá hạn');
-    const msgImage = await sendMsg('m10_msg_image_1', 'Ảnh HD', 'image');
+    const msgImage = await sendMsg('m10_msg_image_1', 'Ảnh HD', 'text');
+    env.setMessageTypeForTesting(msgImage.publicId, 'image');
 
     // 2. Chống tái sử dụng IV AES-GCM: gửi lại đúng cryptoHeader.iv cũ -> Server từ chối 400.
     const reusedIvRes = await messageEditPatch(

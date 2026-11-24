@@ -1,38 +1,56 @@
 import 'server-only';
 
 import { getEnv, type Env } from '@/core/config/env';
+import { InMemoryMediaStorageAdapter } from '@/core/storage/in-memory-adapter';
 import {
   AVATAR_FILE_NAME_REGEX,
   AVATAR_STORAGE_KEY_REGEX,
+  CHAT_MEDIA_FILE_NAME_REGEX,
+  CHAT_MEDIA_STORAGE_KEY_REGEX,
   LocalFsStorageAdapter,
   extractAvatarFileNameFromKey,
+  generateChatMediaStorageKey,
   isValidAvatarFileName,
   isValidAvatarStorageKey,
+  isValidChatMediaStorageKey,
+  isValidManagedStorageKey,
 } from '@/core/storage/local-fs-adapter';
 import type {
+  CreateEncryptedUploadGrantInput,
+  EncryptedUploadGrant,
   MediaStorageProvider,
   MediaStorageProviderType,
   PutMediaObjectInput,
   ReadMediaObjectResult,
   StoredMediaObject,
+  VerifyUploadedObjectResult,
 } from '@/core/storage/types';
 import { VercelBlobStorageAdapter } from '@/core/storage/vercel-blob-adapter';
 
 export {
   AVATAR_FILE_NAME_REGEX,
   AVATAR_STORAGE_KEY_REGEX,
+  CHAT_MEDIA_FILE_NAME_REGEX,
+  CHAT_MEDIA_STORAGE_KEY_REGEX,
+  InMemoryMediaStorageAdapter,
   LocalFsStorageAdapter,
   VercelBlobStorageAdapter,
   extractAvatarFileNameFromKey,
+  generateChatMediaStorageKey,
   isValidAvatarFileName,
   isValidAvatarStorageKey,
+  isValidChatMediaStorageKey,
+  isValidManagedStorageKey,
 };
 export type {
+  CreateEncryptedUploadGrantInput,
+  EncryptedUploadGrant,
   MediaStorageProvider,
   MediaStorageProviderType,
   PutMediaObjectInput,
   ReadMediaObjectResult,
   StoredMediaObject,
+  VerifyUploadedObjectResult,
 };
 
 type StorageEnvConfig = Pick<

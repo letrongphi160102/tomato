@@ -37,4 +37,11 @@ export const CHAT_MESSAGES = Object.freeze({
   pinResetOtpIncorrectWithRemaining: (remaining: number) =>
     `Mã xác nhận không đúng. Bạn còn ${remaining} lần thử.`,
   pinResetCompleted: 'Đã đặt lại mã PIN tin nhắn thành công.',
+  attachmentTooLargeImage: 'Ảnh đính kèm vượt quá giới hạn tối đa 10 MB.',
+  attachmentTooLargeVoice: 'Tin nhắn thoại vượt quá giới hạn tối đa 5 MB.',
+  attachmentUploadNotReady: 'Tệp đính kèm chưa được tải lên hoàn tất. Vui lòng thử lại.',
+  attachmentAlreadyBound: 'Tệp đính kèm này đã được sử dụng cho một tin nhắn khác.',
+  attachmentTypeMismatch: 'Loại tệp đính kèm không khớp với loại tin nhắn.',
+  attachmentIntegrityMismatch: 'Tệp tải lên không khớp kích thước hoặc dữ liệu đã khai báo.',
+  attachmentInvalidContentType: 'Định dạng truyền tải tệp không hợp lệ.',
 });

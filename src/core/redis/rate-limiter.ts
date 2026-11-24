@@ -308,6 +308,21 @@ export const CHAT_RATE_LIMITS = Object.freeze({
     windowSeconds: 60,
     strategy: 'sliding_window',
   }),
+  uploadAttachmentByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 10 * 60,
+    strategy: 'sliding_window',
+  }),
+  uploadAttachmentByIp: Object.freeze({
+    limit: 60,
+    windowSeconds: 10 * 60,
+    strategy: 'sliding_window',
+  }),
+  downloadAttachmentByUser: Object.freeze({
+    limit: 120,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
   getMessageByUser: Object.freeze({
     limit: 120,
     windowSeconds: 60,

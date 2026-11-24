@@ -16,16 +16,19 @@ import {
   conversationParticipants,
   conversations,
   follows,
+  messageAttachments,
   messageUserDeletions,
   messages,
   userE2eeDevices,
   userE2eeKeyBackups,
   users,
+  type AttachmentMediaKind,
   type ConversationInboxState,
   type ConversationParticipantRow,
   type ConversationRow,
   type E2eeBackupKdfParamsRecord,
   type E2eePublicJwkRecord,
+  type MessageAttachmentRow,
   type MessageCryptoHeaderRecord,
   type MessageRow,
   type MessageType,
@@ -1006,6 +1009,7 @@ export class ChatRepository {
       readonly messageType: MessageType;
       readonly ciphertext: string;
       readonly cryptoHeader: MessageCryptoHeaderRecord;
+      readonly attachmentStorageKey?: string | null;
       readonly now: Date;
     },
     tx: DatabaseTransaction,
@@ -1030,7 +1034,7 @@ export class ChatRepository {
         messageType: params.messageType,
         ciphertext: params.ciphertext,
         cryptoHeader: params.cryptoHeader,
-        attachmentStorageKey: null,
+        attachmentStorageKey: params.attachmentStorageKey ?? null,
         editCount: 0,
         editedAt: null,
         recalledAt: null,
@@ -1213,5 +1217,195 @@ export class ChatRepository {
       .limit(params.limit + 1);
 
     return rows;
+  }
+
+  // =========================================================================
+  // Encrypted Media Attachments (M11)
+  // =========================================================================
+
+  async insertPendingAttachment(
+    params: {
+      readonly conversationId: string;
+      readonly uploaderId: string;
+      readonly mediaKind: AttachmentMediaKind;
+      readonly storageKey: string;
+      readonly ciphertextSizeBytes: number;
+      readonly ciphertextSha256: string;
+      readonly now: Date;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageAttachmentRow> {
+    const rows = await tx
+      .insert(messageAttachments)
+      .values({
+        id: generateUuidV7(),
+        publicId: generatePublicId(),
+        conversationId: params.conversationId,
+        uploaderId: params.uploaderId,
+        messageId: null,
+        mediaKind: params.mediaKind,
+        storageKey: params.storageKey,
+        storageUrl: null,
+        ciphertextSizeBytes: params.ciphertextSizeBytes,
+        ciphertextSha256: params.ciphertextSha256,
+        deletedAt: null,
+        createdAt: params.now,
+      })
+      .returning();
+    return rows[0]!;
+  }
+
+  async findAttachmentByPublicId(
+    publicId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<MessageAttachmentRow | null> {
+    const rows = await executor
+      .select()
+      .from(messageAttachments)
+      .where(eq(messageAttachments.publicId, publicId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async lockAttachmentByPublicId(
+    publicId: string,
+    tx: DatabaseTransaction,
+  ): Promise<MessageAttachmentRow | null> {
+    const rows = await tx
+      .select()
+      .from(messageAttachments)
+      .where(eq(messageAttachments.publicId, publicId))
+      .limit(1)
+      .for('update');
+    return rows[0] ?? null;
+  }
+
+  async markAttachmentStorageUrlUploaded(
+    params: {
+      readonly attachmentId: string;
+      readonly uploaderId: string;
+      readonly storageUrl: string;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageAttachmentRow | null> {
+    const rows = await tx
+      .update(messageAttachments)
+      .set({
+        storageUrl: params.storageUrl,
+      })
+      .where(
+        and(
+          eq(messageAttachments.id, params.attachmentId),
+          eq(messageAttachments.uploaderId, params.uploaderId),
+          isNull(messageAttachments.messageId),
+          isNull(messageAttachments.deletedAt),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async bindAttachmentToMessageAtomically(
+    params: {
+      readonly attachmentId: string;
+      readonly conversationId: string;
+      readonly uploaderId: string;
+      readonly messageId: string;
+      readonly storageUrl: string;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageAttachmentRow | null> {
+    const rows = await tx
+      .update(messageAttachments)
+      .set({
+        messageId: params.messageId,
+        storageUrl: params.storageUrl,
+      })
+      .where(
+        and(
+          eq(messageAttachments.id, params.attachmentId),
+          eq(messageAttachments.conversationId, params.conversationId),
+          eq(messageAttachments.uploaderId, params.uploaderId),
+          isNull(messageAttachments.messageId),
+          isNull(messageAttachments.deletedAt),
+        ),
+      )
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async findActiveAttachmentByMessageId(
+    messageId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<MessageAttachmentRow | null> {
+    const rows = await executor
+      .select()
+      .from(messageAttachments)
+      .where(and(eq(messageAttachments.messageId, messageId), isNull(messageAttachments.deletedAt)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async softDeleteAttachmentsByMessageId(
+    params: {
+      readonly messageId: string;
+      readonly uploaderId: string;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageAttachmentRow[]> {
+    return tx
+      .update(messageAttachments)
+      .set({
+        deletedAt: sql`NOW()`,
+      })
+      .where(
+        and(
+          eq(messageAttachments.messageId, params.messageId),
+          eq(messageAttachments.uploaderId, params.uploaderId),
+          isNull(messageAttachments.deletedAt),
+        ),
+      )
+      .returning();
+  }
+
+  /**
+   * Đánh dấu và lấy tối đa `limit` bản ghi pending quá hạn (`message_id IS NULL`) của chính `uploaderId`
+   * để dọn tệp rác trên Storage theo cơ chế lazy cleanup không đua tranh.
+   */
+  async claimExpiredPendingAttachmentsForUser(
+    params: {
+      readonly uploaderId: string;
+      readonly cutoffDate: Date;
+      readonly limit: number;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageAttachmentRow[]> {
+    const candidates = await tx
+      .select({ id: messageAttachments.id })
+      .from(messageAttachments)
+      .where(
+        and(
+          eq(messageAttachments.uploaderId, params.uploaderId),
+          isNull(messageAttachments.messageId),
+          isNull(messageAttachments.deletedAt),
+          lt(messageAttachments.createdAt, params.cutoffDate),
+        ),
+      )
+      .orderBy(asc(messageAttachments.createdAt))
+      .limit(params.limit)
+      .for('update');
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    const ids = candidates.map((row) => row.id);
+    return tx
+      .update(messageAttachments)
+      .set({
+        deletedAt: sql`NOW()`,
+      })
+      .where(and(inArray(messageAttachments.id, ids), isNull(messageAttachments.deletedAt)))
+      .returning();
   }
 }

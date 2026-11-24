@@ -5,8 +5,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   LocalFsStorageAdapter,
+  generateChatMediaStorageKey,
   isValidAvatarFileName,
   isValidAvatarStorageKey,
+  isValidChatMediaStorageKey,
 } from '@/core/storage';
 
 describe('Unit M6: LocalFsStorageAdapter (an toàn đường dẫn & ghi nguyên tử)', () => {
@@ -75,5 +77,56 @@ describe('Unit M6: LocalFsStorageAdapter (an toàn đường dẫn & ghi nguyên
     expect(isValidAvatarFileName('0123456789abcdef0123456789abcdef.webp')).toBe(true);
     expect(isValidAvatarFileName('../0123456789abcdef0123456789abcdef.webp')).toBe(false);
     expect(isValidAvatarFileName('avatar.svg')).toBe(false);
+  });
+
+  it('M11: hỗ trợ cấp grant, lưu/xác minh kích thước & xóa bản mã chat-media/*.bin an toàn Path Traversal', async () => {
+    const key = generateChatMediaStorageKey();
+    expect(isValidChatMediaStorageKey(key)).toBe(true);
+
+    const attachmentPublicId = '11111111-1111-4111-8111-111111111111';
+    const ciphertext = Buffer.from('encrypted-aes256gcm-binary-payload-m11', 'utf8');
+
+    const grant = await adapter.createEncryptedUploadGrant({
+      attachmentPublicId,
+      storageKey: key,
+      exactSizeBytes: ciphertext.byteLength,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    });
+    expect(grant.uploadMode).toBe('direct');
+    expect(grant.pathname).toBe(key);
+    expect(grant.uploadUrl).toBe(`/api/v1/media/local/chat/${attachmentPublicId}`);
+
+    // Trước khi upload: verify trả null.
+    expect(
+      await adapter.verifyUploadedObject(key, { expectedSizeBytes: ciphertext.byteLength }),
+    ).toBeNull();
+
+    const stored = await adapter.putObject({
+      storageKey: key,
+      body: ciphertext,
+      contentType: 'application/octet-stream',
+    });
+    expect(stored.byteLength).toBe(ciphertext.byteLength);
+
+    // Đúng kích thước -> verify trả về tồn tại; lệch kích thước -> null.
+    const verified = await adapter.verifyUploadedObject(key, {
+      expectedSizeBytes: ciphertext.byteLength,
+    });
+    expect(verified?.exists).toBe(true);
+    expect(verified?.byteLength).toBe(ciphertext.byteLength);
+
+    expect(
+      await adapter.verifyUploadedObject(key, { expectedSizeBytes: ciphertext.byteLength + 1 }),
+    ).toBeNull();
+
+    // Xóa idempotent & chặn path traversal chat-media.
+    await adapter.deleteObject(key);
+    expect(await adapter.readObject(key)).toBeNull();
+    await expect(adapter.deleteObject(key)).resolves.toBeUndefined();
+
+    expect(isValidChatMediaStorageKey('chat-media/../../secret.bin')).toBe(false);
+    expect(isValidChatMediaStorageKey('chat-media/0123456789abcdef0123456789abcdef.svg')).toBe(
+      false,
+    );
   });
 });

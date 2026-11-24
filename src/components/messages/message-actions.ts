@@ -8,6 +8,8 @@ export const MESSAGE_EDIT_WINDOW_MS = 5 * 60 * 1000;
 export const MESSAGE_RECALL_WINDOW_MS = 5 * 60 * 1000;
 export const MAX_MESSAGE_EDIT_COUNT = 5;
 export const RECALLED_MESSAGE_PLACEHOLDER = 'Tin nhắn đã được thu hồi';
+export const IMAGE_MESSAGE_PREVIEW_LABEL = 'Đã gửi một ảnh';
+export const VOICE_MESSAGE_PREVIEW_LABEL = 'Tin nhắn thoại';
 export const PIN_SYNC_REQUIRED_PREVIEW = 'Nhập mã PIN để xem tin nhắn';
 export const UNAVAILABLE_OLD_MESSAGE_PREVIEW = 'Tin nhắn không khả dụng trên thiết bị này';
 
@@ -107,6 +109,12 @@ export function getConversationPreviewText(
   }
   if (decryptionFailed) {
     return options?.needsPinSync ? PIN_SYNC_REQUIRED_PREVIEW : UNAVAILABLE_OLD_MESSAGE_PREVIEW;
+  }
+  if (lastMessage.messageType === 'image') {
+    return `${lastMessage.isOwnMessage ? 'Bạn: ' : ''}${IMAGE_MESSAGE_PREVIEW_LABEL}`;
+  }
+  if (lastMessage.messageType === 'voice') {
+    return `${lastMessage.isOwnMessage ? 'Bạn: ' : ''}${VOICE_MESSAGE_PREVIEW_LABEL}`;
   }
   const text = decryptedPlaintext ?? '';
   return `${lastMessage.isOwnMessage ? 'Bạn: ' : ''}${text}`;

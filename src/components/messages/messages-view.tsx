@@ -7,29 +7,29 @@ import {
   ArrowLeft,
   Ban,
   Check,
-  Image as ImageIcon,
   Info,
   KeyRound,
   Loader2,
   Lock,
   MessageCircle,
-  Mic,
   PenSquare,
   RotateCcw,
-  Send,
   Trash2,
 } from 'lucide-react';
 
 import { ChatInfoDrawer } from '@/components/messages/chat-info-drawer';
+import { ChatComposerWithMedia } from '@/components/messages/chat-media-composer';
 import {
   useChatStore,
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
 import { ConversationActionsMenu } from '@/components/messages/conversation-actions-menu';
-import { EmojiPickerPopover } from '@/components/messages/emoji-picker-popover';
+import {
+  ImageLightboxModal,
+  type ImageLightboxTarget,
+} from '@/components/messages/image-lightbox-modal';
 import { canRecallMessage, MAX_MESSAGE_EDIT_COUNT } from '@/components/messages/message-actions';
 import { MessageBubbleRow } from '@/components/messages/message-bubble-row';
-import { MessageEditBanner } from '@/components/messages/message-edit-banner';
 import {
   buildClusteredMessageEntries,
   formatConversationShortTimeVi,
@@ -89,6 +89,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   } | null>(null);
   const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
   const [actionBusy, setActionBusy] = React.useState(false);
+  const [lightboxTarget, setLightboxTarget] = React.useState<ImageLightboxTarget | null>(null);
 
   const messagesContainerRef = React.useRef<HTMLDivElement | null>(null);
   const composerInputRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -1058,6 +1059,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                           onRetryFailed={(clientMsgId, plaintext) =>
                             void handleRetryFailedMessage(clientMsgId, plaintext)
                           }
+                          onOpenLightbox={(target) => setLightboxTarget(target)}
                         />
                       ))}
                     </div>
@@ -1134,114 +1136,50 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                       </div>
                     ) : null}
 
-                    {editingMessage ? (
-                      <MessageEditBanner
-                        originalText={editingMessage.plaintext}
-                        saving={editSaving}
-                        onCancel={handleCancelEditMessage}
-                      />
-                    ) : null}
-
                     {recipientHasZeroKeys ? (
                       <div className="rounded-xl border border-dashed bg-muted/40 px-4 py-3 text-center text-xs text-muted-foreground">
                         @{selectedConversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị
                         nào. Bạn sẽ có thể gửi tin nhắn ngay khi họ đăng nhập.
                       </div>
                     ) : (
-                      <form
-                        onSubmit={(e) => void handleSendMessage(e)}
-                        className="flex items-end gap-1.5 rounded-2xl border bg-muted/30 px-2.5 py-1.5 focus-within:border-primary/60 focus-within:bg-background"
-                      >
-                        <EmojiPickerPopover
-                          disabled={!editingMessage && !selectedConversation.canSendMoreMessages}
-                          onSelectEmoji={(emoji) =>
-                            editingMessage
-                              ? setEditDraftText((prev) => `${prev}${emoji}`)
-                              : setDraftText((prev) => `${prev}${emoji}`)
+                      <ChatComposerWithMedia
+                        key={selectedConversation.public_id}
+                        canSendMedia={selectedConversation.canSendMedia}
+                        canSendMoreMessages={selectedConversation.canSendMoreMessages}
+                        draftText={draftText}
+                        editDraftText={editDraftText}
+                        editingOriginalText={editingMessage?.plaintext ?? null}
+                        editSaving={editSaving}
+                        composerInputRef={composerInputRef}
+                        onChangeDraftText={setDraftText}
+                        onChangeEditDraftText={setEditDraftText}
+                        onCancelEdit={handleCancelEditMessage}
+                        onSubmitTextOrEdit={handleSendMessage}
+                        onSendImageFile={async (file) => {
+                          if (!chatStore) {
+                            return;
                           }
-                        />
-
-                        {!editingMessage && !selectedConversation.canSendMedia ? (
-                          <div className="flex items-center gap-0.5">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              disabled
-                              title="Chỉ khả dụng sau khi người nhận chấp nhận cuộc trò chuyện"
-                              aria-label="Gửi hình ảnh (đang khóa trong tin nhắn chờ)"
-                              className="size-8 rounded-full opacity-40"
-                            >
-                              <ImageIcon className="size-4" aria-hidden="true" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              disabled
-                              title="Chỉ khả dụng sau khi người nhận chấp nhận cuộc trò chuyện"
-                              aria-label="Gửi tin nhắn thoại (đang khóa trong tin nhắn chờ)"
-                              className="size-8 rounded-full opacity-40"
-                            >
-                              <Mic className="size-4" aria-hidden="true" />
-                            </Button>
-                          </div>
-                        ) : null}
-
-                        <textarea
-                          ref={composerInputRef}
-                          rows={1}
-                          value={editingMessage ? editDraftText : draftText}
-                          disabled={
-                            editSaving ||
-                            (!editingMessage && !selectedConversation.canSendMoreMessages)
+                          isNearBottomRef.current = true;
+                          await chatStore.sendOptimisticImageMessage({
+                            conversation: selectedConversation,
+                            file,
+                          });
+                        }}
+                        onSendVoice={async (recorded) => {
+                          if (!chatStore) {
+                            return;
                           }
-                          placeholder={
-                            editingMessage
-                              ? 'Nhập nội dung mới...'
-                              : selectedConversation.canSendMoreMessages
-                                ? 'Nhắn tin...'
-                                : 'Đã gửi tối đa 3 tin nhắn đang chờ chấp nhận'
-                          }
-                          onChange={(e) =>
-                            editingMessage
-                              ? setEditDraftText(e.target.value)
-                              : setDraftText(e.target.value)
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape' && editingMessage && !editSaving) {
-                              e.preventDefault();
-                              handleCancelEditMessage();
-                              return;
-                            }
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              void handleSendMessage();
-                            }
-                          }}
-                          className="max-h-28 min-h-[34px] flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-                        />
-
-                        <Button
-                          type="submit"
-                          size="sm"
-                          disabled={
-                            editSaving ||
-                            !(editingMessage ? editDraftText : draftText).trim() ||
-                            (!editingMessage && !selectedConversation.canSendMoreMessages)
-                          }
-                          className="h-8 rounded-xl px-3 text-xs"
-                        >
-                          {editSaving ? (
-                            <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                          ) : editingMessage ? (
-                            <Check className="size-3.5" aria-hidden="true" />
-                          ) : (
-                            <Send className="size-3.5" aria-hidden="true" />
-                          )}
-                          <span>{editingMessage ? 'Lưu' : 'Gửi'}</span>
-                        </Button>
-                      </form>
+                          isNearBottomRef.current = true;
+                          await chatStore.sendOptimisticVoiceMessage({
+                            conversation: selectedConversation,
+                            audioBlob: recorded.audioBlob,
+                            mimeType: recorded.mimeType,
+                            durationMs: recorded.durationMs,
+                            waveform: recorded.waveform,
+                          });
+                        }}
+                        onError={setChatError}
+                      />
                     )}
                   </footer>
                 )}
@@ -1347,6 +1285,8 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
         }}
         onConfirm={() => void handleConfirmDeleteConversation()}
       />
+
+      <ImageLightboxModal target={lightboxTarget} onClose={() => setLightboxTarget(null)} />
     </TooltipProvider>
   );
 }

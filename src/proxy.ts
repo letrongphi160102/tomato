@@ -47,7 +47,9 @@ function isNoStoreApiRoute(pathname: string): boolean {
     pathname === '/api/v1/conversations' ||
     pathname.startsWith('/api/v1/conversations/') ||
     pathname === '/api/v1/messages' ||
-    pathname.startsWith('/api/v1/messages/')
+    pathname.startsWith('/api/v1/messages/') ||
+    pathname === '/api/v1/media/local/chat' ||
+    pathname.startsWith('/api/v1/media/local/chat/')
   );
 }
 
@@ -60,6 +62,17 @@ function isAblyRealtimeEnabledInEnv(): boolean {
     return false;
   }
   return process.env.NODE_ENV !== 'test' && Boolean(process.env.ABLY_API_KEY?.trim());
+}
+
+function isVercelBlobStorageEnabledInEnv(): boolean {
+  const configured = process.env.STORAGE_PROVIDER?.trim();
+  if (configured === 'vercel_blob') {
+    return true;
+  }
+  if (configured === 'local') {
+    return false;
+  }
+  return Boolean(process.env.BLOB_READ_WRITE_TOKEN?.trim());
 }
 
 function isSensitiveTokenPageRoute(pathname: string): boolean {
@@ -95,6 +108,7 @@ export function proxy(request: NextRequest): NextResponse {
     isSensitiveTokenPage,
     sentryDsnOrigin: extractSentryIngestOrigin(process.env.NEXT_PUBLIC_SENTRY_DSN),
     allowAblyRealtime: isAblyRealtimeEnabledInEnv(),
+    allowVercelBlob: isVercelBlobStorageEnabledInEnv(),
   });
 
   // Lọc chặt đường dẫn hiện tại chống Open Redirect trước khi đưa vào `?next=` hoặc header nội bộ.

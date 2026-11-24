@@ -6,13 +6,19 @@ import { extractSentryIngestOrigin } from '@/core/monitoring/sentry-scrub';
 import { AUTH_CACHE_CONTROL_HEADER } from '@/core/security/http-response';
 
 export const HSTS_HEADER_VALUE = 'max-age=31536000; includeSubDomains';
-export const PERMISSIONS_POLICY_VALUE = 'camera=(), microphone=(), geolocation=()';
+export const PERMISSIONS_POLICY_VALUE = 'camera=(), microphone=(self), geolocation=()';
 export const REFERRER_POLICY_VALUE = 'strict-origin-when-cross-origin';
 export const NO_REFERRER_POLICY_VALUE = 'no-referrer';
 export const API_CSP_VALUE = "default-src 'none'; frame-ancestors 'none'";
 
 const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 const VERCEL_BLOB_IMAGE_ORIGIN = 'https://*.public.blob.vercel-storage.com';
+const VERCEL_BLOB_CONNECT_ORIGINS = [
+  'https://vercel.com',
+  'https://blob.vercel-storage.com',
+  'https://*.blob.vercel-storage.com',
+  'https://*.public.blob.vercel-storage.com',
+] as const;
 const ABLY_CONNECT_ORIGINS = [
   'https://*.ably.io',
   'wss://*.ably.io',
@@ -34,6 +40,8 @@ export interface SecurityHeadersContext {
   readonly sentryDsnOrigin?: string | null;
   /** Chỉ mở các origin WSS/HTTPS chính thức của Ably trong `connect-src` khi Ably Realtime được kích hoạt. */
   readonly allowAblyRealtime?: boolean;
+  /** Chỉ mở các origin chính thức của Vercel Blob trong `connect-src` khi lưu trữ Vercel Blob được kích hoạt. */
+  readonly allowVercelBlob?: boolean;
 }
 
 /**
@@ -53,7 +61,13 @@ export function generateCspNonce(): string {
 export function buildContentSecurityPolicy(
   context: Pick<
     SecurityHeadersContext,
-    'nonce' | 'isProduction' | 'isHttps' | 'isApiRoute' | 'sentryDsnOrigin' | 'allowAblyRealtime'
+    | 'nonce'
+    | 'isProduction'
+    | 'isHttps'
+    | 'isApiRoute'
+    | 'sentryDsnOrigin'
+    | 'allowAblyRealtime'
+    | 'allowVercelBlob'
   >,
 ): string {
   if (context.isApiRoute) {
@@ -83,6 +97,9 @@ export function buildContentSecurityPolicy(
   if (context.allowAblyRealtime) {
     connectSources.push(...ABLY_CONNECT_ORIGINS);
   }
+  if (context.allowVercelBlob) {
+    connectSources.push(...VERCEL_BLOB_CONNECT_ORIGINS);
+  }
   if (!context.isProduction) {
     // Cho phép WebSocket HMR của Next.js khi phát triển cục bộ.
     connectSources.push('ws:', 'wss:');
@@ -95,8 +112,10 @@ export function buildContentSecurityPolicy(
     // Tách tường minh `style-src-elem` (khóa chặt thẻ `<style>` theo nonce/'self') và chỉ mở `style-src-attr` cho thuộc tính `style="..."` động (pan/zoom, Radix, Turnstile).
     `style-src-elem ${styleSources.join(' ')}`,
     "style-src-attr 'unsafe-inline'",
-    // Giữ `blob:` cho URL.createObjectURL khi người dùng cắt ảnh cục bộ và chỉ mở CDN ảnh đại diện Vercel Blob.
+    // Giữ `blob:` cho URL.createObjectURL khi hiển thị ảnh HD đã giải mã / cắt ảnh cục bộ và mở đúng domain Vercel Blob.
     `img-src 'self' data: blob: ${VERCEL_BLOB_IMAGE_ORIGIN}`,
+    // Cho phép phát tin nhắn thoại đã giải mã trong RAM qua ObjectURL (`blob:`).
+    "media-src 'self' blob:",
     "font-src 'self'",
     `connect-src ${connectSources.join(' ')}`,
     `frame-src 'self' ${TURNSTILE_ORIGIN}`,

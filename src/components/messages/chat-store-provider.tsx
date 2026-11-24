@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { put as putVercelBlobClient } from '@vercel/blob/client';
 import { usePathname } from 'next/navigation';
 
 import {
@@ -15,7 +16,10 @@ import {
   purgeDecryptedMessageCacheByPublicId,
   putLruConversationThreadCache,
   putLruDecryptedMessageCache,
+  putLruMediaObjectUrlCache,
   resolvePinSyncState,
+  revokeMediaObjectUrlByMessageId,
+  revokeMediaObjectUrlsByConversationId,
   shouldRenderFloatingMessagesWidget,
   type CachedConversationThreadState,
   type ChatStoreContextValue,
@@ -24,7 +28,9 @@ import {
 } from '@/components/messages/chat-store-context';
 import {
   getConversationPreviewText,
+  IMAGE_MESSAGE_PREVIEW_LABEL,
   RECALLED_MESSAGE_PLACEHOLDER,
+  VOICE_MESSAGE_PREVIEW_LABEL,
 } from '@/components/messages/message-actions';
 import { isConversationUnread } from '@/components/messages/message-grouping';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
@@ -45,15 +51,28 @@ import {
   getOrCreatePrimaryDeviceKeyMaterial,
   listLocalDeviceKeyMaterials,
 } from '@/lib/e2ee/keystore';
-import { E2eeCryptoError, type E2eeTargetDevicePublicKey } from '@/lib/e2ee/types';
+import {
+  decryptMediaBinary,
+  encryptMediaBinary,
+  normalizeWaveformBars,
+  prepareHdImageForEncryption,
+  validateVoiceBinaryInput,
+} from '@/lib/e2ee/media-cipher';
+import {
+  E2eeCryptoError,
+  type DecryptedMessageMediaPayload,
+  type E2eeTargetDevicePublicKey,
+} from '@/lib/e2ee/types';
 import type {
   ChatMessageDto,
   ConversationListResult,
   ConversationSummaryDto,
+  CreateAttachmentUploadTokenResult,
   DeleteConversationForMeResult,
   DeleteMessageForMeResult,
   E2eeKeyBackupDto,
   MarkConversationReadResult,
+  MessageAttachmentDownloadGrantDto,
   MessageListResult,
   SendMessageResult,
   UserE2eeKeyBundleDto,
@@ -156,6 +175,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   );
   const inFlightThreadLoadByConvRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightSingleMsgSyncRef = React.useRef<Map<string, Promise<void>>>(new Map());
+  const inFlightMediaDownloadsRef = React.useRef<Map<string, Promise<string | null>>>(new Map());
   const inFlightReadReqRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightOwnStatusRef = React.useRef<Promise<UserE2eeKeyBundleDto | null> | null>(null);
   const prevReadReceiptsEnabledRef = React.useRef<boolean | undefined>(
@@ -549,6 +569,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         return {
           dto,
           plaintext: cached.plaintext,
+          ...(cached.media ? { media: cached.media } : {}),
           decryptionFailed: false,
         };
       }
@@ -596,12 +617,14 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         putLruDecryptedMessageCache(store.decryptedMessagesByCacheKey, cacheKey, {
           plaintext: decrypted.text,
+          ...(decrypted.media ? { media: decrypted.media } : {}),
           decryptionFailed: false,
         });
 
         return {
           dto,
           plaintext: decrypted.text,
+          ...(decrypted.media ? { media: decrypted.media } : {}),
           decryptionFailed: false,
         };
       } catch {
@@ -1551,6 +1574,688 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     ],
   );
 
+  const getCachedMediaObjectUrl = React.useCallback(
+    (messagePublicId: string): string | null => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      return store.mediaObjectUrlsByMsgId.get(messagePublicId)?.objectUrl ?? null;
+    },
+    [currentUserPublicId],
+  );
+
+  /**
+   * Tải bản mã đính kèm qua cổng chống BOLA, xác minh đối chiếu SHA-256 fail-closed,
+   * giải mã AES-256-GCM trong RAM và trả về ObjectURL tạm (tự động xoay vòng theo LRU tối đa 60 URL).
+   * Tuyệt đối KHÔNG gọi mạng đối với tin chưa mở khóa bằng mã PIN (`decryptionFailed`) hoặc đã thu hồi.
+   */
+  const resolveMessageMediaObjectUrl = React.useCallback(
+    async (message: DecryptedMessageViewItem): Promise<string | null> => {
+      const media = message.media;
+      if (
+        !media ||
+        message.decryptionFailed ||
+        message.dto.recalledAt !== null ||
+        message.sending ||
+        message.dto.seq <= 0
+      ) {
+        return null;
+      }
+
+      const msgId = message.dto.public_id;
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const cached = store.mediaObjectUrlsByMsgId.get(msgId);
+      if (cached) {
+        return cached.objectUrl;
+      }
+
+      const existing = inFlightMediaDownloadsRef.current.get(msgId);
+      if (existing) {
+        return existing;
+      }
+
+      const task = (async (): Promise<string | null> => {
+        try {
+          const grantRes = await authFetch(
+            `/api/v1/messages/${encodeURIComponent(msgId)}/attachment`,
+          );
+          if (!grantRes.ok) {
+            return null;
+          }
+          const grant = (await grantRes.json()) as MessageAttachmentDownloadGrantDto;
+
+          // Đối chiếu chéo SHA-256 giữa metadata đã ký E2EE và bản ghi của Server (fail-closed).
+          if (grant.ciphertextSha256.toLowerCase() !== media.ciphertextSha256.toLowerCase()) {
+            return null;
+          }
+
+          const binaryRes = grant.downloadUrl.startsWith('/')
+            ? await authFetch(grant.downloadUrl)
+            : await fetch(grant.downloadUrl, { credentials: 'omit' });
+          if (!binaryRes.ok) {
+            return null;
+          }
+
+          const ciphertextBytes = new Uint8Array(await binaryRes.arrayBuffer());
+          const plainBytes = await decryptMediaBinary({
+            ciphertextBytes,
+            fileKey: media.fileKey,
+            fileIv: media.fileIv,
+            expectedSha256: media.ciphertextSha256,
+            conversationPublicId: message.dto.conversationPublicId,
+            senderPublicId: message.dto.senderPublicId,
+            clientMsgId: message.dto.clientMsgId,
+            mediaKind: media.kind,
+          });
+
+          const decryptedBlob = new Blob([plainBytes], { type: media.mimeType });
+          const objectUrl = URL.createObjectURL(decryptedBlob);
+
+          const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
+          putLruMediaObjectUrlCache(targetStore.mediaObjectUrlsByMsgId, {
+            messagePublicId: msgId,
+            conversationPublicId: message.dto.conversationPublicId,
+            objectUrl,
+            mimeType: media.mimeType,
+          });
+          return objectUrl;
+        } catch {
+          return null;
+        } finally {
+          inFlightMediaDownloadsRef.current.delete(msgId);
+        }
+      })();
+
+      inFlightMediaDownloadsRef.current.set(msgId, task);
+      return task;
+    },
+    [currentUserPublicId],
+  );
+
+  const uploadEncryptedAttachmentBinary = React.useCallback(
+    async (
+      grant: CreateAttachmentUploadTokenResult,
+      ciphertextBytes: Uint8Array<ArrayBuffer>,
+    ): Promise<void> => {
+      const payloadBlob = new Blob([ciphertextBytes], { type: 'application/octet-stream' });
+
+      if (grant.uploadMode === 'vercel_blob') {
+        if (!grant.clientToken) {
+          throw new Error('Không thể khởi tạo phiên tải tệp lên lúc này.');
+        }
+        await putVercelBlobClient(grant.pathname, payloadBlob, {
+          access: 'public',
+          token: grant.clientToken,
+          contentType: 'application/octet-stream',
+          multipart: ciphertextBytes.byteLength > 4 * 1024 * 1024,
+        });
+        return;
+      }
+
+      if (!grant.uploadUrl) {
+        throw new Error('Không thể khởi tạo phiên tải tệp lên lúc này.');
+      }
+
+      const uploadRes = await authFetch(grant.uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: payloadBlob,
+      });
+      if (!uploadRes.ok) {
+        const errBody = (await uploadRes.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        throw new Error(errBody?.error?.message ?? 'Không thể tải tệp lên lúc này.');
+      }
+    },
+    [],
+  );
+
+  /**
+   * Gửi ảnh HD mã hóa đầu cuối với Optimistic UI tức thì:
+   * - Chuẩn hóa HD (<= 2048px, sạch EXIF/GPS) + mã hóa AES-256-GCM trên trình duyệt.
+   * - Xin upload-token -> tải thẳng bản mã lên Storage -> bọc khóa tệp vào phong bì E2EE (bao gồm cả Khóa Đồng bộ PIN).
+   */
+  const sendOptimisticImageMessage = React.useCallback(
+    async (params: {
+      readonly conversation: ConversationSummaryDto;
+      readonly file: File | Blob;
+    }) => {
+      if (!params.conversation.canSendMedia) {
+        throw new Error('Cuộc trò chuyện đang chờ chấp nhận nên chưa thể gửi ảnh.');
+      }
+
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const convId = params.conversation.public_id;
+      const peerPublicId = params.conversation.peer.public_id;
+      const clientMsgId = `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+      const nowIso = new Date().toISOString();
+
+      const prepared = await prepareHdImageForEncryption(params.file);
+      const tempPreviewUrl = URL.createObjectURL(
+        new Blob([prepared.plainBytes], { type: prepared.mimeType }),
+      );
+
+      const currentThread = store.threadsByConvId.get(convId);
+      const optimisticSeq =
+        Math.max(currentThread?.highestSeq ?? 0, params.conversation.lastSeq) + 1;
+
+      const optimisticItem: DecryptedMessageViewItem = {
+        dto: {
+          public_id: clientMsgId,
+          conversationPublicId: convId,
+          senderPublicId: currentUserPublicId,
+          isOwnMessage: true,
+          seq: optimisticSeq,
+          clientMsgId,
+          messageType: 'image',
+          ciphertext: null,
+          cryptoHeader: null,
+          editCount: 0,
+          editedAt: null,
+          recalledAt: null,
+          createdAt: nowIso,
+        },
+        plaintext: '',
+        media: {
+          kind: 'image',
+          attachmentPublicId: '00000000-0000-4000-8000-000000000000',
+          fileKey: '',
+          fileIv: '',
+          ciphertextSha256: '',
+          mimeType: prepared.mimeType,
+          sizeBytes: prepared.sizeBytes,
+          width: prepared.width,
+          height: prepared.height,
+          ...(prepared.thumbnailDataUrl ? { thumbnailDataUrl: prepared.thumbnailDataUrl } : {}),
+        },
+        localPreviewUrl: tempPreviewUrl,
+        decryptionFailed: false,
+        sending: true,
+        sendError: null,
+      };
+
+      updateThreadState(convId, (prev) => ({
+        conversationPublicId: convId,
+        items: [...(prev?.items ?? []), optimisticItem],
+        nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+        highestSeq: Math.max(prev?.highestSeq ?? 0, optimisticSeq),
+        hasInitialized: true,
+        loadingInitial: false,
+        loadingOlder: prev?.loadingOlder ?? false,
+        lastAccessedAt: Date.now(),
+      }));
+
+      setPreviewsByConvId((prev) => ({
+        ...prev,
+        [convId]: `Bạn: ${IMAGE_MESSAGE_PREVIEW_LABEL}`,
+      }));
+
+      try {
+        const encryptedBinary = await encryptMediaBinary({
+          plainBytes: prepared.plainBytes,
+          conversationPublicId: convId,
+          senderPublicId: currentUserPublicId,
+          clientMsgId,
+          mediaKind: 'image',
+        });
+
+        const tokenRes = await authFetch(
+          `/api/v1/conversations/${encodeURIComponent(convId)}/attachments/upload-token`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mediaKind: 'image',
+              ciphertextSizeBytes: encryptedBinary.ciphertextSizeBytes,
+              ciphertextSha256: encryptedBinary.ciphertextSha256,
+            }),
+          },
+        );
+        if (!tokenRes.ok) {
+          const errBody = (await tokenRes.json().catch(() => null)) as {
+            readonly error?: { readonly message?: string };
+          } | null;
+          throw new Error(errBody?.error?.message ?? 'Không thể gửi ảnh lúc này.');
+        }
+
+        const uploadGrant = (await tokenRes.json()) as CreateAttachmentUploadTokenResult;
+        await uploadEncryptedAttachmentBinary(uploadGrant, encryptedBinary.ciphertextBytes);
+
+        await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+        const [senderDevice, peerKeyBundle, ownBundle] = await Promise.all([
+          getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId),
+          ensureFreshPeerKeyBundleForEncryption(peerPublicId),
+          ownKeyBundleRef.current
+            ? Promise.resolve(ownKeyBundleRef.current)
+            : refreshOwnE2eeStatus({ forceRefresh: true }),
+        ]);
+
+        if (!peerKeyBundle || peerKeyBundle.devices.length === 0) {
+          throw new Error(
+            `@${params.conversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị nào.`,
+          );
+        }
+
+        const senderOtherDevices = await buildOwnSenderOtherDevices(ownBundle);
+        const mediaPayload: DecryptedMessageMediaPayload = {
+          kind: 'image',
+          attachmentPublicId: uploadGrant.attachmentPublicId,
+          fileKey: encryptedBinary.fileKey,
+          fileIv: encryptedBinary.fileIv,
+          ciphertextSha256: encryptedBinary.ciphertextSha256,
+          mimeType: prepared.mimeType,
+          sizeBytes: prepared.sizeBytes,
+          width: prepared.width,
+          height: prepared.height,
+          ...(prepared.thumbnailDataUrl ? { thumbnailDataUrl: prepared.thumbnailDataUrl } : {}),
+        };
+
+        const envelope = await encryptDirectMessage({
+          conversationPublicId: convId,
+          senderPublicId: currentUserPublicId,
+          clientMsgId,
+          plaintext: '',
+          media: mediaPayload,
+          senderDevice,
+          recipientDevices: peerKeyBundle.devices,
+          senderOtherDevices,
+          sentAt: nowIso,
+        });
+
+        const response = await authFetch(
+          `/api/v1/conversations/${encodeURIComponent(convId)}/messages`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              clientMsgId,
+              messageType: 'image',
+              attachmentPublicId: uploadGrant.attachmentPublicId,
+              ciphertext: envelope.ciphertext,
+              cryptoHeader: envelope.cryptoHeader,
+            }),
+          },
+        );
+        if (!response.ok) {
+          const errBody = (await response.json().catch(() => null)) as {
+            readonly error?: { readonly message?: string };
+          } | null;
+          throw new Error(errBody?.error?.message ?? 'Không thể gửi ảnh lúc này.');
+        }
+
+        const data = (await response.json()) as SendMessageResult;
+        const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
+
+        putLruDecryptedMessageCache(
+          targetStore.decryptedMessagesByCacheKey,
+          buildMessageDecryptCacheKey(data.message),
+          {
+            plaintext: '',
+            media: mediaPayload,
+            decryptionFailed: false,
+          },
+        );
+
+        // Chuyển quyền quản lý ObjectURL vào LRU cache chính thức theo `message.public_id`.
+        putLruMediaObjectUrlCache(targetStore.mediaObjectUrlsByMsgId, {
+          messagePublicId: data.message.public_id,
+          conversationPublicId: convId,
+          objectUrl: tempPreviewUrl,
+          mimeType: prepared.mimeType,
+        });
+
+        targetStore.lastSentReadSeqByConvId.set(
+          convId,
+          Math.max(targetStore.lastSentReadSeqByConvId.get(convId) ?? 0, data.message.seq),
+        );
+
+        updateThreadState(convId, (prev) => {
+          const baseItems = prev?.items ?? [];
+          const updatedItems = baseItems
+            .map((item) =>
+              item.dto.clientMsgId === clientMsgId
+                ? {
+                    dto: data.message,
+                    plaintext: '',
+                    media: mediaPayload,
+                    decryptionFailed: false,
+                    sending: false,
+                    sendError: null,
+                  }
+                : item,
+            )
+            .sort((a, b) => a.dto.seq - b.dto.seq);
+
+          return {
+            conversationPublicId: convId,
+            items: updatedItems,
+            nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+            highestSeq: Math.max(prev?.highestSeq ?? 0, data.message.seq),
+            hasInitialized: true,
+            loadingInitial: false,
+            loadingOlder: prev?.loadingOlder ?? false,
+            lastAccessedAt: Date.now(),
+          };
+        });
+
+        if (selectedConvRef.current?.public_id === convId) {
+          selectConversation(data.conversation);
+        }
+
+        setPrimaryConversations((prev) => {
+          const filtered = prev.filter((c) => c.public_id !== convId);
+          return [data.conversation, ...filtered];
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Không thể gửi ảnh lúc này.';
+        updateThreadState(convId, (prev) => ({
+          conversationPublicId: convId,
+          items: (prev?.items ?? []).map((item) =>
+            item.dto.clientMsgId === clientMsgId
+              ? {
+                  ...item,
+                  sending: false,
+                  sendError: message,
+                }
+              : item,
+          ),
+          nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+          highestSeq: prev?.highestSeq ?? 0,
+          hasInitialized: true,
+          loadingInitial: false,
+          loadingOlder: prev?.loadingOlder ?? false,
+          lastAccessedAt: Date.now(),
+        }));
+        throw error;
+      }
+    },
+    [
+      buildOwnSenderOtherDevices,
+      currentUserPublicId,
+      ensureFreshPeerKeyBundleForEncryption,
+      refreshOwnE2eeStatus,
+      selectConversation,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      updateThreadState,
+      uploadEncryptedAttachmentBinary,
+    ],
+  );
+
+  /**
+   * Gửi tin nhắn thoại (Voice) mã hóa đầu cuối với Optimistic UI tức thì.
+   */
+  const sendOptimisticVoiceMessage = React.useCallback(
+    async (params: {
+      readonly conversation: ConversationSummaryDto;
+      readonly audioBlob: Blob;
+      readonly mimeType: string;
+      readonly durationMs: number;
+      readonly waveform: readonly number[];
+    }) => {
+      if (!params.conversation.canSendMedia) {
+        throw new Error('Cuộc trò chuyện đang chờ chấp nhận nên chưa thể gửi tin nhắn thoại.');
+      }
+
+      const rawBytes = new Uint8Array(await params.audioBlob.arrayBuffer());
+      const validated = validateVoiceBinaryInput({
+        bytes: rawBytes,
+        mimeType: params.mimeType,
+        durationMs: params.durationMs,
+      });
+      const normalizedWaveform = normalizeWaveformBars(params.waveform);
+
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const convId = params.conversation.public_id;
+      const peerPublicId = params.conversation.peer.public_id;
+      const clientMsgId = `voc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+      const nowIso = new Date().toISOString();
+      const tempAudioUrl = URL.createObjectURL(new Blob([rawBytes], { type: validated.mimeType }));
+
+      const currentThread = store.threadsByConvId.get(convId);
+      const optimisticSeq =
+        Math.max(currentThread?.highestSeq ?? 0, params.conversation.lastSeq) + 1;
+
+      const optimisticItem: DecryptedMessageViewItem = {
+        dto: {
+          public_id: clientMsgId,
+          conversationPublicId: convId,
+          senderPublicId: currentUserPublicId,
+          isOwnMessage: true,
+          seq: optimisticSeq,
+          clientMsgId,
+          messageType: 'voice',
+          ciphertext: null,
+          cryptoHeader: null,
+          editCount: 0,
+          editedAt: null,
+          recalledAt: null,
+          createdAt: nowIso,
+        },
+        plaintext: '',
+        media: {
+          kind: 'voice',
+          attachmentPublicId: '00000000-0000-4000-8000-000000000000',
+          fileKey: '',
+          fileIv: '',
+          ciphertextSha256: '',
+          mimeType: validated.mimeType,
+          sizeBytes: rawBytes.byteLength,
+          durationMs: validated.durationMs,
+          waveform: normalizedWaveform,
+        },
+        localPreviewUrl: tempAudioUrl,
+        decryptionFailed: false,
+        sending: true,
+        sendError: null,
+      };
+
+      updateThreadState(convId, (prev) => ({
+        conversationPublicId: convId,
+        items: [...(prev?.items ?? []), optimisticItem],
+        nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+        highestSeq: Math.max(prev?.highestSeq ?? 0, optimisticSeq),
+        hasInitialized: true,
+        loadingInitial: false,
+        loadingOlder: prev?.loadingOlder ?? false,
+        lastAccessedAt: Date.now(),
+      }));
+
+      setPreviewsByConvId((prev) => ({
+        ...prev,
+        [convId]: `Bạn: ${VOICE_MESSAGE_PREVIEW_LABEL}`,
+      }));
+
+      try {
+        const encryptedBinary = await encryptMediaBinary({
+          plainBytes: rawBytes,
+          conversationPublicId: convId,
+          senderPublicId: currentUserPublicId,
+          clientMsgId,
+          mediaKind: 'voice',
+        });
+
+        const tokenRes = await authFetch(
+          `/api/v1/conversations/${encodeURIComponent(convId)}/attachments/upload-token`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mediaKind: 'voice',
+              ciphertextSizeBytes: encryptedBinary.ciphertextSizeBytes,
+              ciphertextSha256: encryptedBinary.ciphertextSha256,
+            }),
+          },
+        );
+        if (!tokenRes.ok) {
+          const errBody = (await tokenRes.json().catch(() => null)) as {
+            readonly error?: { readonly message?: string };
+          } | null;
+          throw new Error(errBody?.error?.message ?? 'Không thể gửi tin nhắn thoại lúc này.');
+        }
+
+        const uploadGrant = (await tokenRes.json()) as CreateAttachmentUploadTokenResult;
+        await uploadEncryptedAttachmentBinary(uploadGrant, encryptedBinary.ciphertextBytes);
+
+        await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+        const [senderDevice, peerKeyBundle, ownBundle] = await Promise.all([
+          getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId),
+          ensureFreshPeerKeyBundleForEncryption(peerPublicId),
+          ownKeyBundleRef.current
+            ? Promise.resolve(ownKeyBundleRef.current)
+            : refreshOwnE2eeStatus({ forceRefresh: true }),
+        ]);
+
+        if (!peerKeyBundle || peerKeyBundle.devices.length === 0) {
+          throw new Error(
+            `@${params.conversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị nào.`,
+          );
+        }
+
+        const senderOtherDevices = await buildOwnSenderOtherDevices(ownBundle);
+        const mediaPayload: DecryptedMessageMediaPayload = {
+          kind: 'voice',
+          attachmentPublicId: uploadGrant.attachmentPublicId,
+          fileKey: encryptedBinary.fileKey,
+          fileIv: encryptedBinary.fileIv,
+          ciphertextSha256: encryptedBinary.ciphertextSha256,
+          mimeType: validated.mimeType,
+          sizeBytes: rawBytes.byteLength,
+          durationMs: validated.durationMs,
+          waveform: normalizedWaveform,
+        };
+
+        const envelope = await encryptDirectMessage({
+          conversationPublicId: convId,
+          senderPublicId: currentUserPublicId,
+          clientMsgId,
+          plaintext: '',
+          media: mediaPayload,
+          senderDevice,
+          recipientDevices: peerKeyBundle.devices,
+          senderOtherDevices,
+          sentAt: nowIso,
+        });
+
+        const response = await authFetch(
+          `/api/v1/conversations/${encodeURIComponent(convId)}/messages`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              clientMsgId,
+              messageType: 'voice',
+              attachmentPublicId: uploadGrant.attachmentPublicId,
+              ciphertext: envelope.ciphertext,
+              cryptoHeader: envelope.cryptoHeader,
+            }),
+          },
+        );
+        if (!response.ok) {
+          const errBody = (await response.json().catch(() => null)) as {
+            readonly error?: { readonly message?: string };
+          } | null;
+          throw new Error(errBody?.error?.message ?? 'Không thể gửi tin nhắn thoại lúc này.');
+        }
+
+        const data = (await response.json()) as SendMessageResult;
+        const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
+
+        putLruDecryptedMessageCache(
+          targetStore.decryptedMessagesByCacheKey,
+          buildMessageDecryptCacheKey(data.message),
+          {
+            plaintext: '',
+            media: mediaPayload,
+            decryptionFailed: false,
+          },
+        );
+
+        putLruMediaObjectUrlCache(targetStore.mediaObjectUrlsByMsgId, {
+          messagePublicId: data.message.public_id,
+          conversationPublicId: convId,
+          objectUrl: tempAudioUrl,
+          mimeType: validated.mimeType,
+        });
+
+        targetStore.lastSentReadSeqByConvId.set(
+          convId,
+          Math.max(targetStore.lastSentReadSeqByConvId.get(convId) ?? 0, data.message.seq),
+        );
+
+        updateThreadState(convId, (prev) => {
+          const baseItems = prev?.items ?? [];
+          const updatedItems = baseItems
+            .map((item) =>
+              item.dto.clientMsgId === clientMsgId
+                ? {
+                    dto: data.message,
+                    plaintext: '',
+                    media: mediaPayload,
+                    decryptionFailed: false,
+                    sending: false,
+                    sendError: null,
+                  }
+                : item,
+            )
+            .sort((a, b) => a.dto.seq - b.dto.seq);
+
+          return {
+            conversationPublicId: convId,
+            items: updatedItems,
+            nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+            highestSeq: Math.max(prev?.highestSeq ?? 0, data.message.seq),
+            hasInitialized: true,
+            loadingInitial: false,
+            loadingOlder: prev?.loadingOlder ?? false,
+            lastAccessedAt: Date.now(),
+          };
+        });
+
+        if (selectedConvRef.current?.public_id === convId) {
+          selectConversation(data.conversation);
+        }
+
+        setPrimaryConversations((prev) => {
+          const filtered = prev.filter((c) => c.public_id !== convId);
+          return [data.conversation, ...filtered];
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Không thể gửi tin nhắn thoại lúc này.';
+        updateThreadState(convId, (prev) => ({
+          conversationPublicId: convId,
+          items: (prev?.items ?? []).map((item) =>
+            item.dto.clientMsgId === clientMsgId
+              ? {
+                  ...item,
+                  sending: false,
+                  sendError: message,
+                }
+              : item,
+          ),
+          nextBeforeSeq: prev?.nextBeforeSeq ?? null,
+          highestSeq: prev?.highestSeq ?? 0,
+          hasInitialized: true,
+          loadingInitial: false,
+          loadingOlder: prev?.loadingOlder ?? false,
+          lastAccessedAt: Date.now(),
+        }));
+        throw error;
+      }
+    },
+    [
+      buildOwnSenderOtherDevices,
+      currentUserPublicId,
+      ensureFreshPeerKeyBundleForEncryption,
+      refreshOwnE2eeStatus,
+      selectConversation,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      updateThreadState,
+      uploadEncryptedAttachmentBinary,
+    ],
+  );
+
   /**
    * Tải đúng 1 bản ghi tin nhắn vừa được chỉnh sửa qua `GET /api/v1/messages/[messagePublicId]`
    * rồi giải mã lại tại chỗ trong RAM (không phải tải lại toàn bộ đoạn chat).
@@ -1685,6 +2390,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     ) => {
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, messagePublicId);
+      revokeMediaObjectUrlByMessageId(store.mediaObjectUrlsByMsgId, messagePublicId);
 
       if (store.threadsByConvId.has(conversationPublicId)) {
         updateThreadState(conversationPublicId, (prev) => {
@@ -1702,21 +2408,31 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }
           return {
             ...prev,
-            items: prev.items.map((item) =>
-              item.dto.public_id === messagePublicId
-                ? {
-                    ...item,
-                    dto: {
-                      ...item.dto,
-                      ciphertext: null,
-                      cryptoHeader: null,
-                      recalledAt,
-                    },
-                    plaintext: RECALLED_MESSAGE_PLACEHOLDER,
-                    decryptionFailed: false,
-                  }
-                : item,
-            ),
+            items: prev.items.map((item) => {
+              if (item.dto.public_id !== messagePublicId) {
+                return item;
+              }
+              if (item.localPreviewUrl) {
+                try {
+                  URL.revokeObjectURL(item.localPreviewUrl);
+                } catch {
+                  // Bỏ qua nếu đã giải phóng.
+                }
+              }
+              return {
+                ...item,
+                dto: {
+                  ...item.dto,
+                  ciphertext: null,
+                  cryptoHeader: null,
+                  recalledAt,
+                },
+                plaintext: RECALLED_MESSAGE_PLACEHOLDER,
+                media: undefined,
+                localPreviewUrl: undefined,
+                decryptionFailed: false,
+              };
+            }),
             lastAccessedAt: Date.now(),
           };
         });
@@ -1792,6 +2508,19 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         );
       const wasPending = pendingConvsRef.current.some((c) => c.public_id === conversationPublicId);
 
+      const prevThreadToClear = store.threadsByConvId.get(conversationPublicId);
+      if (prevThreadToClear) {
+        for (const item of prevThreadToClear.items) {
+          if (item.localPreviewUrl) {
+            try {
+              URL.revokeObjectURL(item.localPreviewUrl);
+            } catch {
+              // Bỏ qua nếu đã giải phóng.
+            }
+          }
+        }
+      }
+      revokeMediaObjectUrlsByConversationId(store.mediaObjectUrlsByMsgId, conversationPublicId);
       store.threadsByConvId.delete(conversationPublicId);
       store.unreadPrimaryConvIds.delete(conversationPublicId);
       store.lastSentReadSeqByConvId.delete(conversationPublicId);
@@ -2067,6 +2796,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         if (response.status === 404) {
           purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, msgId);
+          revokeMediaObjectUrlByMessageId(store.mediaObjectUrlsByMsgId, msgId);
           return;
         }
 
@@ -2079,6 +2809,14 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         const data = (await response.json()) as DeleteMessageForMeResult;
         purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, msgId);
+        revokeMediaObjectUrlByMessageId(store.mediaObjectUrlsByMsgId, msgId);
+        if (removedItem?.localPreviewUrl) {
+          try {
+            URL.revokeObjectURL(removedItem.localPreviewUrl);
+          } catch {
+            // Bỏ qua nếu đã giải phóng.
+          }
+        }
 
         if (typeof data.unreadConversationsCount === 'number') {
           setUnreadConversationsCount(data.unreadConversationsCount);
@@ -2268,6 +3006,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setPendingConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
       setPendingCount((c) => Math.max(0, c - 1));
       const store = getOrInitUserChatRamCache(currentUserPublicId);
+      revokeMediaObjectUrlsByConversationId(store.mediaObjectUrlsByMsgId, conversationPublicId);
       store.threadsByConvId.delete(conversationPublicId);
       bumpThreadVersion();
     },
@@ -2294,6 +3033,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setPrimaryConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
       setPendingConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
       const store = getOrInitUserChatRamCache(currentUserPublicId);
+      revokeMediaObjectUrlsByConversationId(store.mediaObjectUrlsByMsgId, conversationPublicId);
       store.threadsByConvId.delete(conversationPublicId);
       bumpThreadVersion();
       void loadConversations('primary', { background: true });
@@ -2835,6 +3575,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         if (convId && messagePublicId) {
           purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, messagePublicId);
+          revokeMediaObjectUrlByMessageId(store.mediaObjectUrlsByMsgId, messagePublicId);
           if (store.threadsByConvId.has(convId)) {
             updateThreadState(convId, (prev) => {
               if (!prev) {
@@ -2997,6 +3738,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       loadOlderMessages,
       markConversationReadOptimistic,
       sendOptimisticTextMessage,
+      sendOptimisticImageMessage,
+      sendOptimisticVoiceMessage,
+      resolveMessageMediaObjectUrl,
+      getCachedMediaObjectUrl,
       editTextMessage,
       recallMessage,
       deleteMessageForMe,
@@ -3019,6 +3764,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       deleteMessageForMe,
       editTextMessage,
       ensurePeerKeyBundle,
+      getCachedMediaObjectUrl,
       getCachedPeerKeyBundle,
       getThreadState,
       hasLoadedPending,
@@ -3040,9 +3786,12 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       recallMessage,
       refreshOwnE2eeStatus,
       removeBlockedPeerConversationLocally,
+      resolveMessageMediaObjectUrl,
       selectConversation,
       selectedConversation,
+      sendOptimisticImageMessage,
       sendOptimisticTextMessage,
+      sendOptimisticVoiceMessage,
       serverKeyBackup,
       setActiveTab,
       setFloatingViewportConversation,

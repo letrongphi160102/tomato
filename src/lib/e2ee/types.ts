@@ -54,10 +54,28 @@ export interface EncryptedDirectMessageEnvelope {
   readonly cryptoHeader: MessageCryptoHeader;
 }
 
+export type DecryptedMediaKind = 'image' | 'voice';
+
+export interface DecryptedMessageMediaPayload {
+  readonly kind: DecryptedMediaKind;
+  readonly attachmentPublicId: string;
+  readonly fileKey: string;
+  readonly fileIv: string;
+  readonly ciphertextSha256: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly width?: number;
+  readonly height?: number;
+  readonly durationMs?: number;
+  readonly waveform?: readonly number[];
+  readonly thumbnailDataUrl?: string;
+}
+
 export interface DecryptedDirectMessagePayload {
   readonly v: 1;
   readonly text: string;
   readonly sentAt: string;
+  readonly media?: DecryptedMessageMediaPayload;
 }
 
 export type E2eeErrorCode =
@@ -69,7 +87,11 @@ export type E2eeErrorCode =
   | 'INVALID_SIGNATURE'
   | 'UNTRUSTED_SIGNING_KEY'
   | 'AAD_OR_CIPHERTEXT_TAMPERED'
-  | 'BACKUP_DECRYPT_FAILED';
+  | 'BACKUP_DECRYPT_FAILED'
+  | 'MEDIA_INVALID_TYPE'
+  | 'MEDIA_TOO_LARGE'
+  | 'MEDIA_INTEGRITY_MISMATCH'
+  | 'MEDIA_DECRYPT_FAILED';
 
 export class E2eeCryptoError extends Error {
   public readonly code: E2eeErrorCode;

@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { createHash } from 'node:crypto';
+
 import {
   generateOtpCode,
   hashScopedOtpCode,
@@ -7,9 +9,11 @@ import {
   verifyScopedOtpCode,
 } from '@/core/crypto/otp';
 import type {
+  AttachmentMediaKind,
   ConversationInboxState,
   E2eeBackupKdfParamsRecord,
   E2eePublicJwkRecord,
+  MessageAttachmentRow,
   MessageCryptoHeaderRecord,
   MessageRow,
   MessageType,
@@ -37,6 +41,11 @@ import {
 } from '@/core/security/audit-log.service';
 import type { RequestClientContext } from '@/core/security/client-context';
 import { formatZodErrorDetails } from '@/core/security/http-response';
+import {
+  generateChatMediaStorageKey,
+  getMediaStorageProvider,
+  type MediaStorageProvider,
+} from '@/core/storage';
 import { computeDeviceKeyFingerprint } from '@/lib/e2ee/utils';
 import type { AuthenticatedPrincipal } from '@/modules/auth/auth.policy';
 import { ChatDomainError } from '@/modules/chat/chat.errors';
@@ -52,13 +61,20 @@ import {
   type UserBootstrapKeyPairBundle,
 } from '@/modules/chat/e2ee-bootstrap';
 import {
+  ATTACHMENT_LAZY_GC_BATCH_LIMIT,
+  ATTACHMENT_ORPHAN_EXPIRY_MS,
+  ATTACHMENT_UPLOAD_TOKEN_TTL_MS,
   MAX_ACTIVE_E2EE_DEVICES_PER_USER,
+  MAX_IMAGE_CIPHERTEXT_BYTES,
   MAX_MESSAGE_EDIT_COUNT,
   MAX_PENDING_MESSAGES_BEFORE_ACCEPT,
+  MAX_VOICE_CIPHERTEXT_BYTES,
   MESSAGE_EDIT_WINDOW_MS,
   MESSAGE_RECALL_WINDOW_MS,
+  attachmentDownloadQuerySchema,
   chatPublicIdParamSchema,
   confirmPinResetInputSchema,
+  createAttachmentUploadTokenInputSchema,
   createDirectConversationInputSchema,
   editMessageInputSchema,
   emptyStrictObjectSchema,
@@ -239,6 +255,38 @@ export interface DeleteConversationForMeResult {
   readonly message: string;
 }
 
+export interface CreateAttachmentUploadTokenResult {
+  readonly attachmentPublicId: string;
+  readonly mediaKind: AttachmentMediaKind;
+  readonly uploadMode: 'vercel_blob' | 'direct';
+  readonly pathname: string;
+  readonly clientToken?: string;
+  readonly uploadUrl?: string;
+  readonly maxBytes: number;
+  readonly expiresAt: string;
+}
+
+export interface MessageAttachmentDownloadGrantDto {
+  readonly attachmentPublicId: string;
+  readonly mediaKind: AttachmentMediaKind;
+  readonly downloadUrl: string;
+  readonly ciphertextSha256: string;
+  readonly ciphertextSizeBytes: number;
+}
+
+export type GetMessageAttachmentResult =
+  | {
+      readonly kind: 'grant';
+      readonly attachment: MessageAttachmentDownloadGrantDto;
+    }
+  | {
+      readonly kind: 'binary';
+      readonly body: Buffer;
+      readonly contentType: string;
+      readonly ciphertextSha256: string;
+      readonly ciphertextSizeBytes: number;
+    };
+
 function toDeviceDto(row: UserE2eeDeviceRow): E2eeDeviceKeyDto {
   return {
     devicePublicId: row.publicId,
@@ -386,8 +434,9 @@ export interface ChatServiceDependencies {
   readonly pinResetOtpStore?: PinResetOtpStore;
   readonly emailProvider?: EmailProvider;
   readonly auditLogService?: AuditLogService | null;
+  readonly mediaStorageProvider?: MediaStorageProvider;
   readonly now?: () => Date;
-  /** Móc nối dọn tệp đính kèm trên Storage khi thu hồi tin nhắn (sẵn sàng cho M11). */
+  /** Móc nối dọn tệp đính kèm trên Storage khi thu hồi tin nhắn (ưu tiên nếu được truyền trong test). */
   readonly onAttachmentRecalled?: (storageKey: string) => Promise<void>;
 }
 
@@ -405,6 +454,7 @@ export class ChatService {
   private readonly pinResetOtpStoreOverride?: PinResetOtpStore;
   private readonly emailProviderOverride?: EmailProvider;
   private readonly auditLogServiceOverride?: AuditLogService | null;
+  private readonly mediaStorageProviderOverride?: MediaStorageProvider;
   private readonly hasCustomRepository: boolean;
   private readonly now: () => Date;
   private readonly hasCustomNow: boolean;
@@ -424,9 +474,14 @@ export class ChatService {
     this.pinResetOtpStoreOverride = deps.pinResetOtpStore;
     this.emailProviderOverride = deps.emailProvider;
     this.auditLogServiceOverride = deps.auditLogService;
+    this.mediaStorageProviderOverride = deps.mediaStorageProvider;
     this.now = deps.now ?? (() => new Date());
     this.hasCustomNow = deps.now !== undefined;
     this.onAttachmentRecalled = deps.onAttachmentRecalled ?? null;
+  }
+
+  private resolveMediaStorageProvider(): MediaStorageProvider {
+    return this.mediaStorageProviderOverride ?? getMediaStorageProvider();
   }
 
   private resolvePinResetOtpStore(): PinResetOtpStore {
@@ -1938,6 +1993,142 @@ export class ChatService {
     const currentTime = this.now();
     const pendingDispatches: (PendingRealtimeDispatch | null)[] = [];
 
+    // Nếu là tin nhắn Ảnh HD hoặc Voice: xác minh sơ bộ attachment & kiểm tra tồn tại trên Storage
+    // NGOÀI transaction DB để không bao giờ giữ row lock PostgreSQL xuyên qua HTTP I/O.
+    let preVerifiedAttachment: {
+      readonly id: string;
+      readonly storageKey: string;
+      readonly storageUrl: string;
+    } | null = null;
+
+    if (
+      (parsed.data.messageType === 'image' || parsed.data.messageType === 'voice') &&
+      parsed.data.attachmentPublicId
+    ) {
+      const preCheck = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+        const conversation = await this.repository.findConversationByPublicId(
+          conversationPublicId,
+          tx,
+        );
+        if (!conversation) {
+          throw new ChatDomainError({
+            status: 404,
+            code: 'NOT_FOUND',
+            message: CHAT_MESSAGES.notFound,
+          });
+        }
+
+        const participants = await this.repository.listConversationParticipants(
+          conversation.id,
+          tx,
+        );
+        const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+        const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+        const peerUser = peerParticipant
+          ? await this.repository.findUserById(peerParticipant.userId, tx)
+          : null;
+        const relationship = peerUser
+          ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+          : null;
+
+        assertChatAuthorized(actor, 'chat:message:send', {
+          conversation,
+          actorParticipant,
+          peerUser,
+          relationship,
+        });
+
+        // Kiểm tra idempotency trước để tránh từ chối lặp khi retry mạng.
+        const existingMsg = await this.repository.findMessageByClientMsgId(
+          conversation.id,
+          actor.user.id,
+          parsed.data.clientMsgId,
+          tx,
+        );
+        if (existingMsg) {
+          return { skipVerifyDueToIdempotency: true as const };
+        }
+
+        const effectivePeerInbox =
+          peerParticipant!.inboxState === 'pending' &&
+          relationship!.targetFollowStatus === 'following'
+            ? 'primary'
+            : peerParticipant!.inboxState;
+        if (actorParticipant!.inboxState !== 'primary' || effectivePeerInbox !== 'primary') {
+          throw new ChatDomainError({
+            status: 403,
+            code: 'CHAT_PENDING_TEXT_ONLY',
+            message: CHAT_MESSAGES.pendingTextOnly,
+          });
+        }
+
+        const attachment = await this.repository.findAttachmentByPublicId(
+          parsed.data.attachmentPublicId!,
+          tx,
+        );
+        if (
+          !attachment ||
+          attachment.conversationId !== conversation.id ||
+          attachment.uploaderId !== actor.user.id ||
+          attachment.deletedAt !== null
+        ) {
+          throw new ChatDomainError({
+            status: 404,
+            code: 'NOT_FOUND',
+            message: CHAT_MESSAGES.notFound,
+          });
+        }
+
+        if (attachment.messageId !== null) {
+          throw new ChatDomainError({
+            status: 409,
+            code: 'CONFLICT',
+            message: CHAT_MESSAGES.attachmentAlreadyBound,
+          });
+        }
+
+        if (attachment.mediaKind !== parsed.data.messageType) {
+          throw new ChatDomainError({
+            status: 400,
+            code: 'VALIDATION_ERROR',
+            message: CHAT_MESSAGES.attachmentTypeMismatch,
+          });
+        }
+
+        return {
+          skipVerifyDueToIdempotency: false as const,
+          attachment,
+        };
+      });
+
+      if (!preCheck.skipVerifyDueToIdempotency) {
+        const storage = this.resolveMediaStorageProvider();
+        if (typeof storage.verifyUploadedObject !== 'function') {
+          throw new ChatDomainError({
+            status: 500,
+            code: 'INTERNAL_ERROR',
+            message: CHAT_MESSAGES.attachmentUploadNotReady,
+          });
+        }
+        const verified = await storage.verifyUploadedObject(preCheck.attachment.storageKey, {
+          expectedSizeBytes: preCheck.attachment.ciphertextSizeBytes,
+        });
+        if (!verified || !verified.exists) {
+          throw new ChatDomainError({
+            status: 400,
+            code: 'VALIDATION_ERROR',
+            message: CHAT_MESSAGES.attachmentUploadNotReady,
+          });
+        }
+
+        preVerifiedAttachment = {
+          id: preCheck.attachment.id,
+          storageKey: preCheck.attachment.storageKey,
+          storageUrl: verified.url,
+        };
+      }
+    }
+
     const txOutcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
       const conversation = await this.repository.lockConversationByPublicId(
         conversationPublicId,
@@ -2100,6 +2291,60 @@ export class ChatService {
           )) ?? actorParticipant!;
       }
 
+      // 4b. Đối với tin nhắn ảnh/thoại ở hội thoại `primary`, bắt buộc phải có `attachmentPublicId` đã xác minh.
+      if (
+        (parsed.data.messageType === 'image' || parsed.data.messageType === 'voice') &&
+        !parsed.data.attachmentPublicId
+      ) {
+        throw new ChatDomainError({
+          status: 400,
+          code: 'VALIDATION_ERROR',
+          message: CHAT_MESSAGES.validationFailed,
+          details: [
+            {
+              field: 'attachmentPublicId',
+              message: 'Thiếu mã định danh tệp đính kèm cho tin nhắn phương tiện.',
+            },
+          ],
+        });
+      }
+
+      let lockedPendingAttachment: MessageAttachmentRow | null = null;
+      if (preVerifiedAttachment && parsed.data.attachmentPublicId) {
+        const lockedAttachment = await this.repository.lockAttachmentByPublicId(
+          parsed.data.attachmentPublicId,
+          tx,
+        );
+        if (
+          !lockedAttachment ||
+          lockedAttachment.id !== preVerifiedAttachment.id ||
+          lockedAttachment.conversationId !== conversation.id ||
+          lockedAttachment.uploaderId !== actor.user.id ||
+          lockedAttachment.deletedAt !== null
+        ) {
+          throw new ChatDomainError({
+            status: 404,
+            code: 'NOT_FOUND',
+            message: CHAT_MESSAGES.notFound,
+          });
+        }
+        if (lockedAttachment.messageId !== null) {
+          throw new ChatDomainError({
+            status: 409,
+            code: 'CONFLICT',
+            message: CHAT_MESSAGES.attachmentAlreadyBound,
+          });
+        }
+        if (lockedAttachment.mediaKind !== parsed.data.messageType) {
+          throw new ChatDomainError({
+            status: 400,
+            code: 'VALIDATION_ERROR',
+            message: CHAT_MESSAGES.attachmentTypeMismatch,
+          });
+        }
+        lockedPendingAttachment = lockedAttachment;
+      }
+
       const nextSeq = Number(conversation.lastSeq) + 1;
       const insertedMsg = await this.repository.insertMessageAndIncrementSeq(
         {
@@ -2110,10 +2355,31 @@ export class ChatService {
           messageType: parsed.data.messageType,
           ciphertext: parsed.data.ciphertext,
           cryptoHeader: parsed.data.cryptoHeader,
+          attachmentStorageKey: lockedPendingAttachment?.storageKey ?? null,
           now: currentTime,
         },
         tx,
       );
+
+      if (lockedPendingAttachment && preVerifiedAttachment) {
+        const bound = await this.repository.bindAttachmentToMessageAtomically(
+          {
+            attachmentId: lockedPendingAttachment.id,
+            conversationId: conversation.id,
+            uploaderId: actor.user.id,
+            messageId: insertedMsg.id,
+            storageUrl: preVerifiedAttachment.storageUrl,
+          },
+          tx,
+        );
+        if (!bound) {
+          throw new ChatDomainError({
+            status: 409,
+            code: 'CONFLICT',
+            message: CHAT_MESSAGES.attachmentAlreadyBound,
+          });
+        }
+      }
 
       // Người gửi tin nhắn mới hiển nhiên đã đọc hội thoại tới `nextSeq`,
       // đồng thời luôn gỡ `hidden_at = NULL` nếu chính `actor` từng xóa/ẩn đoạn chat trước đó.
@@ -2662,6 +2928,32 @@ export class ChatService {
         });
       }
 
+      const deletedAttachmentRows =
+        typeof this.repository.softDeleteAttachmentsByMessageId === 'function'
+          ? await this.repository.softDeleteAttachmentsByMessageId(
+              {
+                messageId: lockedMessage.id,
+                uploaderId: actor.user.id,
+              },
+              tx,
+            )
+          : [];
+
+      const storageTargets: Array<{
+        readonly storageKey: string;
+        readonly storageUrl: string | null;
+      }> = [];
+      const seenKeys = new Set<string>();
+      for (const att of deletedAttachmentRows) {
+        if (att.storageKey && !seenKeys.has(att.storageKey)) {
+          seenKeys.add(att.storageKey);
+          storageTargets.push({ storageKey: att.storageKey, storageUrl: att.storageUrl });
+        }
+      }
+      if (previousAttachmentStorageKey && !seenKeys.has(previousAttachmentStorageKey)) {
+        storageTargets.push({ storageKey: previousAttachmentStorageKey, storageUrl: null });
+      }
+
       const dto = toMessageDto(
         recalledRow,
         conversation.publicId,
@@ -2671,25 +2963,36 @@ export class ChatService {
 
       return {
         message: dto,
-        previousAttachmentStorageKey,
+        attachmentStorageTargets: storageTargets,
         peerPublicId: peerUser!.publicId,
         shouldNotifyPeerRealtime: peerParticipant!.inboxState !== 'declined',
       };
     });
 
-    // Sẵn sàng móc nối xóa tệp bản mã trên Storage cho M11 (best-effort sau khi DB đã tombstone nguyên tử).
-    if (outcome.previousAttachmentStorageKey && this.onAttachmentRecalled) {
-      try {
-        await this.onAttachmentRecalled(outcome.previousAttachmentStorageKey);
-      } catch (error) {
-        logger.warn(
-          {
-            component: 'chat-service',
-            event: 'chat_recall_attachment_cleanup_failed',
-            errorName: error instanceof Error ? error.name : 'UnknownError',
-          },
-          'Không thể dọn tệp đính kèm sau khi thu hồi tin nhắn',
-        );
+    // Dọn vĩnh viễn tệp bản mã trên Storage (best-effort sau khi DB đã tombstone nguyên tử; lỗi mạng chỉ log cảnh báo, tuyệt đối không trả 500).
+    if (outcome.attachmentStorageTargets.length > 0) {
+      const storage = this.resolveMediaStorageProvider();
+      for (const item of outcome.attachmentStorageTargets) {
+        const storageTarget =
+          storage.provider === 'vercel_blob'
+            ? item.storageUrl?.trim() || item.storageKey
+            : item.storageKey;
+        try {
+          if (this.onAttachmentRecalled) {
+            await this.onAttachmentRecalled(storageTarget);
+          } else {
+            await storage.deleteObject(storageTarget);
+          }
+        } catch (error) {
+          logger.warn(
+            {
+              component: 'chat-service',
+              event: 'chat_recall_attachment_cleanup_failed',
+              errorName: error instanceof Error ? error.name : 'UnknownError',
+            },
+            'Không thể dọn tệp đính kèm sau khi thu hồi tin nhắn',
+          );
+        }
       }
     }
 
@@ -2931,6 +3234,459 @@ export class ChatService {
       unreadConversationsCount: outcome.unreadConversationsCount,
       pendingCount: outcome.pendingCount,
       message: CHAT_MESSAGES.conversationDeletedForMe,
+    };
+  }
+
+  // =========================================================================
+  // 6. Cột mốc M11 — Đính kèm Ảnh HD & Tin nhắn thoại (Voice) E2EE Chống BOLA
+  // =========================================================================
+
+  async createAttachmentUploadToken(
+    actor: AuthenticatedPrincipal,
+    rawConversationPublicId: string,
+    rawInput: unknown,
+    context: RequestClientContext = DEFAULT_CLIENT_CONTEXT,
+  ): Promise<CreateAttachmentUploadTokenResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await Promise.all([
+      this.consumeRateLimitOrThrow(
+        `chat:attachments:upload:user:${actor.user.id}`,
+        CHAT_RATE_LIMITS.uploadAttachmentByUser,
+      ),
+      this.consumeRateLimitOrThrow(
+        `chat:attachments:upload:ip:${context.rateLimitIpKey}`,
+        CHAT_RATE_LIMITS.uploadAttachmentByIp,
+      ),
+    ]);
+
+    const conversationPublicId = parsePublicIdOrThrowNotFound(rawConversationPublicId);
+    const parsed = createAttachmentUploadTokenInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    const maxAllowedBytes =
+      parsed.data.mediaKind === 'image' ? MAX_IMAGE_CIPHERTEXT_BYTES : MAX_VOICE_CIPHERTEXT_BYTES;
+    if (parsed.data.ciphertextSizeBytes > maxAllowedBytes) {
+      throw new ChatDomainError({
+        status: 413,
+        code: 'PAYLOAD_TOO_LARGE',
+        message:
+          parsed.data.mediaKind === 'image'
+            ? CHAT_MESSAGES.attachmentTooLargeImage
+            : CHAT_MESSAGES.attachmentTooLargeVoice,
+      });
+    }
+
+    const currentTime = this.now();
+    const expiresAt = new Date(currentTime.getTime() + ATTACHMENT_UPLOAD_TOKEN_TTL_MS);
+    const orphanCutoff = new Date(currentTime.getTime() - ATTACHMENT_ORPHAN_EXPIRY_MS);
+    const storageKey = generateChatMediaStorageKey();
+
+    const txOutcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const conversation = await this.repository.findConversationByPublicId(
+        conversationPublicId,
+        tx,
+      );
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:attachment:upload', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      // Cưỡng chế cứng luật Tin nhắn đang chờ ở Server: cấm tuyệt đối cấp quyền upload media khi chưa primary cả 2 phía.
+      if (actorParticipant!.inboxState !== 'primary' || peerParticipant!.inboxState !== 'primary') {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'CHAT_PENDING_TEXT_ONLY',
+          message: CHAT_MESSAGES.pendingTextOnly,
+        });
+      }
+
+      const pendingRow = await this.repository.insertPendingAttachment(
+        {
+          conversationId: conversation.id,
+          uploaderId: actor.user.id,
+          mediaKind: parsed.data.mediaKind,
+          storageKey,
+          ciphertextSizeBytes: parsed.data.ciphertextSizeBytes,
+          ciphertextSha256: parsed.data.ciphertextSha256,
+          now: currentTime,
+        },
+        tx,
+      );
+
+      // Lazy cleanup: đánh dấu tối đa 5 bản ghi pending quá 60 phút của chính người dùng này để dọn trên Storage.
+      const expiredOrphans =
+        typeof this.repository.claimExpiredPendingAttachmentsForUser === 'function'
+          ? await this.repository.claimExpiredPendingAttachmentsForUser(
+              {
+                uploaderId: actor.user.id,
+                cutoffDate: orphanCutoff,
+                limit: ATTACHMENT_LAZY_GC_BATCH_LIMIT,
+              },
+              tx,
+            )
+          : [];
+
+      return { pendingRow, expiredOrphans };
+    });
+
+    const storage = this.resolveMediaStorageProvider();
+
+    // Best-effort dọn tệp rác quá hạn (await gọn với Promise.allSettled để tương thích Vercel Serverless, tuyệt đối không làm hỏng luồng chính).
+    if (txOutcome.expiredOrphans.length > 0) {
+      await Promise.allSettled(
+        txOutcome.expiredOrphans.map(async (orphan) => {
+          const target =
+            storage.provider === 'vercel_blob'
+              ? orphan.storageUrl?.trim() || orphan.storageKey
+              : orphan.storageKey;
+          try {
+            await storage.deleteObject(target);
+          } catch (error) {
+            logger.warn(
+              {
+                component: 'chat-service',
+                event: 'chat_orphan_attachment_cleanup_failed',
+                errorName: error instanceof Error ? error.name : 'UnknownError',
+              },
+              'Không thể dọn tệp đính kèm quá hạn',
+            );
+          }
+        }),
+      );
+    }
+
+    if (typeof storage.createEncryptedUploadGrant !== 'function') {
+      throw new ChatDomainError({
+        status: 500,
+        code: 'INTERNAL_ERROR',
+        message: CHAT_MESSAGES.attachmentUploadNotReady,
+      });
+    }
+
+    const grant = await storage.createEncryptedUploadGrant({
+      attachmentPublicId: txOutcome.pendingRow.publicId,
+      storageKey: txOutcome.pendingRow.storageKey,
+      exactSizeBytes: txOutcome.pendingRow.ciphertextSizeBytes,
+      expiresAt,
+    });
+
+    return {
+      attachmentPublicId: txOutcome.pendingRow.publicId,
+      mediaKind: txOutcome.pendingRow.mediaKind,
+      uploadMode: grant.uploadMode,
+      pathname: grant.pathname,
+      ...(grant.clientToken ? { clientToken: grant.clientToken } : {}),
+      ...(grant.uploadUrl ? { uploadUrl: grant.uploadUrl } : {}),
+      maxBytes: txOutcome.pendingRow.ciphertextSizeBytes,
+      expiresAt: grant.expiresAt,
+    };
+  }
+
+  async uploadLocalEncryptedAttachment(
+    actor: AuthenticatedPrincipal,
+    rawAttachmentPublicId: string,
+    rawBody: Buffer,
+    rawContentType: string | null,
+    context: RequestClientContext = DEFAULT_CLIENT_CONTEXT,
+  ): Promise<{
+    readonly attachmentPublicId: string;
+    readonly uploaded: true;
+    readonly sizeBytes: number;
+  }> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    const storage = this.resolveMediaStorageProvider();
+    if (storage.provider === 'vercel_blob') {
+      throw new ChatDomainError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: CHAT_MESSAGES.notFound,
+      });
+    }
+
+    await Promise.all([
+      this.consumeRateLimitOrThrow(
+        `chat:attachments:upload:user:${actor.user.id}`,
+        CHAT_RATE_LIMITS.uploadAttachmentByUser,
+      ),
+      this.consumeRateLimitOrThrow(
+        `chat:attachments:upload:ip:${context.rateLimitIpKey}`,
+        CHAT_RATE_LIMITS.uploadAttachmentByIp,
+      ),
+    ]);
+
+    const normalizedContentType = (rawContentType ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+    if (normalizedContentType !== 'application/octet-stream') {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.attachmentInvalidContentType,
+      });
+    }
+
+    const attachmentPublicId = parsePublicIdOrThrowNotFound(rawAttachmentPublicId);
+
+    const attachment = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findAttachmentByPublicId(attachmentPublicId, tx);
+      if (
+        !found ||
+        found.uploaderId !== actor.user.id ||
+        found.messageId !== null ||
+        found.deletedAt !== null
+      ) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(found.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:attachment:upload', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (actorParticipant!.inboxState !== 'primary' || peerParticipant!.inboxState !== 'primary') {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'CHAT_PENDING_TEXT_ONLY',
+          message: CHAT_MESSAGES.pendingTextOnly,
+        });
+      }
+
+      return found;
+    });
+
+    if (rawBody.byteLength !== attachment.ciphertextSizeBytes) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.attachmentIntegrityMismatch,
+      });
+    }
+
+    const actualSha256 = createHash('sha256').update(rawBody).digest('hex');
+    if (actualSha256 !== attachment.ciphertextSha256.toLowerCase()) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.attachmentIntegrityMismatch,
+      });
+    }
+
+    const stored = await storage.putObject({
+      storageKey: attachment.storageKey,
+      body: rawBody,
+      contentType: 'application/octet-stream',
+    });
+
+    await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      await this.repository.markAttachmentStorageUrlUploaded(
+        {
+          attachmentId: attachment.id,
+          uploaderId: actor.user.id,
+          storageUrl: stored.url,
+        },
+        tx,
+      );
+    });
+
+    return {
+      attachmentPublicId: attachment.publicId,
+      uploaded: true,
+      sizeBytes: stored.byteLength,
+    };
+  }
+
+  async getMessageAttachment(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+    rawQuery: Record<string, unknown> = {},
+  ): Promise<GetMessageAttachmentResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:attachments:download:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.downloadAttachmentByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const parsedQuery = attachmentDownloadQuerySchema.safeParse(rawQuery);
+    if (!parsedQuery.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsedQuery.error),
+      });
+    }
+
+    const attachment = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findMessageByPublicId(messagePublicId, tx);
+      if (!found || found.row.recalledAt !== null) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(found.row.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:attachment:read', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (Number(found.row.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        found.row.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const foundAttachment = await this.repository.findActiveAttachmentByMessageId(
+        found.row.id,
+        tx,
+      );
+      if (!foundAttachment || foundAttachment.deletedAt !== null) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      return foundAttachment;
+    });
+
+    const storage = this.resolveMediaStorageProvider();
+    if (parsedQuery.data.download === '1') {
+      if (storage.provider === 'vercel_blob' || typeof storage.readObject !== 'function') {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      const readResult = await storage.readObject(attachment.storageKey);
+      if (!readResult) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      return {
+        kind: 'binary',
+        body: readResult.body,
+        contentType: 'application/octet-stream',
+        ciphertextSha256: attachment.ciphertextSha256.toLowerCase(),
+        ciphertextSizeBytes: attachment.ciphertextSizeBytes,
+      };
+    }
+
+    const downloadUrl =
+      storage.provider === 'vercel_blob'
+        ? (attachment.storageUrl?.trim() ?? '')
+        : `/api/v1/messages/${encodeURIComponent(messagePublicId)}/attachment?download=1`;
+
+    if (!downloadUrl) {
+      throw new ChatDomainError({
+        status: 404,
+        code: 'NOT_FOUND',
+        message: CHAT_MESSAGES.notFound,
+      });
+    }
+
+    return {
+      kind: 'grant',
+      attachment: {
+        attachmentPublicId: attachment.publicId,
+        mediaKind: attachment.mediaKind,
+        downloadUrl,
+        ciphertextSha256: attachment.ciphertextSha256.toLowerCase(),
+        ciphertextSizeBytes: attachment.ciphertextSizeBytes,
+      },
     };
   }
 

@@ -310,4 +310,55 @@ describe('Security Headers, Cookies & HTTP Error Response', () => {
     });
     expect(withoutAbly).not.toContain('ably.io');
   });
+
+  it('M11: Permissions-Policy mở microphone=(self), CSP có media-src blob: và allowVercelBlob mở đủ 4 origin Vercel Blob kể cả domain gốc', () => {
+    const defaultHeaders = buildSecurityHeaders({
+      nonce: 'nonce-m11',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      isAuthApiRoute: false,
+    });
+    expect(defaultHeaders['Permissions-Policy']).toBe(
+      'camera=(), microphone=(self), geolocation=()',
+    );
+    const defaultCsp = defaultHeaders['Content-Security-Policy'] ?? '';
+    expect(defaultCsp).toContain("media-src 'self' blob:");
+    const defaultConnectDirective = defaultCsp
+      .split('; ')
+      .find((d) => d.startsWith('connect-src '));
+    expect(defaultConnectDirective).not.toContain('blob.vercel-storage.com');
+    expect(defaultConnectDirective).not.toContain('https://vercel.com');
+
+    const withBlob = buildContentSecurityPolicy({
+      nonce: 'nonce-m11',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      allowVercelBlob: true,
+    });
+    expect(withBlob).toContain("media-src 'self' blob:");
+    expect(withBlob).toContain('https://vercel.com');
+    expect(withBlob).toContain('https://blob.vercel-storage.com');
+    expect(withBlob).toContain('https://*.blob.vercel-storage.com');
+    expect(withBlob).toContain('https://*.public.blob.vercel-storage.com');
+    expect(withBlob).not.toContain('unsafe-eval');
+
+    const withoutBlob = buildContentSecurityPolicy({
+      nonce: 'nonce-m11',
+      isProduction: true,
+      isHttps: true,
+      isApiRoute: false,
+      allowVercelBlob: false,
+    });
+    const connectDirective = withoutBlob.split('; ').find((d) => d.startsWith('connect-src '));
+    expect(connectDirective).not.toContain('blob.vercel-storage.com');
+    expect(connectDirective).not.toContain('https://vercel.com');
+
+    const localChatUploadReq = new NextRequest(
+      'http://localhost:3000/api/v1/media/local/chat/11111111-1111-4111-8111-111111111111',
+    );
+    const localChatUploadRes = proxy(localChatUploadReq);
+    expect(localChatUploadRes.headers.get('Cache-Control')).toBe(AUTH_CACHE_CONTROL_HEADER);
+  });
 });

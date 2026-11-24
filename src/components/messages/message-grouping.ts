@@ -1,3 +1,4 @@
+import type { DecryptedMessageMediaPayload } from '@/lib/e2ee/types';
 import type { ChatMessageDto, ConversationSummaryDto } from '@/modules/chat';
 
 /** Các tin nhắn liên tiếp của cùng 1 người gửi cách nhau dưới 3 phút được gom vào cùng 1 cụm. */
@@ -11,6 +12,8 @@ export type MessageBubbleClusterPosition = 'single' | 'first' | 'middle' | 'last
 export interface GroupableMessageItem {
   readonly dto: ChatMessageDto;
   readonly plaintext: string;
+  readonly media?: DecryptedMessageMediaPayload;
+  readonly localPreviewUrl?: string;
   readonly decryptionFailed: boolean;
   readonly sending?: boolean;
   readonly sendError?: string | null;
