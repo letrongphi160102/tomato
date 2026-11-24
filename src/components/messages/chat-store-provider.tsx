@@ -13,6 +13,7 @@ import {
   PEER_KEY_BUNDLE_CACHE_TTL_MS,
   putLruConversationThreadCache,
   putLruDecryptedMessageCache,
+  shouldRenderFloatingMessagesWidget,
   type CachedConversationThreadState,
   type ChatStoreContextValue,
   type DecryptedMessageViewItem,
@@ -102,6 +103,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
   const pathnameRef = React.useRef<string | null>(pathname);
   const isMessagesViewportActiveRef = React.useRef<boolean>(false);
+  const floatingActiveConvIdRef = React.useRef<string | null>(null);
   const selectedConvRef = React.useRef<ConversationSummaryDto | null>(selectedConversation);
   const primaryConvsRef = React.useRef<readonly ConversationSummaryDto[]>(primaryConversations);
   const pendingConvsRef = React.useRef<readonly ConversationSummaryDto[]>(pendingConversations);
@@ -120,6 +122,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     pathnameRef.current = pathname;
     if (!pathname || !pathname.startsWith('/messages')) {
       isMessagesViewportActiveRef.current = false;
+    }
+    if (!shouldRenderFloatingMessagesWidget(pathname)) {
+      floatingActiveConvIdRef.current = null;
     }
   }, [pathname]);
 
@@ -480,6 +485,20 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     [currentUserPublicId],
   );
 
+  const resolveConversationById = React.useCallback(
+    (conversationPublicId: string): ConversationSummaryDto | null => {
+      if (selectedConvRef.current?.public_id === conversationPublicId) {
+        return selectedConvRef.current;
+      }
+      return (
+        primaryConvsRef.current.find((c) => c.public_id === conversationPublicId) ??
+        pendingConvsRef.current.find((c) => c.public_id === conversationPublicId) ??
+        null
+      );
+    },
+    [],
+  );
+
   const checkCanAutoMarkRead = React.useCallback(
     (conversationPublicId: string, targetSeq: number): boolean => {
       const visibilityState = typeof document !== 'undefined' ? document.visibilityState : 'hidden';
@@ -491,13 +510,15 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         pathname: pathnameRef.current,
         isMessagesViewportActive: isMessagesViewportActiveRef.current,
         selectedConversation: selectedConvRef.current,
+        floatingActiveConversationPublicId: floatingActiveConvIdRef.current,
+        floatingConversation: resolveConversationById(conversationPublicId),
         targetConversationPublicId: conversationPublicId,
         targetSeq,
         documentVisibilityState: visibilityState,
         windowHasFocus,
       });
     },
-    [],
+    [resolveConversationById],
   );
 
   /**
@@ -1530,6 +1551,19 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     [checkCanAutoMarkRead, markConversationReadOptimistic],
   );
 
+  const setFloatingViewportConversation = React.useCallback(
+    (conversationPublicId: string | null) => {
+      floatingActiveConvIdRef.current = conversationPublicId;
+      if (conversationPublicId) {
+        const target = resolveConversationById(conversationPublicId);
+        if (target && checkCanAutoMarkRead(target.public_id, target.lastSeq)) {
+          void markConversationReadOptimistic(target.public_id, target.lastSeq);
+        }
+      }
+    },
+    [checkCanAutoMarkRead, markConversationReadOptimistic, resolveConversationById],
+  );
+
   // Tự động giải mã bù các tin nhắn bị `decryptionFailed: true` nếu thread được mở trước khi E2EE Bootstrap hoàn tất.
   React.useEffect(() => {
     if (!e2eeReady) {
@@ -1662,12 +1696,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }
         }
 
-        const peerId =
-          selectedConvRef.current?.public_id === convId
-            ? selectedConvRef.current.peer.public_id
-            : primaryConvsRef.current.find((c) => c.public_id === convId)?.peer.public_id;
+        const peerId = resolveConversationById(convId)?.peer.public_id;
 
-        if (store.threadsByConvId.has(convId)) {
+        if (store.threadsByConvId.has(convId) || floatingActiveConvIdRef.current === convId) {
           void deltaSyncConversationThread(convId, peerId);
         }
 
@@ -1787,18 +1818,28 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     deltaSyncConversationThread,
     loadConversations,
     readReceiptsEnabled,
+    resolveConversationById,
     selectConversation,
     setPrimaryConversations,
     setUnreadConversationsCount,
     subscribeChatEvents,
   ]);
 
-  // Tự động đánh dấu đã đọc khi người dùng quay lại tab trình duyệt hoặc focus cửa sổ lúc đang mở sẵn 1 đoạn chat chưa đọc tại `/messages`.
+  // Tự động đánh dấu đã đọc khi người dùng quay lại tab trình duyệt hoặc focus cửa sổ lúc đang mở sẵn 1 đoạn chat chưa đọc tại `/messages` hoặc trong Cửa sổ Tin nhắn nổi.
   React.useEffect(() => {
     const handleVisibilityOrFocus = () => {
-      const current = selectedConvRef.current;
-      if (current && checkCanAutoMarkRead(current.public_id, current.lastSeq)) {
-        void markConversationReadOptimistic(current.public_id, current.lastSeq);
+      const candidateIds = new Set<string>();
+      if (selectedConvRef.current?.public_id) {
+        candidateIds.add(selectedConvRef.current.public_id);
+      }
+      if (floatingActiveConvIdRef.current) {
+        candidateIds.add(floatingActiveConvIdRef.current);
+      }
+      for (const convId of candidateIds) {
+        const conv = resolveConversationById(convId);
+        if (conv && checkCanAutoMarkRead(conv.public_id, conv.lastSeq)) {
+          void markConversationReadOptimistic(conv.public_id, conv.lastSeq);
+        }
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityOrFocus);
@@ -1807,7 +1848,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.removeEventListener('focus', handleVisibilityOrFocus);
     };
-  }, [checkCanAutoMarkRead, markConversationReadOptimistic]);
+  }, [checkCanAutoMarkRead, markConversationReadOptimistic, resolveConversationById]);
 
   const contextValue = React.useMemo<ChatStoreContextValue>(
     () => ({
@@ -1829,6 +1870,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setActiveTab,
       selectConversation,
       setMessagesViewportActive,
+      setFloatingViewportConversation,
       getThreadState,
       getCachedPeerKeyBundle,
       ensurePeerKeyBundle,
@@ -1874,6 +1916,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       sendOptimisticTextMessage,
       serverKeyBackup,
       setActiveTab,
+      setFloatingViewportConversation,
       setMessagesViewportActive,
       threadVersion,
       unreadConversationsCount,

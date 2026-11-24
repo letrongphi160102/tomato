@@ -2,40 +2,22 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { KeyRound, Lock, MonitorSmartphone, Pencil, User } from 'lucide-react';
+import { KeyRound, Lock } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
 const SETTINGS_NAV_ITEMS = [
   {
-    href: '/settings/profile',
-    label: 'Chỉnh sửa hồ sơ',
-    description: 'Ảnh đại diện, tên, ID và tiểu sử',
-    icon: Pencil,
-  },
-  {
     href: '/settings/privacy',
     label: 'Quyền riêng tư',
-    description: 'Tài khoản riêng tư và danh sách chặn',
+    description: 'Tài khoản riêng tư, trạng thái hoạt động và danh sách chặn',
     icon: Lock,
-  },
-  {
-    href: '/settings/account',
-    label: 'Tổng quan tài khoản',
-    description: 'Thông tin cá nhân cơ bản',
-    icon: User,
   },
   {
     href: '/settings/security',
     label: 'Mật khẩu & Bảo mật',
-    description: 'Đổi mật khẩu an toàn',
+    description: 'Đổi mật khẩu và quản lý thiết bị đăng nhập',
     icon: KeyRound,
-  },
-  {
-    href: '/settings/devices',
-    label: 'Thiết bị đăng nhập',
-    description: 'Quản lý thiết bị và lịch sử',
-    icon: MonitorSmartphone,
   },
 ] as const;
 

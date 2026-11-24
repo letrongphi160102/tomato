@@ -8,6 +8,7 @@ import {
   MAX_LRU_CACHED_CONVERSATION_THREADS,
   putLruConversationThreadCache,
   putLruDecryptedMessageCache,
+  shouldRenderFloatingMessagesWidget,
   type CachedConversationThreadState,
 } from '@/components/messages/chat-store-context';
 import {
@@ -536,6 +537,89 @@ describe('Unit: Singleton E2EE Bootstrap (Chống spam 429), Gom cụm bong bón
         windowHasFocus: true,
       }),
     ).toBe(true);
+
+    // 6. Kiểm tra phạm vi hiển thị của Floating Mini-Chat theo pathname:
+    //    CHỈ hiện ở `/` và `/u/[handle]`, ẩn hoàn toàn ở `/messages` và `/settings/*`.
+    expect(shouldRenderFloatingMessagesWidget('/')).toBe(true);
+    expect(shouldRenderFloatingMessagesWidget('/u/letrongphi02')).toBe(true);
+    expect(shouldRenderFloatingMessagesWidget('/messages')).toBe(false);
+    expect(shouldRenderFloatingMessagesWidget('/settings')).toBe(false);
+    expect(shouldRenderFloatingMessagesWidget('/settings/privacy')).toBe(false);
+    expect(shouldRenderFloatingMessagesWidget('/settings/security')).toBe(false);
+    expect(shouldRenderFloatingMessagesWidget('/settings/profile')).toBe(false);
+
+    // 7. Khi người dùng ở `/` hoặc `/u/[handle]` và mở trực tiếp màn hình trò chuyện của đúng đoạn chat trong Cửa sổ Tin nhắn nổi -> `true`.
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/',
+        isMessagesViewportActive: false,
+        selectedConversation: selectedPrimaryConv,
+        floatingActiveConversationPublicId: convId,
+        floatingConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(true);
+
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/u/letrongphi02',
+        isMessagesViewportActive: false,
+        selectedConversation: null,
+        floatingActiveConversationPublicId: convId,
+        floatingConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(true);
+
+    // 8. Khi người dùng ở `/` nhưng đóng cửa sổ nổi (`null`), hoặc bấm Quay lại danh sách (`null`), hoặc đang mở đoạn chat khác trong cửa sổ nổi -> `false`.
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/',
+        isMessagesViewportActive: false,
+        selectedConversation: selectedPrimaryConv,
+        floatingActiveConversationPublicId: null,
+        floatingConversation: null,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
+
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/',
+        isMessagesViewportActive: false,
+        selectedConversation: selectedPrimaryConv,
+        floatingActiveConversationPublicId: '77777777-7777-4777-8777-777777777777',
+        floatingConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
+
+    // 9. Khi người dùng chuyển sang `/settings/privacy` (nơi không có cửa sổ nổi), dù biến phụ còn sót cũng trả về `false`.
+    expect(
+      canAutoMarkConversationRead({
+        pathname: '/settings/privacy',
+        isMessagesViewportActive: false,
+        selectedConversation: selectedPrimaryConv,
+        floatingActiveConversationPublicId: convId,
+        floatingConversation: selectedPrimaryConv,
+        targetConversationPublicId: convId,
+        targetSeq: 10,
+        documentVisibilityState: 'visible',
+        windowHasFocus: true,
+      }),
+    ).toBe(false);
   });
 
   it('Hồi quy Shared Realtime Multiplexer: giữ nguyên kết nối khi chuyển route (/) <-> (/messages) cùng tài khoản và đóng tức thì khi đổi userPublicId hoặc đăng xuất', async () => {

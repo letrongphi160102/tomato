@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
-
-import { SecuritySessionsPanel } from '@/components/settings/security-sessions-panel';
+import { redirect } from 'next/navigation';
 
 export const metadata: Metadata = {
   title: 'Thiết bị đăng nhập — Tomato',
@@ -10,5 +9,5 @@ export const metadata: Metadata = {
 export const dynamic = 'force-dynamic';
 
 export default function DevicesSettingsPage() {
-  return <SecuritySessionsPanel />;
+  redirect('/settings/security#devices');
 }

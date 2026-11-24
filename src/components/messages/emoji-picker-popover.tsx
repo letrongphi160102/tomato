@@ -167,7 +167,7 @@ export function EmojiPickerPopover({ disabled = false, onSelectEmoji }: EmojiPic
         <div
           role="dialog"
           aria-label="Bảng biểu tượng cảm xúc"
-          className="absolute bottom-12 left-0 z-40 w-72 rounded-2xl border bg-background p-3 shadow-xl"
+          className="absolute bottom-12 left-0 z-50 w-72 rounded-2xl border bg-background p-3 shadow-xl"
         >
           <div className="mb-2 flex items-center gap-1 border-b pb-2">
             {EMOJI_CATEGORIES.map((category) => (

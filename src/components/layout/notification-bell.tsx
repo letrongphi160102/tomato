@@ -227,7 +227,7 @@ export function NotificationBell() {
         <div
           role="dialog"
           aria-label="Danh sách thông báo"
-          className="fixed inset-x-3 top-16 z-40 flex max-h-[75vh] flex-col overflow-hidden rounded-2xl border bg-background shadow-xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-[390px]"
+          className="fixed inset-x-3 top-16 z-50 flex max-h-[75vh] flex-col overflow-hidden rounded-2xl border bg-background shadow-xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-[390px]"
         >
           <div className="flex items-center justify-between border-b px-4 py-3">
             <div className="flex items-center gap-2">

@@ -172,7 +172,7 @@ export function UserSearchBar({ className }: UserSearchBarProps) {
           aria-controls={resultsListId}
           aria-autocomplete="list"
           value={query}
-          placeholder="Tìm kiếm người dùng..."
+          placeholder="Tìm kiếm người dùng"
           onFocus={() => setOpen(true)}
           onChange={(event) => handleQueryChange(event.target.value)}
           onKeyDown={handleKeyDown}
@@ -198,7 +198,7 @@ export function UserSearchBar({ className }: UserSearchBarProps) {
           id={resultsListId}
           role="listbox"
           aria-label="Kết quả tìm kiếm người dùng"
-          className="absolute left-0 right-0 z-40 mt-2 max-h-96 overflow-y-auto rounded-2xl border bg-background p-1.5 shadow-xl"
+          className="absolute left-0 right-0 z-50 mt-2 max-h-96 overflow-y-auto rounded-2xl border bg-background p-1.5 shadow-xl"
         >
           {!hasMinChars ? (
             <p className="px-3 py-4 text-center text-xs text-muted-foreground">

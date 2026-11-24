@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react';
 
+import { AppLeftSidebar } from '@/components/layout/app-left-sidebar';
 import { AppTopBar } from '@/components/layout/app-top-bar';
 import { ChatStoreProvider } from '@/components/messages/chat-store-provider';
+import { FloatingMessagesWidget } from '@/components/messages/floating-messages-widget';
 import { RealtimePresenceProvider } from '@/components/realtime/realtime-presence-provider';
 import type { PublicUserProfile } from '@/modules/auth/session.service';
 import type { UserProfileDto } from '@/modules/profile';
@@ -37,7 +39,15 @@ export function AppShell({
             avatarUrl={profile?.avatarUrl ?? null}
             handle={profile?.handle ?? user.username}
           />
-          <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8">{children}</main>
+          <div className="flex min-h-[calc(100vh-3.5rem)]">
+            <AppLeftSidebar />
+            {/* Cột giữ chỗ cố định 72px trên Desktop để chống giật bố cục (Zero Layout Shift) khi Sidebar trượt mở rộng */}
+            <div className="hidden w-[72px] shrink-0 md:block" aria-hidden="true" />
+            <main className="mx-auto w-full max-w-5xl flex-1 px-4 pt-6 pb-20 sm:px-6 md:py-8">
+              {children}
+            </main>
+          </div>
+          <FloatingMessagesWidget />
         </div>
       </ChatStoreProvider>
     </RealtimePresenceProvider>

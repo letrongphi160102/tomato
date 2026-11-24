@@ -46,6 +46,7 @@ export interface ChatStoreContextValue {
   readonly setActiveTab: (tab: 'primary' | 'pending') => void;
   readonly selectConversation: (conv: ConversationSummaryDto | null) => void;
   readonly setMessagesViewportActive: (active: boolean) => void;
+  readonly setFloatingViewportConversation: (conversationPublicId: string | null) => void;
   readonly getThreadState: (conversationPublicId: string) => CachedConversationThreadState | null;
   readonly getCachedPeerKeyBundle: (peerPublicId: string) => UserE2eeKeyBundleDto | null;
   readonly ensurePeerKeyBundle: (
@@ -175,10 +176,25 @@ export function clearChatRamMemorySingleton(): void {
   activeUserChatRamCache = null;
 }
 
+/**
+ * Nút nổi & Cửa sổ Tin nhắn Thu gọn góc dưới bên phải CHỈ hiển thị tại:
+ * - Trang chủ (`/`)
+ * - Trang cá nhân (`/u/[handle]`)
+ * Tự động ẩn hoàn toàn tại `/messages`, `/settings/*` và các trang khác.
+ */
+export function shouldRenderFloatingMessagesWidget(pathname: string | null | undefined): boolean {
+  if (!pathname) {
+    return false;
+  }
+  return pathname === '/' || pathname.startsWith('/u/');
+}
+
 export interface AutoMarkConversationReadCheckParams {
   readonly pathname: string | null | undefined;
   readonly isMessagesViewportActive: boolean;
   readonly selectedConversation: ConversationSummaryDto | null;
+  readonly floatingActiveConversationPublicId?: string | null;
+  readonly floatingConversation?: ConversationSummaryDto | null;
   readonly targetConversationPublicId: string;
   readonly targetSeq: number;
   readonly documentVisibilityState: DocumentVisibilityState | string;
@@ -187,32 +203,52 @@ export interface AutoMarkConversationReadCheckParams {
 
 /**
  * Khóa chặt 4 điều kiện bắt buộc trước khi tự động gửi `POST /api/v1/conversations/[id]/read`:
- * (a) Người dùng đang thực sự đứng ở route `/messages` VÀ `<MessagesView>` đang mount.
- * (b) Đoạn chat đó đang được mở trực tiếp ở khung chat bên phải và thuộc hộp thư `Chính` (`primary`).
+ * (a) Người dùng đang thực sự mở đoạn chat đó ở một trong hai nơi:
+ *     - (a1) Trang `/messages` đang mount (`pathname.startsWith('/messages') && isMessagesViewportActive`), HOẶC
+ *     - (a2) Cửa sổ Tin nhắn nổi trên `/` hoặc `/u/[handle]` đang mở ở màn hình trò chuyện của đúng đoạn chat đó
+ *            (`floatingActiveConversationPublicId === targetConversationPublicId`).
+ * (b) Đoạn chat đó thuộc hộp thư `Chính` (`primary`).
  * (c) Tab trình duyệt đang hiển thị (`visible`) và cửa sổ đang có tiêu điểm (`windowHasFocus !== false`).
- * (d) Có tin nhắn mới từ đối phương (`targetSeq > selectedConversation.myState.lastReadSeq`).
+ * (d) Có tin nhắn mới từ đối phương (`targetSeq > lastReadSeq`).
  */
 export function canAutoMarkConversationRead(params: AutoMarkConversationReadCheckParams): boolean {
-  if (!params.pathname || !params.pathname.startsWith('/messages')) {
-    return false;
-  }
-  if (!params.isMessagesViewportActive) {
-    return false;
-  }
-  const selected = params.selectedConversation;
-  if (!selected || selected.public_id !== params.targetConversationPublicId) {
-    return false;
-  }
-  if (selected.myState.inboxState !== 'primary') {
-    return false;
-  }
   if (params.documentVisibilityState !== 'visible') {
     return false;
   }
   if (params.windowHasFocus === false) {
     return false;
   }
-  if (params.targetSeq <= selected.myState.lastReadSeq) {
+
+  const isOnMessagesPage = Boolean(params.pathname && params.pathname.startsWith('/messages'));
+  const isOnFloatingAllowedPage = shouldRenderFloatingMessagesWidget(params.pathname);
+
+  let activeConv: ConversationSummaryDto | null = null;
+
+  if (
+    isOnMessagesPage &&
+    params.isMessagesViewportActive &&
+    params.selectedConversation &&
+    params.selectedConversation.public_id === params.targetConversationPublicId
+  ) {
+    activeConv = params.selectedConversation;
+  } else if (
+    isOnFloatingAllowedPage &&
+    params.floatingActiveConversationPublicId &&
+    params.floatingActiveConversationPublicId === params.targetConversationPublicId
+  ) {
+    const candidate = params.floatingConversation ?? params.selectedConversation;
+    if (candidate && candidate.public_id === params.targetConversationPublicId) {
+      activeConv = candidate;
+    }
+  }
+
+  if (!activeConv) {
+    return false;
+  }
+  if (activeConv.myState.inboxState !== 'primary') {
+    return false;
+  }
+  if (params.targetSeq <= activeConv.myState.lastReadSeq) {
     return false;
   }
   return true;

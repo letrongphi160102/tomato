@@ -521,9 +521,9 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
     const homeHtml = renderToStaticMarkup(
       React.createElement(AuthenticatedHome, { user: sampleUser }),
     );
-    expect(homeHtml).toContain('Nguyễn Minh Anh');
-    expect(homeHtml).toContain('NA');
-    expect(homeHtml).toContain('Kết nối và khám phá cùng nhau');
+    expect(homeHtml).toContain('Tính năng này sắp có!');
+    expect(homeHtml).not.toContain('Chào mừng trở lại');
+    expect(homeHtml).not.toContain('Lối tắt tài khoản');
 
     const accountHtml = renderToStaticMarkup(
       React.createElement(AccountOverviewCard, { user: sampleUser }),
