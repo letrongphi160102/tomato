@@ -71,11 +71,20 @@ export interface DecryptedMessageMediaPayload {
   readonly thumbnailDataUrl?: string;
 }
 
+export interface DecryptedMessageReplyPayload {
+  readonly messagePublicId: string;
+  readonly senderPublicId: string;
+  readonly messageType: 'text' | 'image' | 'voice';
+  readonly textExcerpt: string;
+}
+
 export interface DecryptedDirectMessagePayload {
   readonly v: 1;
   readonly text: string;
   readonly sentAt: string;
   readonly media?: DecryptedMessageMediaPayload;
+  readonly replyTo?: DecryptedMessageReplyPayload;
+  readonly forwarded?: boolean;
 }
 
 export type E2eeErrorCode =

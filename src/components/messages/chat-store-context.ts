@@ -1,10 +1,12 @@
 import * as React from 'react';
 
 import type { GroupableMessageItem } from '@/components/messages/message-grouping';
-import type { DecryptedMessageMediaPayload } from '@/lib/e2ee/types';
+import type { DecryptedMessageMediaPayload, DecryptedMessageReplyPayload } from '@/lib/e2ee/types';
 import type {
+  ConversationPreferencesResult,
   ConversationSummaryDto,
   E2eeKeyBackupDto,
+  ForwardTargetDto,
   UserE2eeKeyBundleDto,
 } from '@/modules/chat';
 import type { PresenceStatusDto } from '@/modules/presence/presence.service';
@@ -68,6 +70,47 @@ export interface CachedConversationThreadState {
   readonly lastAccessedAt: number;
 }
 
+export interface DecryptedPinnedMessageViewItem {
+  readonly message: DecryptedMessageViewItem;
+  readonly pinnedAt: string;
+  readonly pinnedByPublicId: string;
+}
+
+export interface CachedPinnedMessagesState {
+  readonly conversationPublicId: string;
+  readonly items: readonly DecryptedPinnedMessageViewItem[];
+  readonly totalPinnedCount: number;
+  readonly hiddenPinnedCount: number;
+  readonly maxPinnedMessages: number;
+  readonly loading: boolean;
+  readonly hasLoaded: boolean;
+}
+
+export interface ForwardRecipientOutcome {
+  readonly target: ForwardTargetDto;
+  readonly ok: boolean;
+  readonly errorMessage?: string;
+}
+
+export interface ForwardMessageBatchResult {
+  readonly succeeded: readonly ForwardRecipientOutcome[];
+  readonly failed: readonly ForwardRecipientOutcome[];
+}
+
+export type JumpToMessageResult =
+  | { readonly status: 'found'; readonly messagePublicId: string }
+  | { readonly status: 'too_old'; readonly notice: string }
+  | { readonly status: 'not_found'; readonly notice: string };
+
+export type PinMessageOutcome =
+  | { readonly ok: true; readonly totalPinnedCount: number }
+  | {
+      readonly ok: false;
+      readonly limitReached: boolean;
+      readonly hiddenPinnedCount: number;
+      readonly message: string;
+    };
+
 export interface ChatStoreContextValue {
   readonly currentUserPublicId: string;
   readonly activeTab: 'primary' | 'pending';
@@ -112,11 +155,13 @@ export interface ChatStoreContextValue {
   readonly sendOptimisticTextMessage: (params: {
     readonly conversation: ConversationSummaryDto;
     readonly plaintext: string;
+    readonly replyTo?: DecryptedMessageReplyPayload | null;
     readonly retryClientMsgId?: string;
   }) => Promise<void>;
   readonly sendOptimisticImageMessage: (params: {
     readonly conversation: ConversationSummaryDto;
     readonly file: File | Blob;
+    readonly replyTo?: DecryptedMessageReplyPayload | null;
   }) => Promise<void>;
   readonly sendOptimisticVoiceMessage: (params: {
     readonly conversation: ConversationSummaryDto;
@@ -124,7 +169,40 @@ export interface ChatStoreContextValue {
     readonly mimeType: string;
     readonly durationMs: number;
     readonly waveform: readonly number[];
+    readonly replyTo?: DecryptedMessageReplyPayload | null;
   }) => Promise<void>;
+  readonly getPinnedState: (conversationPublicId: string) => CachedPinnedMessagesState | null;
+  readonly loadPinnedMessages: (
+    conversationPublicId: string,
+    options?: { readonly force?: boolean },
+  ) => Promise<CachedPinnedMessagesState | null>;
+  readonly reactToMessage: (params: {
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+    readonly emoji: string | null;
+  }) => Promise<void>;
+  readonly pinMessage: (params: {
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+    readonly unpinOldestHiddenIfFull?: boolean;
+  }) => Promise<PinMessageOutcome>;
+  readonly unpinMessage: (params: {
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+  }) => Promise<void>;
+  readonly updateConversationPreferences: (params: {
+    readonly conversationPublicId: string;
+    readonly pinned?: boolean;
+    readonly muted?: boolean;
+  }) => Promise<ConversationPreferencesResult>;
+  readonly forwardMessageToRecipients: (params: {
+    readonly sourceMessage: DecryptedMessageViewItem;
+    readonly recipients: readonly ForwardTargetDto[];
+  }) => Promise<ForwardMessageBatchResult>;
+  readonly jumpToMessageInConversation: (
+    conversationPublicId: string,
+    targetMessagePublicId: string,
+  ) => Promise<JumpToMessageResult>;
   readonly resolveMessageMediaObjectUrl: (
     message: DecryptedMessageViewItem,
   ) => Promise<string | null>;
@@ -173,6 +251,8 @@ export function useChatStore(): ChatStoreContextValue | null {
 export interface DecryptedMessageCacheEntry {
   readonly plaintext: string;
   readonly media?: DecryptedMessageMediaPayload;
+  readonly replyTo?: DecryptedMessageReplyPayload;
+  readonly forwarded?: boolean;
   readonly decryptionFailed: boolean;
 }
 
@@ -204,6 +284,7 @@ export interface UserChatRamCache {
   serverKeyBackup: E2eeKeyBackupDto | null;
   hasLocalRestoredBackup: boolean;
   readonly threadsByConvId: Map<string, CachedConversationThreadState>;
+  readonly pinnedByConvId: Map<string, CachedPinnedMessagesState>;
   readonly decryptedMessagesByCacheKey: Map<string, DecryptedMessageCacheEntry>;
   readonly mediaObjectUrlsByMsgId: Map<string, DecryptedMediaObjectUrlCacheEntry>;
   readonly peerKeyBundlesByUserId: Map<string, PeerKeyBundleCacheEntry>;
@@ -251,6 +332,7 @@ export function getOrInitUserChatRamCache(userPublicId: string): UserChatRamCach
     serverKeyBackup: null,
     hasLocalRestoredBackup: false,
     threadsByConvId: new Map(),
+    pinnedByConvId: new Map(),
     decryptedMessagesByCacheKey: new Map(),
     mediaObjectUrlsByMsgId: new Map(),
     peerKeyBundlesByUserId: new Map(),
@@ -273,6 +355,7 @@ export function clearChatRamMemorySingleton(): void {
     }
     activeUserChatRamCache.mediaObjectUrlsByMsgId.clear();
     activeUserChatRamCache.threadsByConvId.clear();
+    activeUserChatRamCache.pinnedByConvId.clear();
     activeUserChatRamCache.decryptedMessagesByCacheKey.clear();
     activeUserChatRamCache.peerKeyBundlesByUserId.clear();
     activeUserChatRamCache.lastSentReadSeqByConvId.clear();

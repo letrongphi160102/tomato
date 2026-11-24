@@ -45,4 +45,23 @@ export const CHAT_MESSAGES = Object.freeze({
   attachmentTypeMismatch: 'Loại tệp đính kèm không khớp với loại tin nhắn.',
   attachmentIntegrityMismatch: 'Tệp tải lên không khớp kích thước hoặc dữ liệu đã khai báo.',
   attachmentInvalidContentType: 'Định dạng truyền tải tệp không hợp lệ.',
+  pendingInteractionForbidden:
+    'Bạn cần chấp nhận cuộc trò chuyện trước khi thả cảm xúc hoặc ghim tin nhắn.',
+  pendingPinConversationForbidden: 'Chỉ có thể ghim cuộc trò chuyện trong hộp thư chính.',
+  forwardTargetNotEligible:
+    'Chỉ có thể chuyển tiếp cho người cùng theo dõi nhau hoặc người đã từng trò chuyện.',
+  reactionUnsupportedType: 'Không thể thả cảm xúc cho tin nhắn này.',
+  pinUnsupportedType: 'Không thể ghim tin nhắn này.',
+  replyUnsupportedType: 'Không thể trả lời tin nhắn này.',
+  pinnedMessagesLimitReached:
+    'Đã đạt giới hạn tối đa 5 tin nhắn được ghim. Vui lòng gỡ ghim một tin nhắn trước khi ghim thêm.',
+  pinnedMessagesLimitReachedWithHidden:
+    'Cuộc trò chuyện đã đạt tối đa 5 tin nhắn được ghim (bao gồm tin nhắn cũ không còn hiển thị ở phía bạn). Bạn có thể gỡ ghim tin cũ để ghim tin mới.',
+  pinnedConversationsLimitReached:
+    'Bạn chỉ có thể ghim tối đa 3 đoạn chat. Hãy bỏ ghim một đoạn chat khác trước khi ghim thêm.',
+  reactionUpdated: 'Đã cập nhật cảm xúc.',
+  reactionRemoved: 'Đã gỡ cảm xúc.',
+  messagePinned: 'Đã ghim tin nhắn.',
+  messageUnpinned: 'Đã gỡ ghim tin nhắn.',
+  conversationPreferencesUpdated: 'Đã cập nhật tùy chọn cuộc trò chuyện.',
 });

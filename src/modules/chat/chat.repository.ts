@@ -17,6 +17,8 @@ import {
   conversations,
   follows,
   messageAttachments,
+  messagePins,
+  messageReactions,
   messageUserDeletions,
   messages,
   userE2eeDevices,
@@ -30,6 +32,8 @@ import {
   type E2eePublicJwkRecord,
   type MessageAttachmentRow,
   type MessageCryptoHeaderRecord,
+  type MessagePinRow,
+  type MessageReactionRow,
   type MessageRow,
   type MessageType,
   type UserE2eeDeviceRow,
@@ -631,7 +635,13 @@ export class ChatRepository {
     patch: Partial<
       Pick<
         ConversationParticipantRow,
-        'inboxState' | 'pendingMessagesSent' | 'lastReadSeq' | 'clearedBeforeSeq' | 'hiddenAt'
+        | 'inboxState'
+        | 'pendingMessagesSent'
+        | 'lastReadSeq'
+        | 'clearedBeforeSeq'
+        | 'hiddenAt'
+        | 'pinnedAt'
+        | 'mutedAt'
       >
     >,
     tx: DatabaseTransaction,
@@ -704,6 +714,8 @@ export class ChatRepository {
       .set({
         clearedBeforeSeq: sql`GREATEST(${conversationParticipants.clearedBeforeSeq}, ${safeLastSeq})`,
         hiddenAt: params.now,
+        // Tự động giải phóng suất ghim đoạn chat khi người dùng xóa cuộc trò chuyện ở phía mình.
+        pinnedAt: null,
       })
       .where(
         and(
@@ -730,6 +742,8 @@ export class ChatRepository {
           eq(conversationParticipants.userId, userId),
           eq(conversationParticipants.inboxState, 'primary'),
           isNull(conversationParticipants.hiddenAt),
+          // Cuộc trò chuyện đã tắt thông báo không cộng vào tổng badge đỏ chưa đọc.
+          isNull(conversationParticipants.mutedAt),
           gt(conversations.lastSeq, conversationParticipants.clearedBeforeSeq),
           sql`EXISTS (
             SELECT 1
@@ -870,6 +884,8 @@ export class ChatRepository {
         ),
       )
       .orderBy(
+        sql`CASE WHEN ${conversationParticipants.pinnedAt} IS NOT NULL THEN 0 ELSE 1 END ASC`,
+        desc(conversationParticipants.pinnedAt),
         desc(sql`COALESCE(${conversations.lastMessageAt}, ${conversations.createdAt})`),
         desc(conversations.createdAt),
       )
@@ -1010,6 +1026,8 @@ export class ChatRepository {
       readonly ciphertext: string;
       readonly cryptoHeader: MessageCryptoHeaderRecord;
       readonly attachmentStorageKey?: string | null;
+      readonly replyToMessageId?: string | null;
+      readonly isForwarded?: boolean;
       readonly now: Date;
     },
     tx: DatabaseTransaction,
@@ -1035,6 +1053,8 @@ export class ChatRepository {
         ciphertext: params.ciphertext,
         cryptoHeader: params.cryptoHeader,
         attachmentStorageKey: params.attachmentStorageKey ?? null,
+        replyToMessageId: params.replyToMessageId ?? null,
+        isForwarded: params.isForwarded === true,
         editCount: 0,
         editedAt: null,
         recalledAt: null,
@@ -1408,5 +1428,479 @@ export class ChatRepository {
       })
       .where(and(inArray(messageAttachments.id, ids), isNull(messageAttachments.deletedAt)))
       .returning();
+  }
+
+  // =========================================================================
+  // M13 — Reactions, Message Pins, Reply Metadata, Conversation Preferences & Forward Targets
+  // =========================================================================
+
+  async countPinnedPrimaryConversationsForUser(
+    userId: string,
+    tx: DatabaseTransaction,
+  ): Promise<number> {
+    const rows = await tx
+      .select({
+        count: sql<number>`CAST(COUNT(*) AS INTEGER)`,
+      })
+      .from(conversationParticipants)
+      .where(
+        and(
+          eq(conversationParticipants.userId, userId),
+          eq(conversationParticipants.inboxState, 'primary'),
+          isNull(conversationParticipants.hiddenAt),
+          isNotNull(conversationParticipants.pinnedAt),
+        ),
+      );
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  async upsertMessageReaction(
+    params: {
+      readonly conversationId: string;
+      readonly messageId: string;
+      readonly userId: string;
+      readonly emoji: string;
+      readonly now: Date;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessageReactionRow> {
+    const rows = await tx
+      .insert(messageReactions)
+      .values({
+        conversationId: params.conversationId,
+        messageId: params.messageId,
+        userId: params.userId,
+        emoji: params.emoji,
+        createdAt: params.now,
+        updatedAt: params.now,
+      })
+      .onConflictDoUpdate({
+        target: [messageReactions.messageId, messageReactions.userId],
+        set: {
+          emoji: params.emoji,
+          updatedAt: params.now,
+        },
+      })
+      .returning();
+    return rows[0]!;
+  }
+
+  async deleteMessageReaction(
+    messageId: string,
+    userId: string,
+    tx: DatabaseTransaction,
+  ): Promise<boolean> {
+    const deleted = await tx
+      .delete(messageReactions)
+      .where(and(eq(messageReactions.messageId, messageId), eq(messageReactions.userId, userId)))
+      .returning({ messageId: messageReactions.messageId });
+    return deleted.length > 0;
+  }
+
+  async deleteAllReactionsForMessage(messageId: string, tx: DatabaseTransaction): Promise<void> {
+    await tx.delete(messageReactions).where(eq(messageReactions.messageId, messageId));
+  }
+
+  async listReactionsForMessageIds(
+    conversationId: string,
+    messageIds: readonly string[],
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<
+    Array<{
+      readonly messageId: string;
+      readonly userPublicId: string;
+      readonly emoji: string;
+      readonly updatedAt: Date;
+    }>
+  > {
+    if (messageIds.length === 0) {
+      return [];
+    }
+    return executor
+      .select({
+        messageId: messageReactions.messageId,
+        userPublicId: users.publicId,
+        emoji: messageReactions.emoji,
+        updatedAt: messageReactions.updatedAt,
+      })
+      .from(messageReactions)
+      .innerJoin(users, eq(messageReactions.userId, users.id))
+      .where(
+        and(
+          eq(messageReactions.conversationId, conversationId),
+          inArray(messageReactions.messageId, [...messageIds]),
+        ),
+      )
+      .orderBy(asc(messageReactions.createdAt));
+  }
+
+  async findReplyTargetsMetadataByIds(
+    params: {
+      readonly conversationId: string;
+      readonly messageIds: readonly string[];
+      readonly viewerUserId: string;
+      readonly clearedBeforeSeq: number;
+    },
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<
+    Map<
+      string,
+      {
+        readonly messagePublicId: string;
+        readonly senderPublicId: string;
+        readonly seq: number;
+        readonly messageType: MessageType;
+        readonly recalledAt: Date | null;
+        readonly deletedForViewer: boolean;
+      }
+    >
+  > {
+    const result = new Map<
+      string,
+      {
+        readonly messagePublicId: string;
+        readonly senderPublicId: string;
+        readonly seq: number;
+        readonly messageType: MessageType;
+        readonly recalledAt: Date | null;
+        readonly deletedForViewer: boolean;
+      }
+    >();
+
+    if (params.messageIds.length === 0) {
+      return result;
+    }
+
+    const uniqueIds = Array.from(new Set(params.messageIds));
+    const [targetRows, deletionRows] = await Promise.all([
+      executor
+        .select({
+          id: messages.id,
+          publicId: messages.publicId,
+          senderPublicId: users.publicId,
+          seq: messages.seq,
+          messageType: messages.messageType,
+          recalledAt: messages.recalledAt,
+        })
+        .from(messages)
+        .innerJoin(users, eq(messages.senderId, users.id))
+        .where(
+          and(eq(messages.conversationId, params.conversationId), inArray(messages.id, uniqueIds)),
+        ),
+      executor
+        .select({ messageId: messageUserDeletions.messageId })
+        .from(messageUserDeletions)
+        .where(
+          and(
+            eq(messageUserDeletions.userId, params.viewerUserId),
+            inArray(messageUserDeletions.messageId, uniqueIds),
+          ),
+        ),
+    ]);
+
+    const deletedSet = new Set(deletionRows.map((d) => d.messageId));
+    for (const row of targetRows) {
+      result.set(row.id, {
+        messagePublicId: row.publicId,
+        senderPublicId: row.senderPublicId,
+        seq: Number(row.seq),
+        messageType: row.messageType,
+        recalledAt: row.recalledAt,
+        deletedForViewer: Number(row.seq) <= params.clearedBeforeSeq || deletedSet.has(row.id),
+      });
+    }
+
+    return result;
+  }
+
+  async listPinnedMessageIdsInSet(
+    conversationId: string,
+    messageIds: readonly string[],
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<Set<string>> {
+    if (messageIds.length === 0) {
+      return new Set();
+    }
+    const rows = await executor
+      .select({ messageId: messagePins.messageId })
+      .from(messagePins)
+      .where(
+        and(
+          eq(messagePins.conversationId, conversationId),
+          inArray(messagePins.messageId, [...messageIds]),
+        ),
+      );
+    return new Set(rows.map((r) => r.messageId));
+  }
+
+  async listPinnedMessagesRawForConversation(
+    conversationId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<
+    Array<{
+      readonly pin: MessagePinRow;
+      readonly message: MessageRow;
+      readonly senderPublicId: string;
+      readonly pinnedByPublicId: string;
+    }>
+  > {
+    const rows = await executor
+      .select({
+        pin: messagePins,
+        message: messages,
+        senderPublicId: users.publicId,
+      })
+      .from(messagePins)
+      .innerJoin(
+        messages,
+        and(
+          eq(messagePins.conversationId, messages.conversationId),
+          eq(messagePins.messageId, messages.id),
+        ),
+      )
+      .innerJoin(users, eq(messages.senderId, users.id))
+      .where(eq(messagePins.conversationId, conversationId))
+      .orderBy(desc(messagePins.pinnedAt));
+
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const pinnerIds = Array.from(new Set(rows.map((r) => r.pin.pinnedByUserId)));
+    const pinnerUsers = await executor
+      .select({ id: users.id, publicId: users.publicId })
+      .from(users)
+      .where(inArray(users.id, pinnerIds));
+    const pinnerPublicIdMap = new Map(pinnerUsers.map((u) => [u.id, u.publicId]));
+
+    return rows.map((r) => ({
+      pin: r.pin,
+      message: r.message,
+      senderPublicId: r.senderPublicId,
+      pinnedByPublicId: pinnerPublicIdMap.get(r.pin.pinnedByUserId) ?? r.senderPublicId,
+    }));
+  }
+
+  async listMessageDeletionsForMessagesAndUsers(
+    messageIds: readonly string[],
+    userIds: readonly string[],
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<Array<{ readonly messageId: string; readonly userId: string }>> {
+    if (messageIds.length === 0 || userIds.length === 0) {
+      return [];
+    }
+    return executor
+      .select({
+        messageId: messageUserDeletions.messageId,
+        userId: messageUserDeletions.userId,
+      })
+      .from(messageUserDeletions)
+      .where(
+        and(
+          inArray(messageUserDeletions.messageId, [...messageIds]),
+          inArray(messageUserDeletions.userId, [...userIds]),
+        ),
+      );
+  }
+
+  async insertMessagePin(
+    params: {
+      readonly conversationId: string;
+      readonly messageId: string;
+      readonly pinnedByUserId: string;
+      readonly now: Date;
+    },
+    tx: DatabaseTransaction,
+  ): Promise<MessagePinRow | null> {
+    const rows = await tx
+      .insert(messagePins)
+      .values({
+        conversationId: params.conversationId,
+        messageId: params.messageId,
+        pinnedByUserId: params.pinnedByUserId,
+        pinnedAt: params.now,
+      })
+      .onConflictDoNothing({
+        target: [messagePins.conversationId, messagePins.messageId],
+      })
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async deleteMessagePinsByIds(
+    conversationId: string,
+    messageIds: readonly string[],
+    tx: DatabaseTransaction,
+  ): Promise<string[]> {
+    if (messageIds.length === 0) {
+      return [];
+    }
+    const deleted = await tx
+      .delete(messagePins)
+      .where(
+        and(
+          eq(messagePins.conversationId, conversationId),
+          inArray(messagePins.messageId, [...messageIds]),
+        ),
+      )
+      .returning({ messageId: messagePins.messageId });
+    return deleted.map((d) => d.messageId);
+  }
+
+  /**
+   * Kiểm tra điều kiện hợp lệ để Chuyển tiếp tin nhắn (M13):
+   * Chỉ cho phép nếu hai người dùng:
+   * (1) Cùng theo dõi nhau (`status = 'following'` ở cả 2 chiều), HOẶC
+   * (2) Đã từng có hội thoại trực tiếp ở trạng thái `primary` ở cả 2 phía.
+   */
+  async hasPriorPrimaryConversationBetweenUsers(
+    userAId: string,
+    userBId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<boolean> {
+    const pairKey = buildDirectPairKey(userAId, userBId);
+    const rows = await executor
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.directPairKey, pairKey),
+          gt(conversations.lastSeq, 0),
+          sql`EXISTS (
+            SELECT 1 FROM ${conversationParticipants} cp1
+            WHERE cp1.conversation_id = ${conversations.id}
+              AND cp1.user_id = ${userAId}
+              AND cp1.inbox_state = 'primary'
+          )`,
+          sql`EXISTS (
+            SELECT 1 FROM ${conversationParticipants} cp2
+            WHERE cp2.conversation_id = ${conversations.id}
+              AND cp2.user_id = ${userBId}
+              AND cp2.inbox_state = 'primary'
+          )`,
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  /**
+   * Liệt kê danh sách người nhận đủ điều kiện Chuyển tiếp (M13):
+   * Mutual Follow (`following` 2 chiều) ∪ Đã từng trò chuyện (`primary` 2 phía),
+   * loại bỏ chính mình, tài khoản không `active` và mọi quan hệ Block 2 chiều.
+   * Tìm kiếm chỉ trên `handle_normalized` / `full_name` (tuyệt đối KHÔNG tìm theo email).
+   */
+  async listEligibleForwardTargets(
+    params: {
+      readonly actorUserId: string;
+      readonly query?: string;
+      readonly limit: number;
+    },
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<
+    Array<{
+      readonly publicId: string;
+      readonly handle: string;
+      readonly fullName: string;
+      readonly avatarUrl: string | null;
+      readonly isPrivate: boolean;
+      readonly conversationPublicId: string | null;
+      readonly lastMessageAt: Date | null;
+    }>
+  > {
+    const cleanQuery = (params.query ?? '').trim().replace(/^@+/, '');
+    const escapedPattern = cleanQuery
+      ? `%${cleanQuery.replace(/[\\%_]/g, (m) => `\\${m}`)}%`
+      : null;
+
+    const queryFilter = escapedPattern
+      ? sql`AND (
+          u.handle_normalized ILIKE ${escapedPattern} ESCAPE '\\'
+          OR u.full_name ILIKE ${escapedPattern} ESCAPE '\\'
+        )`
+      : sql``;
+
+    const result = await executor.execute(sql`
+      SELECT
+        u.public_id AS "publicId",
+        u.handle AS "handle",
+        u.full_name AS "fullName",
+        u.avatar_url AS "avatarUrl",
+        u.is_private AS "isPrivate",
+        conv.public_id AS "conversationPublicId",
+        conv.last_message_at AS "lastMessageAt"
+      FROM "users" u
+      LEFT JOIN LATERAL (
+        SELECT c.public_id, c.last_message_at
+        FROM "conversations" c
+        INNER JOIN "conversation_participants" cp_me
+          ON cp_me.conversation_id = c.id
+          AND cp_me.user_id = ${params.actorUserId}::uuid
+          AND cp_me.inbox_state = 'primary'
+        INNER JOIN "conversation_participants" cp_peer
+          ON cp_peer.conversation_id = c.id
+          AND cp_peer.user_id = u.id
+          AND cp_peer.inbox_state = 'primary'
+        WHERE c.type = 'direct'
+          AND c.last_seq > 0
+        LIMIT 1
+      ) conv ON TRUE
+      WHERE u.id <> ${params.actorUserId}::uuid
+        AND u.status = 'active'
+        AND u.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM "blocks" b
+          WHERE (b.blocker_id = ${params.actorUserId}::uuid AND b.blocked_id = u.id)
+             OR (b.blocker_id = u.id AND b.blocked_id = ${params.actorUserId}::uuid)
+        )
+        AND (
+          conv.public_id IS NOT NULL
+          OR (
+            EXISTS (
+              SELECT 1 FROM "follows" f1
+              WHERE f1.follower_id = ${params.actorUserId}::uuid
+                AND f1.followee_id = u.id
+                AND f1.status = 'following'
+            )
+            AND EXISTS (
+              SELECT 1 FROM "follows" f2
+              WHERE f2.follower_id = u.id
+                AND f2.followee_id = ${params.actorUserId}::uuid
+                AND f2.status = 'following'
+            )
+          )
+        )
+        ${queryFilter}
+      ORDER BY
+        CASE WHEN conv.public_id IS NOT NULL THEN 0 ELSE 1 END ASC,
+        conv.last_message_at DESC NULLS LAST,
+        u.full_name ASC
+      LIMIT ${params.limit}
+    `);
+
+    const rows = result.rows as Array<{
+      readonly publicId: string;
+      readonly handle: string;
+      readonly fullName: string;
+      readonly avatarUrl: string | null;
+      readonly isPrivate: boolean;
+      readonly conversationPublicId: string | null;
+      readonly lastMessageAt: Date | string | null;
+    }>;
+
+    return rows.map((r) => ({
+      publicId: r.publicId,
+      handle: r.handle,
+      fullName: r.fullName,
+      avatarUrl: r.avatarUrl,
+      isPrivate: Boolean(r.isPrivate),
+      conversationPublicId: r.conversationPublicId ?? null,
+      lastMessageAt:
+        r.lastMessageAt instanceof Date
+          ? r.lastMessageAt
+          : typeof r.lastMessageAt === 'string'
+            ? new Date(r.lastMessageAt)
+            : null,
+    }));
   }
 }

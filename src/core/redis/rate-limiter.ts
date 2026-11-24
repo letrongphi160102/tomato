@@ -348,6 +348,31 @@ export const CHAT_RATE_LIMITS = Object.freeze({
     windowSeconds: 60 * 60,
     strategy: 'sliding_window',
   }),
+  reactMessageByUser: Object.freeze({
+    limit: 120,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  pinMessageByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  listPinsByUser: Object.freeze({
+    limit: 120,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  updateConversationPreferencesByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+  listForwardTargetsByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
 } satisfies Record<string, RateLimitRule>);
 
 /**

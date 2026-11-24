@@ -3,6 +3,7 @@ import {
   E2eeCryptoError,
   type DecryptedDirectMessagePayload,
   type DecryptedMessageMediaPayload,
+  type DecryptedMessageReplyPayload,
   type E2eeDeviceKeyPairMaterial,
   type E2eePublicJwk,
   type E2eeTargetDevicePublicKey,
@@ -86,12 +87,60 @@ async function deriveWrappingAesKey(params: {
   );
 }
 
+export const MAX_REPLY_EXCERPT_LENGTH = 140;
+
+const REPLY_UUID_V4_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BIDI_AND_CONTROL_REGEX =
+  /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g;
+
+export function sanitizeReplyTextExcerpt(raw: string): string {
+  const cleaned = sanitizeChatPlaintext(raw)
+    .replace(BIDI_AND_CONTROL_REGEX, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const codePoints = Array.from(cleaned);
+  if (codePoints.length <= MAX_REPLY_EXCERPT_LENGTH) {
+    return cleaned;
+  }
+  return codePoints.slice(0, MAX_REPLY_EXCERPT_LENGTH).join('');
+}
+
+export function sanitizeDecryptedMessageReplyPayload(
+  raw: unknown,
+): DecryptedMessageReplyPayload | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
+  }
+  const candidate = raw as Partial<DecryptedMessageReplyPayload>;
+  if (
+    typeof candidate.messagePublicId !== 'string' ||
+    !REPLY_UUID_V4_REGEX.test(candidate.messagePublicId.trim()) ||
+    typeof candidate.senderPublicId !== 'string' ||
+    !REPLY_UUID_V4_REGEX.test(candidate.senderPublicId.trim()) ||
+    (candidate.messageType !== 'text' &&
+      candidate.messageType !== 'image' &&
+      candidate.messageType !== 'voice') ||
+    typeof candidate.textExcerpt !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    messagePublicId: candidate.messagePublicId.trim().toLowerCase(),
+    senderPublicId: candidate.senderPublicId.trim().toLowerCase(),
+    messageType: candidate.messageType,
+    textExcerpt: sanitizeReplyTextExcerpt(candidate.textExcerpt),
+  };
+}
+
 export interface EncryptDirectMessageParams {
   readonly conversationPublicId: string;
   readonly senderPublicId: string;
   readonly clientMsgId: string;
   readonly plaintext: string;
   readonly media?: DecryptedMessageMediaPayload;
+  readonly replyTo?: DecryptedMessageReplyPayload;
+  readonly forwarded?: boolean;
   readonly senderDevice: E2eeDeviceKeyPairMaterial;
   readonly recipientDevices: readonly E2eeTargetDevicePublicKey[];
   readonly senderOtherDevices?: readonly E2eeTargetDevicePublicKey[];
@@ -143,11 +192,20 @@ export async function encryptDirectMessage(
     throw new E2eeCryptoError('MEDIA_INVALID_TYPE', 'Thông tin tệp đính kèm không hợp lệ.');
   }
 
+  const sanitizedReplyTo = params.replyTo
+    ? sanitizeDecryptedMessageReplyPayload(params.replyTo)
+    : undefined;
+  if (params.replyTo && !sanitizedReplyTo) {
+    throw new E2eeCryptoError('INVALID_KEY_FORMAT', 'Thông tin trích dẫn trả lời không hợp lệ.');
+  }
+
   const payloadObject: DecryptedDirectMessagePayload = {
     v: 1,
     text: cleanText,
     sentAt,
     ...(sanitizedMedia ? { media: sanitizedMedia } : {}),
+    ...(sanitizedReplyTo ? { replyTo: sanitizedReplyTo } : {}),
+    ...(params.forwarded ? { forwarded: true } : {}),
   };
   const plaintextBytes = utf8ToBytes(JSON.stringify(payloadObject));
 
@@ -519,12 +577,18 @@ export async function decryptDirectMessage(
 
       const sanitizedMedia =
         parsed.media !== undefined ? sanitizeDecryptedMessageMediaPayload(parsed.media) : undefined;
+      const sanitizedReplyTo =
+        parsed.replyTo !== undefined
+          ? sanitizeDecryptedMessageReplyPayload(parsed.replyTo)
+          : undefined;
 
       return {
         v: 1,
         text: sanitizeChatPlaintext(parsed.text),
         sentAt: typeof parsed.sentAt === 'string' ? parsed.sentAt : new Date().toISOString(),
         ...(sanitizedMedia ? { media: sanitizedMedia } : {}),
+        ...(sanitizedReplyTo ? { replyTo: sanitizedReplyTo } : {}),
+        ...(parsed.forwarded === true ? { forwarded: true } : {}),
       };
     } catch (error) {
       lastDecryptError = error;

@@ -2,7 +2,20 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { Ban, Check, Copy, ExternalLink, Lock, ShieldCheck, Trash2, X } from 'lucide-react';
+import {
+  Ban,
+  Bell,
+  BellOff,
+  Check,
+  Copy,
+  ExternalLink,
+  Lock,
+  Pin,
+  PinOff,
+  ShieldCheck,
+  Trash2,
+  X,
+} from 'lucide-react';
 
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { Button } from '@/components/ui/button';
@@ -15,6 +28,13 @@ export interface ChatInfoDrawerProps {
   readonly currentUserKeyFingerprints: readonly string[];
   readonly peer: ChatPeerUserDto;
   readonly peerKeyFingerprints: readonly string[];
+  readonly pinnedCount?: number;
+  readonly isPinned?: boolean;
+  readonly isMuted?: boolean;
+  readonly canPin?: boolean;
+  readonly onOpenPinnedMessages?: () => void;
+  readonly onTogglePin?: () => void;
+  readonly onToggleMute?: () => void;
   readonly onClose: () => void;
   readonly onRequestDeleteConversation: () => void;
   readonly onRequestBlockPeer: () => void;
@@ -26,6 +46,13 @@ export function ChatInfoDrawer({
   currentUserKeyFingerprints,
   peer,
   peerKeyFingerprints,
+  pinnedCount = 0,
+  isPinned = false,
+  isMuted = false,
+  canPin = false,
+  onOpenPinnedMessages,
+  onTogglePin,
+  onToggleMute,
   onClose,
   onRequestDeleteConversation,
   onRequestBlockPeer,
@@ -166,6 +193,65 @@ export function ChatInfoDrawer({
         </div>
 
         <div className="space-y-1 border-t pt-4">
+          {onOpenPinnedMessages ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onOpenPinnedMessages}
+              className="w-full justify-between text-foreground"
+            >
+              <span className="inline-flex items-center gap-2.5">
+                <Pin className="size-4 text-muted-foreground" aria-hidden="true" />
+                <span>Tin nhắn đã ghim</span>
+              </span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                {pinnedCount}/5
+              </span>
+            </Button>
+          ) : null}
+
+          {canPin && onTogglePin ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onTogglePin}
+              className="w-full justify-start gap-2.5 text-foreground"
+            >
+              {isPinned ? (
+                <>
+                  <PinOff className="size-4 text-muted-foreground" aria-hidden="true" />
+                  <span>Bỏ ghim đoạn chat</span>
+                </>
+              ) : (
+                <>
+                  <Pin className="size-4 text-muted-foreground" aria-hidden="true" />
+                  <span>Ghim đoạn chat</span>
+                </>
+              )}
+            </Button>
+          ) : null}
+
+          {onToggleMute ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onToggleMute}
+              className="w-full justify-start gap-2.5 text-foreground"
+            >
+              {isMuted ? (
+                <>
+                  <Bell className="size-4 text-muted-foreground" aria-hidden="true" />
+                  <span>Bật thông báo</span>
+                </>
+              ) : (
+                <>
+                  <BellOff className="size-4 text-muted-foreground" aria-hidden="true" />
+                  <span>Tắt thông báo</span>
+                </>
+              )}
+            </Button>
+          ) : null}
+
           <Button
             type="button"
             variant="ghost"

@@ -26,12 +26,17 @@ export type ChatAction =
   | 'chat:conversation:accept'
   | 'chat:conversation:decline'
   | 'chat:conversation:delete'
+  | 'chat:conversation:preferences:update'
+  | 'chat:conversation:pins:list'
+  | 'chat:forward:targets:list'
   | 'chat:message:list'
   | 'chat:message:read'
   | 'chat:message:send'
   | 'chat:message:edit'
   | 'chat:message:recall'
   | 'chat:message:delete_for_me'
+  | 'chat:message:react'
+  | 'chat:message:pin'
   | 'chat:attachment:upload'
   | 'chat:attachment:read';
 
@@ -91,7 +96,8 @@ export function authorizeChatAction(
     case 'e2ee:backup:read':
     case 'e2ee:backup:write':
     case 'e2ee:backup:reset':
-    case 'chat:conversation:list': {
+    case 'chat:conversation:list':
+    case 'chat:forward:targets:list': {
       return true;
     }
 
@@ -125,12 +131,16 @@ export function authorizeChatAction(
     case 'chat:conversation:accept':
     case 'chat:conversation:decline':
     case 'chat:conversation:delete':
+    case 'chat:conversation:preferences:update':
+    case 'chat:conversation:pins:list':
     case 'chat:message:list':
     case 'chat:message:read':
     case 'chat:message:send':
     case 'chat:message:edit':
     case 'chat:message:recall':
     case 'chat:message:delete_for_me':
+    case 'chat:message:react':
+    case 'chat:message:pin':
     case 'chat:attachment:upload':
     case 'chat:attachment:read': {
       const conv = resource.conversation;

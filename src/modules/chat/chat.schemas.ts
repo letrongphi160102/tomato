@@ -3,11 +3,16 @@ import 'server-only';
 import '@/core/validation/zod-config';
 import { z } from 'zod';
 
+import { MAX_REACTION_EMOJI_LENGTH, normalizeAndValidateSingleEmoji } from '@/lib/chat/emoji';
+
 export const MAX_ACTIVE_E2EE_DEVICES_PER_USER = 10;
 export const MAX_WRAPPED_KEYS_PER_MESSAGE = 20;
 export const MAX_MESSAGE_CIPHERTEXT_LENGTH = 32_768;
 export const MAX_PENDING_MESSAGES_BEFORE_ACCEPT = 3;
 export const MAX_MESSAGE_EDIT_COUNT = 5;
+export const MAX_PINNED_MESSAGES_PER_CONVERSATION = 5;
+export const MAX_PINNED_CONVERSATIONS_PER_USER = 3;
+export const MAX_FORWARD_RECIPIENTS_PER_ACTION = 5;
 export const MESSAGE_EDIT_WINDOW_MS = 5 * 60 * 1000;
 export const MESSAGE_RECALL_WINDOW_MS = 5 * 60 * 1000;
 export const MIN_PIN_BACKUP_PBKDF2_ITERATIONS = 600_000;
@@ -147,6 +152,7 @@ export const confirmPinResetInputSchema = z
 export const createDirectConversationInputSchema = z
   .object({
     recipientPublicId: chatPublicIdParamSchema,
+    purpose: z.enum(['default', 'forward']).optional(),
   })
   .strict();
 
@@ -249,6 +255,8 @@ export const sendMessageInputSchema = z
       .regex(BASE64URL_REGEX, 'Bản mã tin nhắn không hợp lệ.'),
     cryptoHeader: messageCryptoHeaderSchema,
     attachmentPublicId: chatPublicIdParamSchema.optional(),
+    replyToMessagePublicId: chatPublicIdParamSchema.optional(),
+    isForwarded: z.boolean().optional(),
   })
   .strict()
   .superRefine((data, ctx) => {
@@ -263,6 +271,13 @@ export const sendMessageInputSchema = z
         message: 'Tin nhắn văn bản không được kèm mã tệp đính kèm.',
       });
     }
+    if (data.isForwarded === true && data.replyToMessagePublicId !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['replyToMessagePublicId'],
+        message: 'Tin nhắn chuyển tiếp không thể đồng thời đính kèm trích dẫn trả lời.',
+      });
+    }
   });
 
 export const editMessageInputSchema = z
@@ -274,6 +289,51 @@ export const editMessageInputSchema = z
       .max(MAX_MESSAGE_CIPHERTEXT_LENGTH)
       .regex(BASE64URL_REGEX, 'Bản mã tin nhắn không hợp lệ.'),
     cryptoHeader: messageCryptoHeaderSchema,
+  })
+  .strict();
+
+export const upsertReactionInputSchema = z
+  .object({
+    emoji: z
+      .string()
+      .trim()
+      .min(1, 'Biểu tượng cảm xúc không được để trống.')
+      .max(MAX_REACTION_EMOJI_LENGTH, 'Biểu tượng cảm xúc không hợp lệ.')
+      .transform((val, ctx) => {
+        const normalized = normalizeAndValidateSingleEmoji(val);
+        if (!normalized) {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'Vui lòng chọn một biểu tượng cảm xúc hợp lệ.',
+          });
+          return z.NEVER;
+        }
+        return normalized;
+      }),
+  })
+  .strict();
+
+export const pinMessageInputSchema = z
+  .object({
+    unpinOldestHiddenIfFull: z.boolean().optional(),
+  })
+  .strict();
+
+export const updateConversationPreferencesInputSchema = z
+  .object({
+    pinned: z.boolean().optional(),
+    muted: z.boolean().optional(),
+  })
+  .strict()
+  .refine((data) => data.pinned !== undefined || data.muted !== undefined, {
+    message: 'Vui lòng cung cấp ít nhất một tùy chọn cần cập nhật.',
+    path: ['pinned'],
+  });
+
+export const listForwardTargetsQuerySchema = z
+  .object({
+    q: z.string().trim().max(64).optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(30),
   })
   .strict();
 

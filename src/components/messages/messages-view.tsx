@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ArrowLeft,
   Ban,
+  BellOff,
   Check,
   Info,
   KeyRound,
@@ -13,6 +14,7 @@ import {
   Lock,
   MessageCircle,
   PenSquare,
+  Pin,
   RotateCcw,
   Trash2,
 } from 'lucide-react';
@@ -25,11 +27,16 @@ import {
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
 import { ConversationActionsMenu } from '@/components/messages/conversation-actions-menu';
+import { ForwardMessageModal } from '@/components/messages/forward-message-modal';
 import {
   ImageLightboxModal,
   type ImageLightboxTarget,
 } from '@/components/messages/image-lightbox-modal';
-import { canRecallMessage, MAX_MESSAGE_EDIT_COUNT } from '@/components/messages/message-actions';
+import {
+  buildReplyPayloadFromMessage,
+  canRecallMessage,
+  MAX_MESSAGE_EDIT_COUNT,
+} from '@/components/messages/message-actions';
 import { MessageBubbleRow } from '@/components/messages/message-bubble-row';
 import {
   buildClusteredMessageEntries,
@@ -38,6 +45,7 @@ import {
 } from '@/components/messages/message-grouping';
 import { NewMessageModal } from '@/components/messages/new-message-modal';
 import { PinBackupModal, type PinBackupModalMode } from '@/components/messages/pin-backup-modal';
+import { PinnedMessagesBar } from '@/components/messages/pinned-messages-bar';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
@@ -69,7 +77,9 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const [draftText, setDraftText] = React.useState('');
   const [editDraftText, setEditDraftText] = React.useState('');
   const [chatError, setChatError] = React.useState<string | null>(null);
+  const [chatNotice, setChatNotice] = React.useState<string | null>(null);
   const [infoDrawerOpen, setInfoDrawerOpen] = React.useState(false);
+  const [pinnedListOpen, setPinnedListOpen] = React.useState(false);
   const [newMessageModalOpen, setNewMessageModalOpen] = React.useState(false);
   const [pinModalMode, setPinModalMode] = React.useState<PinBackupModalMode | null>(null);
   const [confirmBlockOpen, setConfirmBlockOpen] = React.useState(false);
@@ -77,6 +87,19 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     React.useState<ConversationSummaryDto | null>(null);
   const [confirmRecallTarget, setConfirmRecallTarget] =
     React.useState<DecryptedMessageViewItem | null>(null);
+  const [confirmReplaceHiddenPinTarget, setConfirmReplaceHiddenPinTarget] = React.useState<{
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+    readonly hiddenPinnedCount: number;
+  } | null>(null);
+  const [forwardSourceMessage, setForwardSourceMessage] =
+    React.useState<DecryptedMessageViewItem | null>(null);
+  const [replyingTarget, setReplyingTarget] = React.useState<{
+    readonly conversationPublicId: string;
+    readonly messagePublicId: string;
+    readonly clientMsgId: string;
+  } | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = React.useState<string | null>(null);
   const [dialogError, setDialogError] = React.useState<string | null>(null);
   const [editingTarget, setEditingTarget] = React.useState<{
     readonly conversationPublicId: string;
@@ -94,6 +117,8 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
 
   const messagesContainerRef = React.useRef<HTMLDivElement | null>(null);
   const composerInputRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const noticeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const highlightTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const handledToParamRef = React.useRef<string | null>(null);
   const handledConvParamRef = React.useRef<string | null>(null);
   const isNearBottomRef = React.useRef(true);
@@ -129,6 +154,10 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const activeThread =
     selectedConversation && chatStore
       ? chatStore.getThreadState(selectedConversation.public_id)
+      : null;
+  const activePinnedState =
+    selectedConversation && chatStore
+      ? chatStore.getPinnedState(selectedConversation.public_id)
       : null;
   const messages = activeThread?.items ?? EMPTY_MESSAGES;
   const loadingInitialMessages =
@@ -258,6 +287,46 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     return latestMatch;
   }, [editingTarget, messages, selectedConversation]);
 
+  const replyingMessage = React.useMemo<DecryptedMessageViewItem | null>(() => {
+    if (!replyingTarget || !selectedConversation || editingMessage) {
+      return null;
+    }
+    if (replyingTarget.conversationPublicId !== selectedConversation.public_id) {
+      return null;
+    }
+    const latestMatch = messages.find(
+      (m) =>
+        m.dto.public_id === replyingTarget.messagePublicId ||
+        m.dto.clientMsgId === replyingTarget.clientMsgId,
+    );
+    if (!latestMatch || latestMatch.dto.recalledAt !== null || latestMatch.decryptionFailed) {
+      return null;
+    }
+    return latestMatch;
+  }, [editingMessage, messages, replyingTarget, selectedConversation]);
+
+  React.useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current !== null) {
+        clearTimeout(noticeTimerRef.current);
+      }
+      if (highlightTimerRef.current !== null) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showTransientNotice = React.useCallback((message: string) => {
+    if (noticeTimerRef.current !== null) {
+      clearTimeout(noticeTimerRef.current);
+    }
+    setChatNotice(message);
+    noticeTimerRef.current = setTimeout(() => {
+      setChatNotice(null);
+      noticeTimerRef.current = null;
+    }, 3000);
+  }, []);
+
   // Nhịp cập nhật đồng hồ nhẹ (10 giây/lần) CHỈ khi đang có tin nhắn của mình nằm trong cửa sổ 5 phút
   // để tự động ẩn 2 nút "Chỉnh sửa" và "Thu hồi" đúng thời điểm.
   const hasOwnRecentMessage = React.useMemo(
@@ -352,6 +421,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       return;
     }
     setChatError(null);
+    setReplyingTarget(null);
     setEditingTarget({
       conversationPublicId: selectedConversation.public_id,
       messagePublicId: item.dto.public_id,
@@ -362,6 +432,185 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     setTimeout(() => {
       composerInputRef.current?.focus();
     }, 0);
+  }
+
+  function handleStartReplyMessage(item: DecryptedMessageViewItem) {
+    if (!selectedConversation) {
+      return;
+    }
+    setChatError(null);
+    setEditingTarget(null);
+    setEditDraftText('');
+    setReplyingTarget({
+      conversationPublicId: selectedConversation.public_id,
+      messagePublicId: item.dto.public_id,
+      clientMsgId: item.dto.clientMsgId,
+    });
+    setTapSelectedMsg(null);
+    setTimeout(() => {
+      composerInputRef.current?.focus();
+    }, 0);
+  }
+
+  async function handleReactToMessage(item: DecryptedMessageViewItem, emoji: string | null) {
+    if (!selectedConversation || !chatStore) {
+      return;
+    }
+    setChatError(null);
+    try {
+      await chatStore.reactToMessage({
+        conversationPublicId: selectedConversation.public_id,
+        messagePublicId: item.dto.public_id,
+        emoji,
+      });
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : 'Không thể thả cảm xúc lúc này.');
+    }
+  }
+
+  async function handleCopyMessage(item: DecryptedMessageViewItem) {
+    try {
+      await navigator.clipboard.writeText(item.plaintext);
+      showTransientNotice('Đã sao chép tin nhắn');
+    } catch {
+      setChatError('Trình duyệt không cho phép sao chép vào bộ nhớ tạm.');
+    }
+  }
+
+  async function handleTogglePinMessage(item: DecryptedMessageViewItem) {
+    if (!selectedConversation || !chatStore) {
+      return;
+    }
+    setChatError(null);
+    try {
+      if (item.dto.isPinned) {
+        await chatStore.unpinMessage({
+          conversationPublicId: selectedConversation.public_id,
+          messagePublicId: item.dto.public_id,
+        });
+        showTransientNotice('Đã gỡ ghim tin nhắn');
+        return;
+      }
+
+      const outcome = await chatStore.pinMessage({
+        conversationPublicId: selectedConversation.public_id,
+        messagePublicId: item.dto.public_id,
+      });
+      if (outcome.ok) {
+        showTransientNotice('Đã ghim tin nhắn');
+        return;
+      }
+
+      if (outcome.limitReached && outcome.hiddenPinnedCount > 0) {
+        setDialogError(null);
+        setConfirmReplaceHiddenPinTarget({
+          conversationPublicId: selectedConversation.public_id,
+          messagePublicId: item.dto.public_id,
+          hiddenPinnedCount: outcome.hiddenPinnedCount,
+        });
+        return;
+      }
+
+      setChatError(outcome.message);
+      if (outcome.limitReached) {
+        setPinnedListOpen(true);
+      }
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : 'Không thể cập nhật ghim tin nhắn.');
+    }
+  }
+
+  async function handleConfirmReplaceHiddenPin() {
+    if (!confirmReplaceHiddenPinTarget || !chatStore || actionBusy) {
+      return;
+    }
+    setActionBusy(true);
+    setDialogError(null);
+    try {
+      const outcome = await chatStore.pinMessage({
+        conversationPublicId: confirmReplaceHiddenPinTarget.conversationPublicId,
+        messagePublicId: confirmReplaceHiddenPinTarget.messagePublicId,
+        unpinOldestHiddenIfFull: true,
+      });
+      if (outcome.ok) {
+        setConfirmReplaceHiddenPinTarget(null);
+        showTransientNotice('Đã gỡ ghim tin cũ và ghim tin nhắn mới');
+      } else {
+        setDialogError(outcome.message);
+      }
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleToggleConversationPin(conv: ConversationSummaryDto) {
+    if (!chatStore) {
+      return;
+    }
+    setChatError(null);
+    try {
+      const nextPinned = !conv.myState.isPinned;
+      await chatStore.updateConversationPreferences({
+        conversationPublicId: conv.public_id,
+        pinned: nextPinned,
+      });
+      showTransientNotice(nextPinned ? 'Đã ghim đoạn chat' : 'Đã bỏ ghim đoạn chat');
+    } catch (error) {
+      setChatError(
+        error instanceof Error ? error.message : 'Không thể cập nhật ghim đoạn chat lúc này.',
+      );
+    }
+  }
+
+  async function handleToggleConversationMute(conv: ConversationSummaryDto) {
+    if (!chatStore) {
+      return;
+    }
+    setChatError(null);
+    try {
+      const nextMuted = !conv.myState.isMuted;
+      await chatStore.updateConversationPreferences({
+        conversationPublicId: conv.public_id,
+        muted: nextMuted,
+      });
+      showTransientNotice(nextMuted ? 'Đã tắt thông báo đoạn chat' : 'Đã bật thông báo đoạn chat');
+    } catch (error) {
+      setChatError(
+        error instanceof Error ? error.message : 'Không thể cập nhật thông báo đoạn chat lúc này.',
+      );
+    }
+  }
+
+  async function handleJumpToMessage(targetMessagePublicId: string) {
+    if (!selectedConversation || !chatStore) {
+      return;
+    }
+    const result = await chatStore.jumpToMessageInConversation(
+      selectedConversation.public_id,
+      targetMessagePublicId,
+    );
+    if (result.status !== 'found') {
+      showTransientNotice(result.notice);
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      const container = messagesContainerRef.current;
+      const targetEl = container?.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(targetMessagePublicId)}"]`,
+      );
+      if (targetEl) {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setHighlightedMessageId(targetMessagePublicId);
+        if (highlightTimerRef.current !== null) {
+          clearTimeout(highlightTimerRef.current);
+        }
+        highlightTimerRef.current = setTimeout(() => {
+          setHighlightedMessageId(null);
+          highlightTimerRef.current = null;
+        }, 2000);
+      }
+    });
   }
 
   function handleCancelEditMessage() {
@@ -492,13 +741,16 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     }
 
     setChatError(null);
+    const replyPayload = replyingMessage ? buildReplyPayloadFromMessage(replyingMessage) : null;
     setDraftText('');
+    setReplyingTarget(null);
     isNearBottomRef.current = true;
 
     try {
       await chatStore.sendOptimisticTextMessage({
         conversation: selectedConversation,
         plaintext: trimmed,
+        replyTo: replyPayload,
       });
     } catch (error) {
       setChatError(error instanceof Error ? error.message : 'Không thể gửi tin nhắn lúc này.');
@@ -717,6 +969,25 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
             </div>
           ) : null}
 
+          {!selectedConversation && chatNotice ? (
+            <p
+              role="status"
+              aria-live="polite"
+              className="border-b bg-muted/40 px-4 py-1.5 text-xs font-medium text-foreground"
+            >
+              {chatNotice}
+            </p>
+          ) : null}
+
+          {!selectedConversation && chatError ? (
+            <p
+              role="alert"
+              className="border-b bg-destructive/5 px-4 py-2 text-xs font-medium text-destructive"
+            >
+              {chatError}
+            </p>
+          ) : null}
+
           <div className="flex-1 overflow-y-auto">
             {loadingConversations ? (
               <div className="flex items-center justify-center gap-2 py-14 text-sm text-muted-foreground">
@@ -795,14 +1066,28 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
 
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
-                            <p
-                              className={cn(
-                                'truncate text-sm text-foreground',
-                                isUnread ? 'font-bold' : 'font-medium',
-                              )}
-                            >
-                              {conv.peer.fullName}
-                            </p>
+                            <div className="flex min-w-0 items-center gap-1">
+                              <p
+                                className={cn(
+                                  'truncate text-sm text-foreground',
+                                  isUnread ? 'font-bold' : 'font-medium',
+                                )}
+                              >
+                                {conv.peer.fullName}
+                              </p>
+                              {conv.myState.isPinned ? (
+                                <Pin
+                                  aria-label="Đoạn chat đã ghim"
+                                  className="size-3 shrink-0 text-primary"
+                                />
+                              ) : null}
+                              {conv.myState.isMuted ? (
+                                <BellOff
+                                  aria-label="Đã tắt thông báo"
+                                  className="size-3 shrink-0 text-muted-foreground"
+                                />
+                              ) : null}
+                            </div>
                             <span
                               className={cn(
                                 'shrink-0 text-[11px]',
@@ -829,7 +1114,10 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         {isUnread ? (
                           <span
                             aria-label="Tin nhắn chưa đọc"
-                            className="size-2.5 shrink-0 rounded-full bg-primary"
+                            className={cn(
+                              'size-2.5 shrink-0 rounded-full',
+                              conv.myState.isMuted ? 'bg-muted-foreground/45' : 'bg-primary',
+                            )}
                           />
                         ) : null}
                       </button>
@@ -837,6 +1125,12 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                       <div className="pr-2">
                         <ConversationActionsMenu
                           peerFullName={conv.peer.fullName}
+                          isPinned={Boolean(conv.myState.isPinned)}
+                          isMuted={Boolean(conv.myState.isMuted)}
+                          canPin={conv.myState.inboxState === 'primary'}
+                          showDelete
+                          onTogglePin={() => void handleToggleConversationPin(conv)}
+                          onToggleMute={() => void handleToggleConversationMute(conv)}
                           onRequestDeleteConversation={() => {
                             setDialogError(null);
                             setConfirmDeleteConvTarget(conv);
@@ -945,6 +1239,30 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                   </div>
                 </header>
 
+                {/* Thanh tin nhắn đã ghim thu gọn (tối đa 5 tin) */}
+                {!isViewingPendingRequest && !selectedConversation.isAwaitingPeerAcceptance ? (
+                  <PinnedMessagesBar
+                    pinnedState={activePinnedState}
+                    peer={selectedConversation.peer}
+                    needsPinRestore={needsPinRestore}
+                    listOpen={pinnedListOpen}
+                    onOpenList={() => setPinnedListOpen(true)}
+                    onCloseList={() => setPinnedListOpen(false)}
+                    onJumpToMessage={(msgId) => void handleJumpToMessage(msgId)}
+                    onUnpinMessage={async (msgId) => {
+                      if (!chatStore) {
+                        return;
+                      }
+                      await chatStore.unpinMessage({
+                        conversationPublicId: selectedConversation.public_id,
+                        messagePublicId: msgId,
+                      });
+                      showTransientNotice('Đã gỡ ghim tin nhắn');
+                    }}
+                    onRequestPinRestore={() => setPinModalMode('restore')}
+                  />
+                ) : null}
+
                 {/* Lịch sử tin nhắn (Cuộn lên để tải thêm + Gom cụm bong bóng + Tooltip giờ) */}
                 <div
                   ref={messagesContainerRef}
@@ -1036,9 +1354,12 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                           entry={entry}
                           index={idx}
                           peer={selectedConversation.peer}
+                          currentUserPublicId={currentUserPublicId}
+                          conversation={selectedConversation}
                           variant="full"
                           nowMs={nowMs}
                           isBeingEdited={editingMessage?.dto.public_id === entry.item.dto.public_id}
+                          isHighlighted={highlightedMessageId === entry.item.dto.public_id}
                           isTapSelected={
                             tapSelectedMsg?.conversationPublicId ===
                               selectedConversation.public_id &&
@@ -1055,6 +1376,12 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                                   },
                             )
                           }
+                          onReact={(item, emoji) => void handleReactToMessage(item, emoji)}
+                          onReply={handleStartReplyMessage}
+                          onForward={(item) => setForwardSourceMessage(item)}
+                          onCopy={(item) => void handleCopyMessage(item)}
+                          onTogglePin={(item) => void handleTogglePinMessage(item)}
+                          onJumpToMessage={(targetMsgId) => void handleJumpToMessage(targetMsgId)}
                           onStartEdit={handleStartEditMessage}
                           onRequestRecall={(item) => {
                             setDialogError(null);
@@ -1070,6 +1397,16 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                     </div>
                   )}
                 </div>
+
+                {chatNotice ? (
+                  <p
+                    role="status"
+                    aria-live="polite"
+                    className="border-t bg-muted/40 px-4 py-1.5 text-xs font-medium text-foreground"
+                  >
+                    {chatNotice}
+                  </p>
+                ) : null}
 
                 {chatError ? (
                   <p
@@ -1155,25 +1492,50 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         editDraftText={editDraftText}
                         editingOriginalText={editingMessage?.plaintext ?? null}
                         editSaving={editSaving}
+                        replyingTo={
+                          replyingMessage
+                            ? {
+                                recipientLabel: replyingMessage.dto.isOwnMessage
+                                  ? 'chính mình'
+                                  : selectedConversation.peer.fullName,
+                                previewText:
+                                  replyingMessage.dto.messageType === 'image'
+                                    ? 'Hình ảnh'
+                                    : replyingMessage.dto.messageType === 'voice'
+                                      ? 'Tin nhắn thoại'
+                                      : replyingMessage.plaintext,
+                              }
+                            : null
+                        }
                         composerInputRef={composerInputRef}
                         onChangeDraftText={setDraftText}
                         onChangeEditDraftText={setEditDraftText}
                         onCancelEdit={handleCancelEditMessage}
+                        onCancelReply={() => setReplyingTarget(null)}
                         onSubmitTextOrEdit={handleSendMessage}
                         onSendImageFile={async (file) => {
                           if (!chatStore) {
                             return;
                           }
+                          const replyPayload = replyingMessage
+                            ? buildReplyPayloadFromMessage(replyingMessage)
+                            : null;
+                          setReplyingTarget(null);
                           isNearBottomRef.current = true;
                           await chatStore.sendOptimisticImageMessage({
                             conversation: selectedConversation,
                             file,
+                            replyTo: replyPayload,
                           });
                         }}
                         onSendVoice={async (recorded) => {
                           if (!chatStore) {
                             return;
                           }
+                          const replyPayload = replyingMessage
+                            ? buildReplyPayloadFromMessage(replyingMessage)
+                            : null;
+                          setReplyingTarget(null);
                           isNearBottomRef.current = true;
                           await chatStore.sendOptimisticVoiceMessage({
                             conversation: selectedConversation,
@@ -1181,6 +1543,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                             mimeType: recorded.mimeType,
                             durationMs: recorded.durationMs,
                             waveform: recorded.waveform,
+                            replyTo: replyPayload,
                           });
                         }}
                         onError={setChatError}
@@ -1198,6 +1561,17 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                 }
                 peer={selectedConversation.peer}
                 peerKeyFingerprints={peerKeyBundle?.devices.map((d) => d.keyFingerprint) ?? []}
+                pinnedCount={activePinnedState?.totalPinnedCount ?? 0}
+                isPinned={Boolean(selectedConversation.myState.isPinned)}
+                isMuted={Boolean(selectedConversation.myState.isMuted)}
+                canPin={selectedConversation.myState.inboxState === 'primary'}
+                onOpenPinnedMessages={
+                  !isViewingPendingRequest && !selectedConversation.isAwaitingPeerAcceptance
+                    ? () => setPinnedListOpen(true)
+                    : undefined
+                }
+                onTogglePin={() => void handleToggleConversationPin(selectedConversation)}
+                onToggleMute={() => void handleToggleConversationMute(selectedConversation)}
                 onClose={() => setInfoDrawerOpen(false)}
                 onRequestDeleteConversation={() => {
                   setDialogError(null);
@@ -1289,6 +1663,46 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
           }
         }}
         onConfirm={() => void handleConfirmDeleteConversation()}
+      />
+
+      <ConfirmDialog
+        open={confirmReplaceHiddenPinTarget !== null}
+        title="Danh sách tin nhắn đã ghim đã đầy"
+        description={`Cuộc trò chuyện đang có tối đa 5 tin nhắn được ghim (bao gồm ${confirmReplaceHiddenPinTarget?.hiddenPinnedCount ?? 1} tin cũ không còn hiển thị ở phía bạn). Bạn có muốn gỡ ghim tin cũ nhất để ghim tin nhắn này không?`}
+        confirmLabel="Gỡ tin cũ và ghim"
+        loading={actionBusy}
+        errorMessage={confirmReplaceHiddenPinTarget ? dialogError : null}
+        onClose={() => {
+          if (!actionBusy) {
+            setConfirmReplaceHiddenPinTarget(null);
+            setDialogError(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmReplaceHiddenPin()}
+      />
+
+      <ForwardMessageModal
+        key={forwardSourceMessage?.dto.public_id ?? 'forward-closed'}
+        open={forwardSourceMessage !== null}
+        sourceMessage={forwardSourceMessage}
+        onClose={() => setForwardSourceMessage(null)}
+        onConfirmForward={async (sourceMessage, recipients) => {
+          if (!chatStore) {
+            return { succeeded: [], failed: [] };
+          }
+          const result = await chatStore.forwardMessageToRecipients({
+            sourceMessage,
+            recipients,
+          });
+          if (result.succeeded.length > 0 && result.failed.length === 0) {
+            showTransientNotice(
+              result.succeeded.length === 1
+                ? `Đã chuyển tiếp tới ${result.succeeded[0]!.target.fullName}`
+                : `Đã chuyển tiếp tới ${result.succeeded.length} người`,
+            );
+          }
+          return result;
+        }}
       />
 
       <ImageLightboxModal target={lightboxTarget} onClose={() => setLightboxTarget(null)} />

@@ -1,13 +1,16 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   check,
+  foreignKey,
   index,
   jsonb,
   pgTable,
   smallint,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   varchar,
@@ -63,12 +66,15 @@ export const messages = pgTable(
     cryptoHeader: jsonb('crypto_header').$type<MessageCryptoHeaderRecord>(),
     callEventMeta: jsonb('call_event_meta').$type<MessageCallEventMetaRecord>(),
     attachmentStorageKey: text('attachment_storage_key'),
+    replyToMessageId: uuid('reply_to_message_id'),
+    isForwarded: boolean('is_forwarded').notNull().default(false),
     editCount: smallint('edit_count').notNull().default(0),
     editedAt: timestamp('edited_at', { withTimezone: true }),
     recalledAt: timestamp('recalled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    unique('uq_messages_conversation_id_pair').on(table.conversationId, table.id),
     uniqueIndex('uq_messages_conversation_seq').on(table.conversationId, table.seq),
     uniqueIndex('uq_messages_conv_sender_client_msg').on(
       table.conversationId,
@@ -76,6 +82,14 @@ export const messages = pgTable(
       table.clientMsgId,
     ),
     index('idx_messages_conversation_seq_desc').on(table.conversationId, table.seq.desc()),
+    index('idx_messages_reply_to')
+      .on(table.conversationId, table.replyToMessageId)
+      .where(sql`${table.replyToMessageId} IS NOT NULL`),
+    foreignKey({
+      name: 'fk_messages_reply_to_message',
+      columns: [table.replyToMessageId],
+      foreignColumns: [table.id],
+    }).onDelete('set null'),
     check('chk_messages_seq_positive', sql`${table.seq} >= 1`),
     check('chk_messages_edit_count_non_negative', sql`${table.editCount} >= 0`),
     check('chk_messages_edit_count_max', sql`${table.editCount} <= 5`),

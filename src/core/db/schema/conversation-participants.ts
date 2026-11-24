@@ -28,6 +28,8 @@ export const conversationParticipants = pgTable(
     lastReadSeq: bigint('last_read_seq', { mode: 'number' }).notNull().default(0),
     clearedBeforeSeq: bigint('cleared_before_seq', { mode: 'number' }).notNull().default(0),
     hiddenAt: timestamp('hidden_at', { withTimezone: true }),
+    pinnedAt: timestamp('pinned_at', { withTimezone: true }),
+    mutedAt: timestamp('muted_at', { withTimezone: true }),
     joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -40,6 +42,9 @@ export const conversationParticipants = pgTable(
       table.inboxState,
       table.joinedAt.desc(),
     ),
+    index('idx_conv_participants_user_pinned')
+      .on(table.userId, table.pinnedAt.desc())
+      .where(sql`${table.pinnedAt} IS NOT NULL`),
     check(
       'chk_conv_participants_pending_messages_range',
       sql`${table.pendingMessagesSent} >= 0 AND ${table.pendingMessagesSent} <= 3`,

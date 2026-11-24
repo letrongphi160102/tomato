@@ -7,6 +7,8 @@ export * from './conversations';
 export * from './enums';
 export * from './follows';
 export * from './message-attachments';
+export * from './message-pins';
+export * from './message-reactions';
 export * from './message-user-deletions';
 export * from './messages';
 export * from './notifications';

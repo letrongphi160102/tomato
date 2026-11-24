@@ -1,4 +1,4 @@
-import type { DecryptedMessageMediaPayload } from '@/lib/e2ee/types';
+import type { DecryptedMessageMediaPayload, DecryptedMessageReplyPayload } from '@/lib/e2ee/types';
 import type { ChatMessageDto, ConversationSummaryDto } from '@/modules/chat';
 
 /** Các tin nhắn liên tiếp của cùng 1 người gửi cách nhau dưới 3 phút được gom vào cùng 1 cụm. */
@@ -13,6 +13,8 @@ export interface GroupableMessageItem {
   readonly dto: ChatMessageDto;
   readonly plaintext: string;
   readonly media?: DecryptedMessageMediaPayload;
+  readonly replyTo?: DecryptedMessageReplyPayload;
+  readonly forwarded?: boolean;
   readonly localPreviewUrl?: string;
   readonly decryptionFailed: boolean;
   readonly sending?: boolean;
@@ -171,6 +173,57 @@ export function isConversationUnread(conv: ConversationSummaryDto): boolean {
   return true;
 }
 
+/**
+ * Định dạng thời gian hiển thị đầu menu thao tác tin nhắn (`⋮`), ví dụ "23:28 T6".
+ */
+export function formatMessageMenuTimestampVi(isoTimestamp: string): string {
+  const parsedMs = Date.parse(isoTimestamp);
+  if (Number.isNaN(parsedMs)) {
+    return '';
+  }
+  const date = new Date(parsedMs);
+  const timePart = formatHHmm(date);
+  const dayNames = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'] as const;
+  return `${timePart} ${dayNames[date.getDay()] ?? ''}`.trim();
+}
+
+/**
+ * Kiểm tra cuộc trò chuyện chưa đọc để cộng vào huy hiệu đỏ toàn cục (loại trừ cuộc trò chuyện đã tắt thông báo).
+ */
+export function isConversationUnreadForBadge(conv: ConversationSummaryDto): boolean {
+  if (conv.myState.isMuted) {
+    return false;
+  }
+  return isConversationUnread(conv);
+}
+
+/**
+ * Sắp xếp danh sách hội thoại hộp thư Chính:
+ * - Các đoạn chat đã ghim luôn nổi lên trên cùng, sắp xếp theo `pinnedAt` mới nhất trước.
+ * - Các đoạn chat chưa ghim xếp theo thời điểm hoạt động gần nhất (`lastMessageAt ?? createdAt`) giảm dần.
+ */
+export function sortPrimaryConversationsWithPins(
+  items: readonly ConversationSummaryDto[],
+): ConversationSummaryDto[] {
+  return [...items].sort((a, b) => {
+    const aPinned = Boolean(a.myState.isPinned && a.myState.pinnedAt);
+    const bPinned = Boolean(b.myState.isPinned && b.myState.pinnedAt);
+    if (aPinned !== bPinned) {
+      return aPinned ? -1 : 1;
+    }
+    if (aPinned && bPinned) {
+      const aPinMs = Date.parse(a.myState.pinnedAt ?? '') || 0;
+      const bPinMs = Date.parse(b.myState.pinnedAt ?? '') || 0;
+      if (aPinMs !== bPinMs) {
+        return bPinMs - aPinMs;
+      }
+    }
+    const aTime = Date.parse(a.lastMessageAt ?? a.createdAt) || 0;
+    const bTime = Date.parse(b.lastMessageAt ?? b.createdAt) || 0;
+    return bTime - aTime;
+  });
+}
+
 function canClusterTogether(
   prev: GroupableMessageItem,
   curr: GroupableMessageItem,
@@ -180,6 +233,9 @@ function canClusterTogether(
     return false;
   }
   if (prev.dto.messageType === 'call_event' || curr.dto.messageType === 'call_event') {
+    return false;
+  }
+  if (curr.replyTo || curr.dto.replyToMeta) {
     return false;
   }
   if (prev.dto.senderPublicId !== curr.dto.senderPublicId) {

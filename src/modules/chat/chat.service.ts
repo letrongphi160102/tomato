@@ -11,6 +11,7 @@ import {
 import type {
   AttachmentMediaKind,
   ConversationInboxState,
+  ConversationParticipantRow,
   E2eeBackupKdfParamsRecord,
   E2eePublicJwkRecord,
   MessageAttachmentRow,
@@ -69,6 +70,8 @@ import {
   MAX_IMAGE_CIPHERTEXT_BYTES,
   MAX_MESSAGE_EDIT_COUNT,
   MAX_PENDING_MESSAGES_BEFORE_ACCEPT,
+  MAX_PINNED_CONVERSATIONS_PER_USER,
+  MAX_PINNED_MESSAGES_PER_CONVERSATION,
   MAX_VOICE_CIPHERTEXT_BYTES,
   MESSAGE_EDIT_WINDOW_MS,
   MESSAGE_RECALL_WINDOW_MS,
@@ -80,11 +83,15 @@ import {
   editMessageInputSchema,
   emptyStrictObjectSchema,
   listConversationsQuerySchema,
+  listForwardTargetsQuerySchema,
   listMessagesQuerySchema,
   markConversationReadInputSchema,
+  pinMessageInputSchema,
   registerE2eeDeviceInputSchema,
   sendMessageInputSchema,
+  updateConversationPreferencesInputSchema,
   upsertE2eeBackupInputSchema,
+  upsertReactionInputSchema,
 } from '@/modules/chat/chat.schemas';
 import {
   getNotificationService,
@@ -158,6 +165,21 @@ export interface ChatPeerUserDto {
   readonly isPrivate: boolean;
 }
 
+export interface MessageReactionDto {
+  readonly userPublicId: string;
+  readonly emoji: string;
+  readonly updatedAt: string;
+}
+
+export interface MessageReplyMetaDto {
+  readonly messagePublicId: string;
+  readonly senderPublicId: string;
+  readonly seq: number;
+  readonly messageType: MessageType;
+  readonly recalledAt: string | null;
+  readonly deletedForViewer: boolean;
+}
+
 export interface ChatMessageDto {
   readonly public_id: string;
   readonly conversationPublicId: string;
@@ -169,6 +191,10 @@ export interface ChatMessageDto {
   readonly ciphertext: string | null;
   readonly cryptoHeader: MessageCryptoHeaderRecord | null;
   readonly callEventMeta?: MessageCallEventMetaRecord | null;
+  readonly reactions?: readonly MessageReactionDto[];
+  readonly replyToMeta?: MessageReplyMetaDto | null;
+  readonly isForwarded?: boolean;
+  readonly isPinned?: boolean;
   readonly editCount: number;
   readonly editedAt: string | null;
   readonly recalledAt: string | null;
@@ -181,6 +207,10 @@ export interface ConversationParticipantStateDto {
   readonly pendingMessagesRemaining: number;
   readonly lastReadSeq: number;
   readonly clearedBeforeSeq?: number;
+  readonly pinnedAt?: string | null;
+  readonly mutedAt?: string | null;
+  readonly isPinned?: boolean;
+  readonly isMuted?: boolean;
 }
 
 export interface ConversationSummaryDto {
@@ -289,6 +319,61 @@ export type GetMessageAttachmentResult =
       readonly ciphertextSizeBytes: number;
     };
 
+export interface MessageReactionMutationResult {
+  readonly conversationPublicId: string;
+  readonly messagePublicId: string;
+  readonly emoji: string | null;
+  readonly reactions: readonly MessageReactionDto[];
+  readonly message: string;
+}
+
+export interface PinnedMessageItemDto {
+  readonly message: ChatMessageDto;
+  readonly pinnedAt: string;
+  readonly pinnedByPublicId: string;
+}
+
+export interface PinnedMessagesListResult {
+  readonly conversationPublicId: string;
+  readonly items: readonly PinnedMessageItemDto[];
+  readonly totalPinnedCount: number;
+  readonly hiddenPinnedCount: number;
+  readonly maxPinnedMessages: number;
+}
+
+export interface MessagePinMutationResult {
+  readonly conversationPublicId: string;
+  readonly messagePublicId: string;
+  readonly isPinned: boolean;
+  readonly totalPinnedCount: number;
+  readonly unpinnedHiddenMessagePublicId?: string | null;
+  readonly message: string;
+}
+
+export interface ConversationPreferencesResult {
+  readonly conversationPublicId: string;
+  readonly pinnedAt: string | null;
+  readonly mutedAt: string | null;
+  readonly isPinned: boolean;
+  readonly isMuted: boolean;
+  readonly unreadConversationsCount: number;
+  readonly message: string;
+}
+
+export interface ForwardTargetDto {
+  readonly public_id: string;
+  readonly handle: string;
+  readonly fullName: string;
+  readonly avatarUrl: string | null;
+  readonly isPrivate: boolean;
+  readonly conversationPublicId: string | null;
+  readonly lastMessageAt: string | null;
+}
+
+export interface ForwardTargetsListResult {
+  readonly items: readonly ForwardTargetDto[];
+}
+
 function toDeviceDto(row: UserE2eeDeviceRow): E2eeDeviceKeyDto {
   return {
     devicePublicId: row.publicId,
@@ -327,6 +412,11 @@ function toMessageDto(
   conversationPublicId: string,
   senderPublicId: string,
   viewerPublicId: string,
+  extras?: {
+    readonly reactions?: readonly MessageReactionDto[];
+    readonly replyToMeta?: MessageReplyMetaDto | null;
+    readonly isPinned?: boolean;
+  },
 ): ChatMessageDto {
   return {
     public_id: row.publicId,
@@ -341,6 +431,10 @@ function toMessageDto(
     ...(row.messageType === 'call_event'
       ? { callEventMeta: row.recalledAt ? null : (row.callEventMeta ?? null) }
       : {}),
+    ...(extras?.reactions !== undefined ? { reactions: extras.reactions } : {}),
+    ...(extras?.replyToMeta !== undefined ? { replyToMeta: extras.replyToMeta } : {}),
+    ...(row.isForwarded ? { isForwarded: true } : {}),
+    ...(extras?.isPinned !== undefined ? { isPinned: extras.isPinned } : {}),
     editCount: row.editCount,
     editedAt: row.editedAt ? row.editedAt.toISOString() : null,
     recalledAt: row.recalledAt ? row.recalledAt.toISOString() : null,
@@ -410,6 +504,14 @@ function toConversationSummaryDto(
       pendingMessagesRemaining: remaining,
       lastReadSeq: effectiveMyLastReadSeq,
       clearedBeforeSeq: Number(record.actorParticipant.clearedBeforeSeq),
+      pinnedAt: record.actorParticipant.pinnedAt
+        ? record.actorParticipant.pinnedAt.toISOString()
+        : null,
+      mutedAt: record.actorParticipant.mutedAt
+        ? record.actorParticipant.mutedAt.toISOString()
+        : null,
+      isPinned: Boolean(record.actorParticipant.pinnedAt),
+      isMuted: Boolean(record.actorParticipant.mutedAt),
     },
     isAwaitingPeerAcceptance,
     canSendMedia: !isAwaitingPeerAcceptance && !isMyInboxPending,
@@ -1231,6 +1333,7 @@ export class ChatService {
                 (r) =>
                   r.actorParticipant.inboxState === 'primary' &&
                   r.actorParticipant.hiddenAt === null &&
+                  !r.actorParticipant.mutedAt &&
                   Number(r.conversation.lastSeq) >
                     Math.max(
                       Number(r.actorParticipant.lastReadSeq),
@@ -1338,6 +1441,28 @@ export class ChatService {
         targetUser: lockedTarget,
         relationship,
       });
+
+      // Cưỡng chế cứng điều kiện Chuyển tiếp (M13): chỉ cho phép Mutual Follow ∪ Đã từng trò chuyện (primary 2 phía & last_seq > 0).
+      if (parsed.data.purpose === 'forward') {
+        const isMutualFollow =
+          relationship.actorFollowStatus === 'following' &&
+          relationship.targetFollowStatus === 'following';
+        const hasPriorPrimary =
+          typeof this.repository.hasPriorPrimaryConversationBetweenUsers === 'function'
+            ? await this.repository.hasPriorPrimaryConversationBetweenUsers(
+                lockedActor.id,
+                lockedTarget.id,
+                tx,
+              )
+            : false;
+        if (!isMutualFollow && !hasPriorPrimary) {
+          throw new ChatDomainError({
+            status: 403,
+            code: 'CHAT_FORWARD_TARGET_NOT_ELIGIBLE',
+            message: CHAT_MESSAGES.forwardTargetNotEligible,
+          });
+        }
+      }
 
       // Luật quyết định `inbox_state` của người nhận B:
       // Vào thẳng 'primary' nếu B đang theo dõi A (`targetFollowStatus === 'following'`).
@@ -1908,7 +2033,7 @@ export class ChatService {
       });
     }
 
-    const { rows, isForwardDelta } = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+    const rows = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
       const conversation = await this.repository.findConversationByPublicId(
         conversationPublicId,
         tx,
@@ -1939,6 +2064,8 @@ export class ChatService {
       });
 
       const effectiveBeforeSeq = parsedQuery.data.beforeSeq ?? parsedQuery.data.cursor;
+      const isForwardDelta =
+        parsedQuery.data.afterSeq !== undefined && effectiveBeforeSeq === undefined;
 
       const msgRows = await this.repository.listMessagesForConversation(
         {
@@ -1952,24 +2079,34 @@ export class ChatService {
         tx,
       );
 
+      const hasMore = msgRows.length > parsedQuery.data.limit;
+      const pageRows = hasMore ? msgRows.slice(0, parsedQuery.data.limit) : msgRows;
+      const orderedRows = isForwardDelta ? pageRows : [...pageRows].reverse();
+      const oldestInBatch = orderedRows[0];
+
+      const enrichedItems = await this.enrichMessagesForViewer(
+        {
+          conversationId: conversation.id,
+          conversationPublicId,
+          viewerUserId: actor.user.id,
+          viewerPublicId: actor.user.publicId,
+          clearedBeforeSeq: Number(actorParticipant!.clearedBeforeSeq),
+          items: orderedRows,
+        },
+        tx,
+      );
+
       return {
-        rows: msgRows,
-        isForwardDelta: parsedQuery.data.afterSeq !== undefined && effectiveBeforeSeq === undefined,
+        items: enrichedItems,
+        nextCursor:
+          !isForwardDelta && hasMore && oldestInBatch ? Number(oldestInBatch.row.seq) : null,
       };
     });
 
-    const hasMore = rows.length > parsedQuery.data.limit;
-    const pageRows = hasMore ? rows.slice(0, parsedQuery.data.limit) : rows;
-    const orderedRows = isForwardDelta ? pageRows : [...pageRows].reverse();
-    const oldestInBatch = orderedRows[0];
-
     return {
       conversationPublicId,
-      items: orderedRows.map((item) =>
-        toMessageDto(item.row, conversationPublicId, item.senderPublicId, actor.user.publicId),
-      ),
-      nextCursor:
-        !isForwardDelta && hasMore && oldestInBatch ? Number(oldestInBatch.row.seq) : null,
+      items: rows.items,
+      nextCursor: rows.nextCursor,
     };
   }
 
@@ -2267,6 +2404,24 @@ export class ChatService {
       const isPeerInPendingOrDeclined = peerParticipant!.inboxState !== 'primary';
       const isPeerDeclined = peerParticipant!.inboxState === 'declined';
 
+      // 4a. Cưỡng chế điều kiện Chuyển tiếp (M13): cấm chuyển tiếp cho người lạ / pending / declined / 1-way follow chưa từng nhắn.
+      if (parsed.data.isForwarded === true) {
+        const isMutualFollow =
+          relationship!.actorFollowStatus === 'following' &&
+          relationship!.targetFollowStatus === 'following';
+        const isPrimaryBothSides =
+          actorParticipant!.inboxState === 'primary' && peerParticipant!.inboxState === 'primary';
+        const hasChattedBefore = isPrimaryBothSides && Number(conversation.lastSeq) > 0;
+
+        if (!isPrimaryBothSides || (!isMutualFollow && !hasChattedBefore)) {
+          throw new ChatDomainError({
+            status: 403,
+            code: 'CHAT_FORWARD_TARGET_NOT_ELIGIBLE',
+            message: CHAT_MESSAGES.forwardTargetNotEligible,
+          });
+        }
+      }
+
       if (isPeerInPendingOrDeclined) {
         if (parsed.data.messageType !== 'text') {
           throw new ChatDomainError({
@@ -2294,6 +2449,71 @@ export class ChatService {
             },
             tx,
           )) ?? actorParticipant!;
+      }
+
+      // 4a-bis. Xác minh tin nhắn gốc khi Trả lời (M13): BẮT BUỘC thuộc đúng `conversation.id` hiện tại (chống cross-conv IDOR).
+      let verifiedReplyTarget: {
+        readonly id: string;
+        readonly meta: MessageReplyMetaDto;
+      } | null = null;
+
+      if (parsed.data.replyToMessagePublicId) {
+        const replyFound = await this.repository.findMessageByPublicId(
+          parsed.data.replyToMessagePublicId,
+          tx,
+        );
+        if (
+          !replyFound ||
+          replyFound.row.conversationId !== conversation.id ||
+          Number(replyFound.row.seq) <= Number(actorParticipant!.clearedBeforeSeq)
+        ) {
+          throw new ChatDomainError({
+            status: 404,
+            code: 'NOT_FOUND',
+            message: CHAT_MESSAGES.notFound,
+          });
+        }
+
+        const isReplyDeletedForActor = await this.repository.isMessageDeletedForUser(
+          replyFound.row.id,
+          actor.user.id,
+          tx,
+        );
+        if (isReplyDeletedForActor) {
+          throw new ChatDomainError({
+            status: 404,
+            code: 'NOT_FOUND',
+            message: CHAT_MESSAGES.notFound,
+          });
+        }
+
+        if (replyFound.row.recalledAt !== null) {
+          throw new ChatDomainError({
+            status: 409,
+            code: 'CHAT_MESSAGE_ALREADY_RECALLED',
+            message: CHAT_MESSAGES.alreadyRecalled,
+          });
+        }
+
+        if (replyFound.row.messageType === 'call_event') {
+          throw new ChatDomainError({
+            status: 409,
+            code: 'CHAT_MESSAGE_ACTION_UNSUPPORTED_TYPE',
+            message: CHAT_MESSAGES.replyUnsupportedType,
+          });
+        }
+
+        verifiedReplyTarget = {
+          id: replyFound.row.id,
+          meta: {
+            messagePublicId: replyFound.row.publicId,
+            senderPublicId: replyFound.senderPublicId,
+            seq: Number(replyFound.row.seq),
+            messageType: replyFound.row.messageType,
+            recalledAt: null,
+            deletedForViewer: false,
+          },
+        };
       }
 
       // 4b. Đối với tin nhắn ảnh/thoại ở hội thoại `primary`, bắt buộc phải có `attachmentPublicId` đã xác minh.
@@ -2361,6 +2581,8 @@ export class ChatService {
           ciphertext: parsed.data.ciphertext,
           cryptoHeader: parsed.data.cryptoHeader,
           attachmentStorageKey: lockedPendingAttachment?.storageKey ?? null,
+          replyToMessageId: verifiedReplyTarget?.id ?? null,
+          isForwarded: parsed.data.isForwarded === true,
           now: currentTime,
         },
         tx,
@@ -2447,6 +2669,11 @@ export class ChatService {
         conversation.publicId,
         actor.user.publicId,
         actor.user.publicId,
+        {
+          reactions: [],
+          replyToMeta: verifiedReplyTarget?.meta ?? null,
+          isPinned: false,
+        },
       );
       const convDto = toConversationSummaryDto(
         {
@@ -2592,12 +2819,18 @@ export class ChatService {
         });
       }
 
-      return toMessageDto(
-        found.row,
-        conversation.publicId,
-        found.senderPublicId,
-        actor.user.publicId,
+      const [enriched] = await this.enrichMessagesForViewer(
+        {
+          conversationId: conversation.id,
+          conversationPublicId: conversation.publicId,
+          viewerUserId: actor.user.id,
+          viewerPublicId: actor.user.publicId,
+          clearedBeforeSeq: Number(actorParticipant!.clearedBeforeSeq),
+          items: [found],
+        },
+        tx,
       );
+      return enriched!;
     });
 
     return { message: dto };
@@ -2952,6 +3185,15 @@ export class ChatService {
             )
           : [];
 
+      // Dọn sạch toàn bộ cảm xúc & gỡ ghim (nếu có) ngay khi tin nhắn bị thu hồi.
+      if (typeof this.repository.deleteAllReactionsForMessage === 'function') {
+        await this.repository.deleteAllReactionsForMessage(lockedMessage.id, tx);
+      }
+      const unpinnedIds =
+        typeof this.repository.deleteMessagePinsByIds === 'function'
+          ? await this.repository.deleteMessagePinsByIds(conversation.id, [lockedMessage.id], tx)
+          : [];
+
       const storageTargets: Array<{
         readonly storageKey: string;
         readonly storageUrl: string | null;
@@ -2972,10 +3214,15 @@ export class ChatService {
         conversation.publicId,
         actor.user.publicId,
         actor.user.publicId,
+        {
+          reactions: [],
+          isPinned: false,
+        },
       );
 
       return {
         message: dto,
+        wasPinned: unpinnedIds.length > 0,
         attachmentStorageTargets: storageTargets,
         peerPublicId: peerUser!.publicId,
         shouldNotifyPeerRealtime: peerParticipant!.inboxState !== 'declined',
@@ -3027,6 +3274,31 @@ export class ChatService {
           eventPayload,
         ),
       );
+    }
+    if (outcome.wasPinned) {
+      const unpinPayload = {
+        conversationPublicId: outcome.message.conversationPublicId,
+        messagePublicId: outcome.message.public_id,
+        pinned: false,
+        actorPublicId: actor.user.publicId,
+        updatedAt: outcome.message.recalledAt ?? this.now().toISOString(),
+      };
+      publishTasks.push(
+        this.publishChatEventBestEffort(
+          actor.user.publicId,
+          'chat.message.pin.updated',
+          unpinPayload,
+        ),
+      );
+      if (outcome.shouldNotifyPeerRealtime) {
+        publishTasks.push(
+          this.publishChatEventBestEffort(
+            outcome.peerPublicId,
+            'chat.message.pin.updated',
+            unpinPayload,
+          ),
+        );
+      }
     }
     await Promise.all(publishTasks);
 
@@ -3090,6 +3362,9 @@ export class ChatService {
         },
         tx,
       );
+
+      // Tự động dọn các bản ghi ghim nếu CẢ HAI thành viên đều đã xóa / ẩn tin nhắn đó.
+      await this.purgeBothHiddenPinsInTx(conversation.id, participants, tx);
 
       const nextVisibleLastMsg = await this.repository.findLatestVisibleMessageForConversation(
         {
@@ -3196,6 +3471,11 @@ export class ChatService {
         },
         tx,
       );
+
+      const effectiveParticipants = participants.map((p) =>
+        p.userId === actor.user.id && updatedActorParticipant ? updatedActorParticipant : p,
+      );
+      await this.purgeBothHiddenPinsInTx(conversation.id, effectiveParticipants, tx);
 
       if (actorParticipant!.inboxState === 'pending' && this.notificationService && peerUser) {
         pendingDispatches.push(
@@ -3703,6 +3983,1164 @@ export class ChatService {
     };
   }
 
+  // =========================================================================
+  // 7. Cột mốc M13 — Thả cảm xúc, Trả lời, Chuyển tiếp, Ghim tin nhắn, Ghim/Tắt thông báo đoạn chat
+  // =========================================================================
+
+  private async enrichMessagesForViewer(
+    params: {
+      readonly conversationId: string;
+      readonly conversationPublicId: string;
+      readonly viewerUserId: string;
+      readonly viewerPublicId: string;
+      readonly clearedBeforeSeq: number;
+      readonly items: ReadonlyArray<{ readonly row: MessageRow; readonly senderPublicId: string }>;
+    },
+    tx: Parameters<Parameters<ChatRepository['runInRlsTx']>[1]>[0],
+  ): Promise<ChatMessageDto[]> {
+    if (params.items.length === 0) {
+      return [];
+    }
+
+    const messageIds = params.items.map((item) => item.row.id);
+    const nonRecalledIds = params.items
+      .filter((item) => item.row.recalledAt === null)
+      .map((item) => item.row.id);
+    const replyTargetIds = params.items
+      .map((item) => item.row.replyToMessageId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+    const [reactionRows, replyMetaMap, pinnedIdSet] = await Promise.all([
+      nonRecalledIds.length > 0 && typeof this.repository.listReactionsForMessageIds === 'function'
+        ? this.repository.listReactionsForMessageIds(params.conversationId, nonRecalledIds, tx)
+        : Promise.resolve([]),
+      replyTargetIds.length > 0 &&
+      typeof this.repository.findReplyTargetsMetadataByIds === 'function'
+        ? this.repository.findReplyTargetsMetadataByIds(
+            {
+              conversationId: params.conversationId,
+              messageIds: replyTargetIds,
+              viewerUserId: params.viewerUserId,
+              clearedBeforeSeq: params.clearedBeforeSeq,
+            },
+            tx,
+          )
+        : Promise.resolve(new Map()),
+      typeof this.repository.listPinnedMessageIdsInSet === 'function'
+        ? this.repository.listPinnedMessageIdsInSet(params.conversationId, messageIds, tx)
+        : Promise.resolve(new Set<string>()),
+    ]);
+
+    const reactionsByMessageId = new Map<string, MessageReactionDto[]>();
+    for (const r of reactionRows) {
+      const list = reactionsByMessageId.get(r.messageId) ?? [];
+      list.push({
+        userPublicId: r.userPublicId,
+        emoji: r.emoji,
+        updatedAt: r.updatedAt.toISOString(),
+      });
+      reactionsByMessageId.set(r.messageId, list);
+    }
+
+    return params.items.map((item) => {
+      const replyTarget =
+        item.row.replyToMessageId !== null
+          ? (replyMetaMap.get(item.row.replyToMessageId) ?? null)
+          : null;
+
+      return toMessageDto(
+        item.row,
+        params.conversationPublicId,
+        item.senderPublicId,
+        params.viewerPublicId,
+        {
+          reactions: item.row.recalledAt ? [] : (reactionsByMessageId.get(item.row.id) ?? []),
+          replyToMeta: replyTarget
+            ? {
+                messagePublicId: replyTarget.messagePublicId,
+                senderPublicId: replyTarget.senderPublicId,
+                seq: replyTarget.seq,
+                messageType: replyTarget.messageType,
+                recalledAt: replyTarget.recalledAt ? replyTarget.recalledAt.toISOString() : null,
+                deletedForViewer: replyTarget.deletedForViewer,
+              }
+            : null,
+          isPinned: pinnedIdSet.has(item.row.id),
+        },
+      );
+    });
+  }
+
+  /**
+   * Tự động dọn các bản ghi `message_pins` khi tin nhắn đã bị thu hồi HOẶC cả hai thành viên
+   * đều đã xóa 1 phía / xóa đoạn chat qua tin nhắn đó (chống deadlock giới hạn 5 tin ghim).
+   */
+  private async purgeBothHiddenPinsInTx(
+    conversationId: string,
+    participants: readonly ConversationParticipantRow[],
+    tx: Parameters<Parameters<ChatRepository['runInRlsTx']>[1]>[0],
+  ): Promise<{
+    readonly activePins: Awaited<
+      ReturnType<ChatRepository['listPinnedMessagesRawForConversation']>
+    >;
+    readonly deletionsByUserId: Map<string, Set<string>>;
+  }> {
+    if (
+      typeof this.repository.listPinnedMessagesRawForConversation !== 'function' ||
+      typeof this.repository.listMessageDeletionsForMessagesAndUsers !== 'function' ||
+      typeof this.repository.deleteMessagePinsByIds !== 'function'
+    ) {
+      return {
+        activePins: [],
+        deletionsByUserId: new Map(),
+      };
+    }
+
+    const rawPins = await this.repository.listPinnedMessagesRawForConversation(conversationId, tx);
+    if (rawPins.length === 0) {
+      return {
+        activePins: [],
+        deletionsByUserId: new Map(),
+      };
+    }
+
+    const pinMessageIds = rawPins.map((p) => p.message.id);
+    const participantIds = participants.map((p) => p.userId);
+    const deletions = await this.repository.listMessageDeletionsForMessagesAndUsers(
+      pinMessageIds,
+      participantIds,
+      tx,
+    );
+
+    const deletionsByUserId = new Map<string, Set<string>>();
+    for (const d of deletions) {
+      const set = deletionsByUserId.get(d.userId) ?? new Set<string>();
+      set.add(d.messageId);
+      deletionsByUserId.set(d.userId, set);
+    }
+
+    const isHiddenForParticipant = (
+      pinMsg: MessageRow,
+      participant: ConversationParticipantRow,
+    ): boolean => {
+      if (pinMsg.recalledAt !== null) {
+        return true;
+      }
+      if (Number(pinMsg.seq) <= Number(participant.clearedBeforeSeq)) {
+        return true;
+      }
+      return deletionsByUserId.get(participant.userId)?.has(pinMsg.id) === true;
+    };
+
+    const deadMessageIds: string[] = [];
+    const activePins: typeof rawPins = [];
+
+    for (const entry of rawPins) {
+      const isRecalled = entry.message.recalledAt !== null;
+      const hiddenForAll =
+        participants.length >= 2 &&
+        participants.every((p) => isHiddenForParticipant(entry.message, p));
+
+      if (isRecalled || hiddenForAll) {
+        deadMessageIds.push(entry.message.id);
+      } else {
+        activePins.push(entry);
+      }
+    }
+
+    if (deadMessageIds.length > 0) {
+      await this.repository.deleteMessagePinsByIds(conversationId, deadMessageIds, tx);
+    }
+
+    return {
+      activePins,
+      deletionsByUserId,
+    };
+  }
+
+  /**
+   * Thả / cập nhật biểu tượng cảm xúc (PUT idempotent thuần túy — KHÔNG tự toggle xóa).
+   */
+  async upsertMessageReaction(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+    rawInput: unknown,
+  ): Promise<MessageReactionMutationResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:react:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.reactMessageByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const parsed = upsertReactionInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    const currentTime = this.now();
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findMessageByPublicId(messagePublicId, tx);
+      if (!found) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(found.row.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:message:react', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (actorParticipant!.inboxState !== 'primary' || peerParticipant!.inboxState !== 'primary') {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'FORBIDDEN',
+          message: CHAT_MESSAGES.pendingInteractionForbidden,
+        });
+      }
+
+      if (Number(found.row.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        found.row.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      if (found.row.recalledAt !== null) {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_ALREADY_RECALLED',
+          message: CHAT_MESSAGES.alreadyRecalled,
+        });
+      }
+
+      if (found.row.messageType === 'call_event') {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_ACTION_UNSUPPORTED_TYPE',
+          message: CHAT_MESSAGES.reactionUnsupportedType,
+        });
+      }
+
+      await this.repository.upsertMessageReaction(
+        {
+          conversationId: conversation.id,
+          messageId: found.row.id,
+          userId: actor.user.id,
+          emoji: parsed.data.emoji,
+          now: currentTime,
+        },
+        tx,
+      );
+
+      const latestReactions = await this.repository.listReactionsForMessageIds(
+        conversation.id,
+        [found.row.id],
+        tx,
+      );
+
+      return {
+        conversationPublicId: conversation.publicId,
+        messagePublicId: found.row.publicId,
+        seq: Number(found.row.seq),
+        emoji: parsed.data.emoji,
+        reactions: latestReactions.map((r) => ({
+          userPublicId: r.userPublicId,
+          emoji: r.emoji,
+          updatedAt: r.updatedAt.toISOString(),
+        })),
+        peerPublicId: peerUser!.publicId,
+        updatedAt: currentTime.toISOString(),
+      };
+    });
+
+    const eventPayload = {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      seq: outcome.seq,
+      actorPublicId: actor.user.publicId,
+      emoji: outcome.emoji,
+      updatedAt: outcome.updatedAt,
+    };
+
+    await Promise.all([
+      this.publishChatEventBestEffort(
+        actor.user.publicId,
+        'chat.message.reaction.updated',
+        eventPayload,
+      ),
+      this.publishChatEventBestEffort(
+        outcome.peerPublicId,
+        'chat.message.reaction.updated',
+        eventPayload,
+      ),
+    ]);
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      emoji: outcome.emoji,
+      reactions: outcome.reactions,
+      message: CHAT_MESSAGES.reactionUpdated,
+    };
+  }
+
+  /**
+   * Gỡ biểu tượng cảm xúc của chính mình trên 1 tin nhắn (DELETE RESTful rõ nghĩa).
+   */
+  async removeMessageReaction(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+  ): Promise<MessageReactionMutationResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:react:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.reactMessageByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const currentTime = this.now();
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findMessageByPublicId(messagePublicId, tx);
+      if (!found) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation = await this.repository.findConversationById(found.row.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:message:react', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (actorParticipant!.inboxState !== 'primary' || peerParticipant!.inboxState !== 'primary') {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'FORBIDDEN',
+          message: CHAT_MESSAGES.pendingInteractionForbidden,
+        });
+      }
+
+      if (Number(found.row.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        found.row.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      await this.repository.deleteMessageReaction(found.row.id, actor.user.id, tx);
+      const latestReactions = await this.repository.listReactionsForMessageIds(
+        conversation.id,
+        [found.row.id],
+        tx,
+      );
+
+      return {
+        conversationPublicId: conversation.publicId,
+        messagePublicId: found.row.publicId,
+        seq: Number(found.row.seq),
+        reactions: latestReactions.map((r) => ({
+          userPublicId: r.userPublicId,
+          emoji: r.emoji,
+          updatedAt: r.updatedAt.toISOString(),
+        })),
+        peerPublicId: peerUser!.publicId,
+        updatedAt: currentTime.toISOString(),
+      };
+    });
+
+    const eventPayload = {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      seq: outcome.seq,
+      actorPublicId: actor.user.publicId,
+      emoji: null,
+      updatedAt: outcome.updatedAt,
+    };
+
+    await Promise.all([
+      this.publishChatEventBestEffort(
+        actor.user.publicId,
+        'chat.message.reaction.updated',
+        eventPayload,
+      ),
+      this.publishChatEventBestEffort(
+        outcome.peerPublicId,
+        'chat.message.reaction.updated',
+        eventPayload,
+      ),
+    ]);
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      emoji: null,
+      reactions: outcome.reactions,
+      message: CHAT_MESSAGES.reactionRemoved,
+    };
+  }
+
+  /**
+   * Liệt kê danh sách Tin nhắn đã ghim trong hội thoại (tối đa 5 tin).
+   * Tự động dọn tin ghim đã bị cả 2 phía xóa/ẩn và trả kèm `totalPinnedCount` & `hiddenPinnedCount`.
+   */
+  async listPinnedMessages(
+    actor: AuthenticatedPrincipal,
+    rawConversationPublicId: string,
+  ): Promise<PinnedMessagesListResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:conversations:pins:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.listPinsByUser,
+    );
+
+    const conversationPublicId = parsePublicIdOrThrowNotFound(rawConversationPublicId);
+
+    return this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const conversation = await this.repository.findConversationByPublicId(
+        conversationPublicId,
+        tx,
+      );
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:conversation:pins:list', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      const { activePins, deletionsByUserId } = await this.purgeBothHiddenPinsInTx(
+        conversation.id,
+        participants,
+        tx,
+      );
+
+      const actorDeletedSet = deletionsByUserId.get(actor.user.id) ?? new Set<string>();
+      const actorClearedBeforeSeq = Number(actorParticipant!.clearedBeforeSeq);
+
+      const visibleEntries = activePins.filter(
+        (entry) =>
+          Number(entry.message.seq) > actorClearedBeforeSeq &&
+          !actorDeletedSet.has(entry.message.id),
+      );
+      const hiddenPinnedCount = Math.max(0, activePins.length - visibleEntries.length);
+
+      const enrichedDtos = await this.enrichMessagesForViewer(
+        {
+          conversationId: conversation.id,
+          conversationPublicId: conversation.publicId,
+          viewerUserId: actor.user.id,
+          viewerPublicId: actor.user.publicId,
+          clearedBeforeSeq: actorClearedBeforeSeq,
+          items: visibleEntries.map((entry) => ({
+            row: entry.message,
+            senderPublicId: entry.senderPublicId,
+          })),
+        },
+        tx,
+      );
+
+      const items: PinnedMessageItemDto[] = visibleEntries.map((entry, idx) => ({
+        message: {
+          ...enrichedDtos[idx]!,
+          isPinned: true,
+        },
+        pinnedAt: entry.pin.pinnedAt.toISOString(),
+        pinnedByPublicId: entry.pinnedByPublicId,
+      }));
+
+      return {
+        conversationPublicId: conversation.publicId,
+        items,
+        totalPinnedCount: activePins.length,
+        hiddenPinnedCount,
+        maxPinnedMessages: MAX_PINNED_MESSAGES_PER_CONVERSATION,
+      };
+    });
+  }
+
+  /**
+   * Ghim 1 tin nhắn (tối đa 5 tin/hội thoại, chống deadlock khi có tin ghim cũ đã ẩn ở phía mình).
+   */
+  async pinMessage(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+    rawInput: unknown = {},
+  ): Promise<MessagePinMutationResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:pin:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.pinMessageByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const parsedBody = pinMessageInputSchema.safeParse(rawInput ?? {});
+    if (!parsedBody.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsedBody.error),
+      });
+    }
+
+    const currentTime = this.now();
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findMessageByPublicId(messagePublicId, tx);
+      if (!found) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      // Khóa dòng `conversations` FOR UPDATE để tuần tự hóa giới hạn nguyên tử tối đa 5 tin nhắn ghim.
+      const conversation =
+        typeof this.repository.lockConversationById === 'function'
+          ? await this.repository.lockConversationById(found.row.conversationId, tx)
+          : await this.repository.findConversationById(found.row.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:message:pin', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (actorParticipant!.inboxState !== 'primary' || peerParticipant!.inboxState !== 'primary') {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'FORBIDDEN',
+          message: CHAT_MESSAGES.pendingInteractionForbidden,
+        });
+      }
+
+      if (Number(found.row.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        found.row.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      if (found.row.recalledAt !== null) {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_ALREADY_RECALLED',
+          message: CHAT_MESSAGES.alreadyRecalled,
+        });
+      }
+
+      if (found.row.messageType === 'call_event') {
+        throw new ChatDomainError({
+          status: 409,
+          code: 'CHAT_MESSAGE_ACTION_UNSUPPORTED_TYPE',
+          message: CHAT_MESSAGES.pinUnsupportedType,
+        });
+      }
+
+      const { activePins, deletionsByUserId } = await this.purgeBothHiddenPinsInTx(
+        conversation.id,
+        participants,
+        tx,
+      );
+
+      const alreadyPinned = activePins.some((p) => p.message.id === found.row.id);
+      if (alreadyPinned) {
+        return {
+          conversationPublicId: conversation.publicId,
+          messagePublicId: found.row.publicId,
+          totalPinnedCount: activePins.length,
+          unpinnedHiddenMessagePublicId: null as string | null,
+          changed: false,
+          peerPublicId: peerUser!.publicId,
+          updatedAt: currentTime.toISOString(),
+        };
+      }
+
+      let effectiveCount = activePins.length;
+      let unpinnedHiddenMessagePublicId: string | null = null;
+
+      if (effectiveCount >= MAX_PINNED_MESSAGES_PER_CONVERSATION) {
+        const actorDeletedSet = deletionsByUserId.get(actor.user.id) ?? new Set<string>();
+        const actorClearedBeforeSeq = Number(actorParticipant!.clearedBeforeSeq);
+        const hiddenForActor = activePins.filter(
+          (entry) =>
+            Number(entry.message.seq) <= actorClearedBeforeSeq ||
+            actorDeletedSet.has(entry.message.id),
+        );
+
+        if (parsedBody.data.unpinOldestHiddenIfFull === true && hiddenForActor.length > 0) {
+          // `activePins` đã sắp xếp `pinned_at DESC` -> phần tử cuối là tin ghim ẩn cũ nhất.
+          const oldestHidden = hiddenForActor[hiddenForActor.length - 1]!;
+          await this.repository.deleteMessagePinsByIds(
+            conversation.id,
+            [oldestHidden.message.id],
+            tx,
+          );
+          unpinnedHiddenMessagePublicId = oldestHidden.message.publicId;
+          effectiveCount -= 1;
+        } else {
+          throw new ChatDomainError({
+            status: 409,
+            code: 'CHAT_PINNED_MESSAGES_LIMIT_REACHED',
+            message:
+              hiddenForActor.length > 0
+                ? CHAT_MESSAGES.pinnedMessagesLimitReachedWithHidden
+                : CHAT_MESSAGES.pinnedMessagesLimitReached,
+            details: [
+              {
+                field: 'hiddenPinnedCount',
+                message: String(hiddenForActor.length),
+              },
+            ],
+          });
+        }
+      }
+
+      await this.repository.insertMessagePin(
+        {
+          conversationId: conversation.id,
+          messageId: found.row.id,
+          pinnedByUserId: actor.user.id,
+          now: currentTime,
+        },
+        tx,
+      );
+
+      return {
+        conversationPublicId: conversation.publicId,
+        messagePublicId: found.row.publicId,
+        totalPinnedCount: effectiveCount + 1,
+        unpinnedHiddenMessagePublicId,
+        changed: true,
+        peerPublicId: peerUser!.publicId,
+        updatedAt: currentTime.toISOString(),
+      };
+    });
+
+    if (outcome.changed) {
+      const publishTasks: Promise<void>[] = [];
+      if (outcome.unpinnedHiddenMessagePublicId) {
+        const unpinHiddenPayload = {
+          conversationPublicId: outcome.conversationPublicId,
+          messagePublicId: outcome.unpinnedHiddenMessagePublicId,
+          pinned: false,
+          actorPublicId: actor.user.publicId,
+          updatedAt: outcome.updatedAt,
+        };
+        publishTasks.push(
+          this.publishChatEventBestEffort(
+            actor.user.publicId,
+            'chat.message.pin.updated',
+            unpinHiddenPayload,
+          ),
+          this.publishChatEventBestEffort(
+            outcome.peerPublicId,
+            'chat.message.pin.updated',
+            unpinHiddenPayload,
+          ),
+        );
+      }
+
+      const pinPayload = {
+        conversationPublicId: outcome.conversationPublicId,
+        messagePublicId: outcome.messagePublicId,
+        pinned: true,
+        actorPublicId: actor.user.publicId,
+        updatedAt: outcome.updatedAt,
+      };
+      publishTasks.push(
+        this.publishChatEventBestEffort(
+          actor.user.publicId,
+          'chat.message.pin.updated',
+          pinPayload,
+        ),
+        this.publishChatEventBestEffort(
+          outcome.peerPublicId,
+          'chat.message.pin.updated',
+          pinPayload,
+        ),
+      );
+      await Promise.all(publishTasks);
+    }
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      isPinned: true,
+      totalPinnedCount: outcome.totalPinnedCount,
+      unpinnedHiddenMessagePublicId: outcome.unpinnedHiddenMessagePublicId,
+      message: CHAT_MESSAGES.messagePinned,
+    };
+  }
+
+  /**
+   * Gỡ ghim 1 tin nhắn trong hội thoại.
+   */
+  async unpinMessage(
+    actor: AuthenticatedPrincipal,
+    rawMessagePublicId: string,
+  ): Promise<MessagePinMutationResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:messages:pin:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.pinMessageByUser,
+    );
+
+    const messagePublicId = parsePublicIdOrThrowNotFound(rawMessagePublicId);
+    const currentTime = this.now();
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      const found = await this.repository.findMessageByPublicId(messagePublicId, tx);
+      if (!found) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const conversation =
+        typeof this.repository.lockConversationById === 'function'
+          ? await this.repository.lockConversationById(found.row.conversationId, tx)
+          : await this.repository.findConversationById(found.row.conversationId, tx);
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.listConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:message:pin', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (actorParticipant!.inboxState !== 'primary' || peerParticipant!.inboxState !== 'primary') {
+        throw new ChatDomainError({
+          status: 403,
+          code: 'FORBIDDEN',
+          message: CHAT_MESSAGES.pendingInteractionForbidden,
+        });
+      }
+
+      if (Number(found.row.seq) <= Number(actorParticipant!.clearedBeforeSeq)) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+      const isDeletedForActor = await this.repository.isMessageDeletedForUser(
+        found.row.id,
+        actor.user.id,
+        tx,
+      );
+      if (isDeletedForActor) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const deleted = await this.repository.deleteMessagePinsByIds(
+        conversation.id,
+        [found.row.id],
+        tx,
+      );
+      const { activePins } = await this.purgeBothHiddenPinsInTx(conversation.id, participants, tx);
+
+      return {
+        conversationPublicId: conversation.publicId,
+        messagePublicId: found.row.publicId,
+        totalPinnedCount: activePins.length,
+        changed: deleted.length > 0,
+        peerPublicId: peerUser!.publicId,
+        updatedAt: currentTime.toISOString(),
+      };
+    });
+
+    if (outcome.changed) {
+      const eventPayload = {
+        conversationPublicId: outcome.conversationPublicId,
+        messagePublicId: outcome.messagePublicId,
+        pinned: false,
+        actorPublicId: actor.user.publicId,
+        updatedAt: outcome.updatedAt,
+      };
+      await Promise.all([
+        this.publishChatEventBestEffort(
+          actor.user.publicId,
+          'chat.message.pin.updated',
+          eventPayload,
+        ),
+        this.publishChatEventBestEffort(
+          outcome.peerPublicId,
+          'chat.message.pin.updated',
+          eventPayload,
+        ),
+      ]);
+    }
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      messagePublicId: outcome.messagePublicId,
+      isPinned: false,
+      totalPinnedCount: outcome.totalPinnedCount,
+      message: CHAT_MESSAGES.messageUnpinned,
+    };
+  }
+
+  /**
+   * Cập nhật tùy chọn cá nhân cho 1 đoạn chat (Ghim đoạn chat tối đa 3 & Tắt/Bật thông báo).
+   * Tùy chọn này 100% RIÊNG TƯ — sự kiện Realtime CHỈ phát tới kênh `user:{actor.publicId}`.
+   */
+  async updateConversationPreferences(
+    actor: AuthenticatedPrincipal,
+    rawConversationPublicId: string,
+    rawInput: unknown,
+  ): Promise<ConversationPreferencesResult> {
+    assertChatAuthorized(actor, 'chat:conversation:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:conversations:preferences:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.updateConversationPreferencesByUser,
+    );
+
+    const conversationPublicId = parsePublicIdOrThrowNotFound(rawConversationPublicId);
+    const parsed = updateConversationPreferencesInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    const currentTime = this.now();
+
+    const outcome = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      // Khóa dòng `users` của chính actor khi bật ghim để tuần tự hóa hạn mức tối đa 3 đoạn chat ghim.
+      if (
+        parsed.data.pinned === true &&
+        typeof this.repository.lockUsersInCanonicalOrder === 'function'
+      ) {
+        await this.repository.lockUsersInCanonicalOrder([actor.user.id], tx);
+      }
+
+      const conversation = await this.repository.lockConversationByPublicId(
+        conversationPublicId,
+        tx,
+      );
+      if (!conversation) {
+        throw new ChatDomainError({
+          status: 404,
+          code: 'NOT_FOUND',
+          message: CHAT_MESSAGES.notFound,
+        });
+      }
+
+      const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
+      const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
+      const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
+      const peerUser = peerParticipant
+        ? await this.repository.findUserById(peerParticipant.userId, tx)
+        : null;
+      const relationship = peerUser
+        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
+        : null;
+
+      assertChatAuthorized(actor, 'chat:conversation:preferences:update', {
+        conversation,
+        actorParticipant,
+        peerUser,
+        relationship,
+      });
+
+      if (parsed.data.pinned === true) {
+        if (actorParticipant!.inboxState !== 'primary' || actorParticipant!.hiddenAt !== null) {
+          throw new ChatDomainError({
+            status: 403,
+            code: 'FORBIDDEN',
+            message: CHAT_MESSAGES.pendingPinConversationForbidden,
+          });
+        }
+
+        if (!actorParticipant!.pinnedAt) {
+          const currentPinnedCount = await this.repository.countPinnedPrimaryConversationsForUser(
+            actor.user.id,
+            tx,
+          );
+          if (currentPinnedCount >= MAX_PINNED_CONVERSATIONS_PER_USER) {
+            throw new ChatDomainError({
+              status: 409,
+              code: 'CHAT_PINNED_CONVERSATIONS_LIMIT_REACHED',
+              message: CHAT_MESSAGES.pinnedConversationsLimitReached,
+            });
+          }
+        }
+      }
+
+      const nextPinnedAt =
+        parsed.data.pinned !== undefined
+          ? parsed.data.pinned
+            ? (actorParticipant!.pinnedAt ?? currentTime)
+            : null
+          : actorParticipant!.pinnedAt;
+
+      const nextMutedAt =
+        parsed.data.muted !== undefined
+          ? parsed.data.muted
+            ? (actorParticipant!.mutedAt ?? currentTime)
+            : null
+          : actorParticipant!.mutedAt;
+
+      const updated = (await this.repository.updateParticipantState(
+        conversation.id,
+        actor.user.id,
+        {
+          pinnedAt: nextPinnedAt,
+          mutedAt: nextMutedAt,
+        },
+        tx,
+      )) ?? {
+        ...actorParticipant!,
+        pinnedAt: nextPinnedAt,
+        mutedAt: nextMutedAt,
+      };
+
+      const unreadConversationsCount =
+        typeof this.repository.countUnreadPrimaryConversationsForUser === 'function'
+          ? await this.repository.countUnreadPrimaryConversationsForUser(actor.user.id, tx)
+          : 0;
+
+      return {
+        conversationPublicId: conversation.publicId,
+        pinnedAt: updated.pinnedAt ? updated.pinnedAt.toISOString() : null,
+        mutedAt: updated.mutedAt ? updated.mutedAt.toISOString() : null,
+        isPinned: Boolean(updated.pinnedAt),
+        isMuted: Boolean(updated.mutedAt),
+        unreadConversationsCount,
+        updatedAt: currentTime.toISOString(),
+      };
+    });
+
+    // CHỈ phát cho các tab của chính `actor`, tuyệt đối không lộ cho đối phương!
+    await this.publishChatEventBestEffort(
+      actor.user.publicId,
+      'chat.conversation.preferences.updated',
+      {
+        conversationPublicId: outcome.conversationPublicId,
+        pinnedAt: outcome.pinnedAt,
+        mutedAt: outcome.mutedAt,
+        isPinned: outcome.isPinned,
+        isMuted: outcome.isMuted,
+        unreadConversationsCount: outcome.unreadConversationsCount,
+        updatedAt: outcome.updatedAt,
+      },
+    );
+
+    return {
+      conversationPublicId: outcome.conversationPublicId,
+      pinnedAt: outcome.pinnedAt,
+      mutedAt: outcome.mutedAt,
+      isPinned: outcome.isPinned,
+      isMuted: outcome.isMuted,
+      unreadConversationsCount: outcome.unreadConversationsCount,
+      message: CHAT_MESSAGES.conversationPreferencesUpdated,
+    };
+  }
+
+  /**
+   * Liệt kê danh sách người nhận đủ điều kiện Chuyển tiếp (Mutual Follow ∪ Đã từng trò chuyện).
+   */
+  async listForwardTargets(
+    actor: AuthenticatedPrincipal,
+    rawQuery: Record<string, unknown>,
+  ): Promise<ForwardTargetsListResult> {
+    assertChatAuthorized(actor, 'chat:forward:targets:list');
+    await this.consumeRateLimitOrThrow(
+      `chat:forward:targets:user:${actor.user.id}`,
+      CHAT_RATE_LIMITS.listForwardTargetsByUser,
+    );
+
+    const parsed = listForwardTargetsQuerySchema.safeParse(rawQuery);
+    if (!parsed.success) {
+      throw new ChatDomainError({
+        status: 400,
+        code: 'VALIDATION_ERROR',
+        message: CHAT_MESSAGES.validationFailed,
+        details: formatZodErrorDetails(parsed.error),
+      });
+    }
+
+    const rows = await this.repository.runInRlsTx(actor.user.id, async (tx) => {
+      return this.repository.listEligibleForwardTargets(
+        {
+          actorUserId: actor.user.id,
+          query: parsed.data.q,
+          limit: parsed.data.limit,
+        },
+        tx,
+      );
+    });
+
+    return {
+      items: rows.map((row) => ({
+        public_id: row.publicId,
+        handle: row.handle,
+        fullName: row.fullName,
+        avatarUrl: row.avatarUrl,
+        isPrivate: row.isPrivate,
+        conversationPublicId: row.conversationPublicId,
+        lastMessageAt: row.lastMessageAt ? row.lastMessageAt.toISOString() : null,
+      })),
+    };
+  }
+
   private async publishChatEventBestEffort(
     recipientPublicId: string,
     eventName:
@@ -3710,8 +5148,11 @@ export class ChatService {
       | 'chat.message.updated'
       | 'chat.message.recalled'
       | 'chat.message.deleted_for_me'
+      | 'chat.message.reaction.updated'
+      | 'chat.message.pin.updated'
       | 'chat.conversation.read'
       | 'chat.conversation.updated'
+      | 'chat.conversation.preferences.updated'
       | 'chat.conversation.deleted',
     payload: Record<string, unknown>,
   ): Promise<void> {

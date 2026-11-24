@@ -303,6 +303,8 @@ describe('Security M10: Ma trận BOLA 5 nhân vật, Sửa/Thu hồi trong 5 ph
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: r.joinedAt,
           }));
           if (rows[0]) {
@@ -492,6 +494,8 @@ describe('Security M10: Ma trận BOLA 5 nhân vật, Sửa/Thu hồi trong 5 ph
           cryptoHeader: params.cryptoHeader,
           callEventMeta: null,
           attachmentStorageKey: null,
+          replyToMessageId: params.replyToMessageId ?? null,
+          isForwarded: params.isForwarded === true,
           editCount: 0,
           editedAt: null,
           recalledAt: null,

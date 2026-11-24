@@ -337,6 +337,8 @@ describe('Security M11: Ảnh HD & Tin nhắn thoại E2EE — BOLA/Pending/CSRF
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: r.joinedAt,
           }));
           if (rows[0]) participantsByConv.set(rows[0].conversationId, created);
@@ -402,6 +404,8 @@ describe('Security M11: Ảnh HD & Tin nhắn thoại E2EE — BOLA/Pending/CSRF
           cryptoHeader: input.cryptoHeader,
           callEventMeta: null,
           attachmentStorageKey: input.attachmentStorageKey ?? null,
+          replyToMessageId: input.replyToMessageId ?? null,
+          isForwarded: input.isForwarded === true,
           editCount: 0,
           editedAt: null,
           recalledAt: null,

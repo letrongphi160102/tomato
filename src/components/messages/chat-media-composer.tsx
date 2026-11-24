@@ -5,6 +5,7 @@ import { Check, Image as ImageIcon, Loader2, Mic, Send, Trash2, X } from 'lucide
 
 import { EmojiPickerPopover } from '@/components/messages/emoji-picker-popover';
 import { MessageEditBanner } from '@/components/messages/message-edit-banner';
+import { MessageReplyBanner } from '@/components/messages/message-reply-banner';
 import { Button } from '@/components/ui/button';
 import {
   MAX_CHAT_IMAGE_INPUT_BYTES,
@@ -430,10 +431,15 @@ export interface ChatComposerWithMediaProps {
   readonly editDraftText: string;
   readonly editingOriginalText: string | null;
   readonly editSaving: boolean;
+  readonly replyingTo?: {
+    readonly recipientLabel: string;
+    readonly previewText: string;
+  } | null;
   readonly composerInputRef: React.RefObject<HTMLTextAreaElement | null>;
   readonly onChangeDraftText: (next: string) => void;
   readonly onChangeEditDraftText: (next: string) => void;
   readonly onCancelEdit: () => void;
+  readonly onCancelReply?: () => void;
   readonly onSubmitTextOrEdit: (event?: React.FormEvent) => Promise<void>;
   readonly onSendImageFile: (file: File) => Promise<void>;
   readonly onSendVoice: (recorded: RecordedChatVoice) => Promise<void>;
@@ -453,10 +459,12 @@ export function ChatComposerWithMedia({
   editDraftText,
   editingOriginalText,
   editSaving,
+  replyingTo = null,
   composerInputRef,
   onChangeDraftText,
   onChangeEditDraftText,
   onCancelEdit,
+  onCancelReply,
   onSubmitTextOrEdit,
   onSendImageFile,
   onSendVoice,
@@ -615,6 +623,13 @@ export function ChatComposerWithMedia({
           saving={editSaving}
           onCancel={onCancelEdit}
         />
+      ) : replyingTo && onCancelReply ? (
+        <MessageReplyBanner
+          recipientLabel={replyingTo.recipientLabel}
+          previewText={replyingTo.previewText}
+          compact={compact}
+          onCancel={onCancelReply}
+        />
       ) : null}
 
       {!isEditing && stagedImages.length > 0 ? (
@@ -767,6 +782,11 @@ export function ChatComposerWithMedia({
             if (e.key === 'Escape' && isEditing && !editSaving) {
               e.preventDefault();
               onCancelEdit();
+              return;
+            }
+            if (e.key === 'Escape' && !isEditing && replyingTo && onCancelReply) {
+              e.preventDefault();
+              onCancelReply();
               return;
             }
             if (e.key === 'Enter' && !e.shiftKey) {

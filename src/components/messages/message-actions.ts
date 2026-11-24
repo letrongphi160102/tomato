@@ -3,15 +3,22 @@ import type {
   MessageBubbleClusterPosition,
 } from '@/components/messages/message-grouping';
 import type { MessageCallEventMetaRecord } from '@/core/db/schema/messages';
-import type { ChatMessageDto } from '@/modules/chat';
+import { sanitizeReplyTextExcerpt } from '@/lib/e2ee/cipher';
+import type { DecryptedMessageReplyPayload } from '@/lib/e2ee/types';
+import type { ChatMessageDto, ConversationSummaryDto } from '@/modules/chat';
 
 export const MESSAGE_EDIT_WINDOW_MS = 5 * 60 * 1000;
 export const MESSAGE_RECALL_WINDOW_MS = 5 * 60 * 1000;
 export const MAX_MESSAGE_EDIT_COUNT = 5;
+export const MAX_PINNED_MESSAGES = 5;
+export const MAX_PINNED_CONVERSATIONS = 3;
+export const MAX_FORWARD_RECIPIENTS = 5;
+export const MAX_JUMP_LOAD_PAGES = 4;
 export const RECALLED_MESSAGE_PLACEHOLDER = 'Tin nhắn đã được thu hồi';
 export const IMAGE_MESSAGE_PREVIEW_LABEL = 'Đã gửi một ảnh';
 export const VOICE_MESSAGE_PREVIEW_LABEL = 'Tin nhắn thoại';
 export const PIN_SYNC_REQUIRED_PREVIEW = 'Nhập mã PIN để xem tin nhắn';
+export const PINNED_MESSAGE_NEEDS_PIN_LABEL = 'Nhập mã PIN để xem tin nhắn đã ghim';
 export const UNAVAILABLE_OLD_MESSAGE_PREVIEW = 'Tin nhắn không khả dụng trên thiết bị này';
 
 export function formatCallEventDurationVi(totalSeconds: number): string {
@@ -99,6 +106,122 @@ export function canRecallMessage(item: GroupableMessageItem, nowMs: number = Dat
  */
 export function canDeleteMessageForMe(item: GroupableMessageItem): boolean {
   return !item.sending && !item.sendError && item.dto.seq > 0;
+}
+
+export function isConversationPrimaryBothSides(
+  conversation?: ConversationSummaryDto | null,
+): boolean {
+  if (!conversation) {
+    return true;
+  }
+  return conversation.myState.inboxState === 'primary' && !conversation.isAwaitingPeerAcceptance;
+}
+
+export function canReactToMessage(
+  item: GroupableMessageItem,
+  conversation?: ConversationSummaryDto | null,
+): boolean {
+  if (
+    item.sending ||
+    Boolean(item.sendError) ||
+    item.dto.seq <= 0 ||
+    item.dto.recalledAt !== null ||
+    item.dto.messageType === 'call_event'
+  ) {
+    return false;
+  }
+  return isConversationPrimaryBothSides(conversation);
+}
+
+export function canReplyToMessage(item: GroupableMessageItem): boolean {
+  return (
+    !item.sending &&
+    !item.sendError &&
+    item.dto.seq > 0 &&
+    item.dto.recalledAt === null &&
+    item.dto.messageType !== 'call_event' &&
+    !item.decryptionFailed
+  );
+}
+
+export function canForwardMessage(item: GroupableMessageItem): boolean {
+  return (
+    !item.sending &&
+    !item.sendError &&
+    item.dto.seq > 0 &&
+    item.dto.recalledAt === null &&
+    item.dto.messageType !== 'call_event' &&
+    !item.decryptionFailed
+  );
+}
+
+export function canCopyMessage(item: GroupableMessageItem): boolean {
+  return (
+    !item.sending &&
+    !item.sendError &&
+    item.dto.recalledAt === null &&
+    item.dto.messageType === 'text' &&
+    !item.decryptionFailed &&
+    item.plaintext.trim().length > 0
+  );
+}
+
+export function canPinMessage(
+  item: GroupableMessageItem,
+  conversation?: ConversationSummaryDto | null,
+): boolean {
+  if (
+    item.sending ||
+    Boolean(item.sendError) ||
+    item.dto.seq <= 0 ||
+    item.dto.recalledAt !== null ||
+    item.dto.messageType === 'call_event'
+  ) {
+    return false;
+  }
+  return isConversationPrimaryBothSides(conversation);
+}
+
+export function buildReplyPayloadFromMessage(
+  item: GroupableMessageItem,
+): DecryptedMessageReplyPayload {
+  const messageType =
+    item.dto.messageType === 'image'
+      ? 'image'
+      : item.dto.messageType === 'voice'
+        ? 'voice'
+        : 'text';
+  const rawExcerpt =
+    messageType === 'image'
+      ? 'Hình ảnh'
+      : messageType === 'voice'
+        ? VOICE_MESSAGE_PREVIEW_LABEL
+        : item.plaintext;
+  return {
+    messagePublicId: item.dto.public_id,
+    senderPublicId: item.dto.senderPublicId,
+    messageType,
+    textExcerpt: sanitizeReplyTextExcerpt(rawExcerpt),
+  };
+}
+
+export function getPinnedMessagePreviewText(
+  item: GroupableMessageItem,
+  options?: { readonly needsPinSync?: boolean },
+): string {
+  if (item.dto.recalledAt !== null) {
+    return RECALLED_MESSAGE_PLACEHOLDER;
+  }
+  if (item.decryptionFailed) {
+    return options?.needsPinSync ? PINNED_MESSAGE_NEEDS_PIN_LABEL : UNAVAILABLE_OLD_MESSAGE_PREVIEW;
+  }
+  if (item.dto.messageType === 'image') {
+    return 'Hình ảnh';
+  }
+  if (item.dto.messageType === 'voice') {
+    return VOICE_MESSAGE_PREVIEW_LABEL;
+  }
+  return item.plaintext.trim() || 'Tin nhắn';
 }
 
 export function getMessageBubbleRadiusClasses(

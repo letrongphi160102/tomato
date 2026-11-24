@@ -22,18 +22,31 @@ import {
   revokeMediaObjectUrlsByConversationId,
   shouldRenderFloatingMessagesWidget,
   type CachedConversationThreadState,
+  type CachedPinnedMessagesState,
   type ChatStoreContextValue,
   type DecryptedMessageViewItem,
+  type DecryptedPinnedMessageViewItem,
+  type ForwardMessageBatchResult,
+  type ForwardRecipientOutcome,
+  type JumpToMessageResult,
+  type PinMessageOutcome,
   type PinSyncState,
 } from '@/components/messages/chat-store-context';
 import {
   formatCallEventLabel,
   getConversationPreviewText,
   IMAGE_MESSAGE_PREVIEW_LABEL,
+  MAX_FORWARD_RECIPIENTS,
+  MAX_JUMP_LOAD_PAGES,
+  MAX_PINNED_MESSAGES,
   RECALLED_MESSAGE_PLACEHOLDER,
   VOICE_MESSAGE_PREVIEW_LABEL,
 } from '@/components/messages/message-actions';
-import { isConversationUnread } from '@/components/messages/message-grouping';
+import {
+  isConversationUnread,
+  isConversationUnreadForBadge,
+  sortPrimaryConversationsWithPins,
+} from '@/components/messages/message-grouping';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { authFetch } from '@/lib/auth-client';
 import {
@@ -62,19 +75,26 @@ import {
 import {
   E2eeCryptoError,
   type DecryptedMessageMediaPayload,
+  type DecryptedMessageReplyPayload,
   type E2eeTargetDevicePublicKey,
 } from '@/lib/e2ee/types';
 import type {
   ChatMessageDto,
   ConversationListResult,
+  ConversationPreferencesResult,
   ConversationSummaryDto,
   CreateAttachmentUploadTokenResult,
   DeleteConversationForMeResult,
   DeleteMessageForMeResult,
   E2eeKeyBackupDto,
+  ForwardTargetDto,
   MarkConversationReadResult,
   MessageAttachmentDownloadGrantDto,
   MessageListResult,
+  MessagePinMutationResult,
+  MessageReactionDto,
+  MessageReactionMutationResult,
+  PinnedMessagesListResult,
   SendMessageResult,
   UserE2eeKeyBundleDto,
 } from '@/modules/chat';
@@ -177,6 +197,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   const inFlightThreadLoadByConvRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightSingleMsgSyncRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightMediaDownloadsRef = React.useRef<Map<string, Promise<string | null>>>(new Map());
+  const inFlightPinsLoadRef = React.useRef<Map<string, Promise<CachedPinnedMessagesState | null>>>(
+    new Map(),
+  );
   const inFlightReadReqRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightOwnStatusRef = React.useRef<Promise<UserE2eeKeyBundleDto | null> | null>(null);
   const prevReadReceiptsEnabledRef = React.useRef<boolean | undefined>(
@@ -578,6 +601,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           dto,
           plaintext: cached.plaintext,
           ...(cached.media ? { media: cached.media } : {}),
+          ...(cached.replyTo ? { replyTo: cached.replyTo } : {}),
+          ...(cached.forwarded ? { forwarded: true } : {}),
           decryptionFailed: false,
         };
       }
@@ -626,6 +651,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         putLruDecryptedMessageCache(store.decryptedMessagesByCacheKey, cacheKey, {
           plaintext: decrypted.text,
           ...(decrypted.media ? { media: decrypted.media } : {}),
+          ...(decrypted.replyTo ? { replyTo: decrypted.replyTo } : {}),
+          ...(decrypted.forwarded ? { forwarded: true } : {}),
           decryptionFailed: false,
         });
 
@@ -633,6 +660,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           dto,
           plaintext: decrypted.text,
           ...(decrypted.media ? { media: decrypted.media } : {}),
+          ...(decrypted.replyTo ? { replyTo: decrypted.replyTo } : {}),
+          ...(decrypted.forwarded ? { forwarded: true } : {}),
           decryptionFailed: false,
         };
       } catch {
@@ -863,11 +892,12 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
           targetStore.hasLoadedPrimary = true;
           setHasLoadedPrimaryState(true);
-          setPrimaryConversations(normalizedItems);
+          const sortedPrimary = sortPrimaryConversationsWithPins(normalizedItems);
+          setPrimaryConversations(sortedPrimary);
 
           targetStore.unreadPrimaryConvIds.clear();
-          for (const convItem of normalizedItems) {
-            if (isConversationUnread(convItem)) {
+          for (const convItem of sortedPrimary) {
+            if (isConversationUnreadForBadge(convItem)) {
               targetStore.unreadPrimaryConvIds.add(convItem.public_id);
             }
           }
@@ -1107,9 +1137,131 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     [],
   );
 
+  const getPinnedState = React.useCallback(
+    (conversationPublicId: string): CachedPinnedMessagesState | null => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      return store.pinnedByConvId.get(conversationPublicId) ?? null;
+    },
+    [currentUserPublicId],
+  );
+
+  const loadPinnedMessages = React.useCallback(
+    async (
+      conversationPublicId: string,
+      options?: { readonly force?: boolean },
+    ): Promise<CachedPinnedMessagesState | null> => {
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const cached = store.pinnedByConvId.get(conversationPublicId) ?? null;
+      if (cached && cached.hasLoaded && !options?.force) {
+        return cached;
+      }
+
+      const existing = inFlightPinsLoadRef.current.get(conversationPublicId);
+      if (existing && !options?.force) {
+        return existing;
+      }
+
+      const conv = resolveConversationById(conversationPublicId);
+      if (conv && (conv.myState.inboxState !== 'primary' || conv.isAwaitingPeerAcceptance)) {
+        const emptyState: CachedPinnedMessagesState = {
+          conversationPublicId,
+          items: [],
+          totalPinnedCount: 0,
+          hiddenPinnedCount: 0,
+          maxPinnedMessages: MAX_PINNED_MESSAGES,
+          loading: false,
+          hasLoaded: true,
+        };
+        store.pinnedByConvId.set(conversationPublicId, emptyState);
+        bumpThreadVersion();
+        return emptyState;
+      }
+
+      store.pinnedByConvId.set(conversationPublicId, {
+        conversationPublicId,
+        items: cached?.items ?? [],
+        totalPinnedCount: cached?.totalPinnedCount ?? 0,
+        hiddenPinnedCount: cached?.hiddenPinnedCount ?? 0,
+        maxPinnedMessages: MAX_PINNED_MESSAGES,
+        loading: true,
+        hasLoaded: cached?.hasLoaded ?? false,
+      });
+      bumpThreadVersion();
+
+      const task = (async (): Promise<CachedPinnedMessagesState | null> => {
+        try {
+          const peerId = resolveConversationById(conversationPublicId)?.peer.public_id;
+          const [res, peerBundle] = await Promise.all([
+            authFetch(`/api/v1/conversations/${encodeURIComponent(conversationPublicId)}/pins`),
+            peerId ? ensurePeerKeyBundle(peerId) : Promise.resolve(null),
+          ]);
+          if (!res.ok) {
+            return store.pinnedByConvId.get(conversationPublicId) ?? null;
+          }
+          const data = (await res.json()) as PinnedMessagesListResult;
+          const decryptedItems: DecryptedPinnedMessageViewItem[] = await Promise.all(
+            data.items.map(async (entry) => {
+              const senderBundle = entry.message.isOwnMessage
+                ? ownKeyBundleRef.current
+                : peerBundle;
+              const dec = await decryptSingleMessageCached(entry.message, senderBundle);
+              return {
+                message: dec,
+                pinnedAt: entry.pinnedAt,
+                pinnedByPublicId: entry.pinnedByPublicId,
+              };
+            }),
+          );
+
+          const nextState: CachedPinnedMessagesState = {
+            conversationPublicId,
+            items: decryptedItems,
+            totalPinnedCount: data.totalPinnedCount,
+            hiddenPinnedCount: data.hiddenPinnedCount,
+            maxPinnedMessages: data.maxPinnedMessages,
+            loading: false,
+            hasLoaded: true,
+          };
+          getOrInitUserChatRamCache(currentUserPublicId).pinnedByConvId.set(
+            conversationPublicId,
+            nextState,
+          );
+          bumpThreadVersion();
+          return nextState;
+        } catch {
+          const fallback =
+            getOrInitUserChatRamCache(currentUserPublicId).pinnedByConvId.get(conversationPublicId);
+          if (fallback) {
+            getOrInitUserChatRamCache(currentUserPublicId).pinnedByConvId.set(
+              conversationPublicId,
+              { ...fallback, loading: false },
+            );
+            bumpThreadVersion();
+          }
+          return fallback ?? null;
+        } finally {
+          inFlightPinsLoadRef.current.delete(conversationPublicId);
+        }
+      })();
+
+      inFlightPinsLoadRef.current.set(conversationPublicId, task);
+      return task;
+    },
+    [
+      bumpThreadVersion,
+      currentUserPublicId,
+      decryptSingleMessageCached,
+      ensurePeerKeyBundle,
+      resolveConversationById,
+    ],
+  );
+
   const openConversationThread = React.useCallback(
     async (conv: ConversationSummaryDto, options?: { readonly forceReload?: boolean }) => {
       selectConversation(conv);
+      if (conv.myState.inboxState === 'primary' && !conv.isAwaitingPeerAcceptance) {
+        void loadPinnedMessages(conv.public_id, { force: options?.forceReload });
+      }
 
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       const cachedThread = store.threadsByConvId.get(conv.public_id);
@@ -1274,6 +1426,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       decryptSingleMessageCached,
       deltaSyncConversationThread,
       ensurePeerKeyBundle,
+      loadPinnedMessages,
       markConversationReadOptimistic,
       refreshOwnE2eeStatus,
       resolveSafeAutoReadSeq,
@@ -1374,6 +1527,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     async (params: {
       readonly conversation: ConversationSummaryDto;
       readonly plaintext: string;
+      readonly replyTo?: DecryptedMessageReplyPayload | null;
       readonly retryClientMsgId?: string;
     }) => {
       const trimmed = params.plaintext.trim();
@@ -1388,6 +1542,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         params.retryClientMsgId ??
         `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
       const nowIso = new Date().toISOString();
+      const replyToPayload = params.replyTo ?? undefined;
 
       const currentThread = store.threadsByConvId.get(convId);
       const optimisticSeq =
@@ -1404,12 +1559,25 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           messageType: 'text',
           ciphertext: null,
           cryptoHeader: null,
+          reactions: [],
+          replyToMeta: replyToPayload
+            ? {
+                messagePublicId: replyToPayload.messagePublicId,
+                senderPublicId: replyToPayload.senderPublicId,
+                seq: 0,
+                messageType: replyToPayload.messageType,
+                recalledAt: null,
+                deletedForViewer: false,
+              }
+            : null,
+          isPinned: false,
           editCount: 0,
           editedAt: null,
           recalledAt: null,
           createdAt: nowIso,
         },
         plaintext: trimmed,
+        ...(replyToPayload ? { replyTo: replyToPayload } : {}),
         decryptionFailed: false,
         sending: true,
         sendError: null,
@@ -1462,6 +1630,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           senderPublicId: currentUserPublicId,
           clientMsgId,
           plaintext: trimmed,
+          ...(replyToPayload ? { replyTo: replyToPayload } : {}),
           senderDevice,
           recipientDevices: peerKeyBundle.devices,
           senderOtherDevices,
@@ -1478,6 +1647,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               messageType: 'text',
               ciphertext: envelope.ciphertext,
               cryptoHeader: envelope.cryptoHeader,
+              ...(replyToPayload ? { replyToMessagePublicId: replyToPayload.messagePublicId } : {}),
             }),
           },
         );
@@ -1498,6 +1668,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           buildMessageDecryptCacheKey(data.message),
           {
             plaintext: trimmed,
+            ...(replyToPayload ? { replyTo: replyToPayload } : {}),
             decryptionFailed: false,
           },
         );
@@ -1515,6 +1686,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
                 ? {
                     dto: data.message,
                     plaintext: trimmed,
+                    ...(replyToPayload ? { replyTo: replyToPayload } : {}),
                     decryptionFailed: false,
                     sending: false,
                     sendError: null,
@@ -1541,7 +1713,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         setPrimaryConversations((prev) => {
           const filtered = prev.filter((c) => c.public_id !== convId);
-          return [data.conversation, ...filtered];
+          return sortPrimaryConversationsWithPins([data.conversation, ...filtered]);
         });
       } catch (error) {
         const message =
@@ -1726,6 +1898,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     async (params: {
       readonly conversation: ConversationSummaryDto;
       readonly file: File | Blob;
+      readonly replyTo?: DecryptedMessageReplyPayload | null;
     }) => {
       if (!params.conversation.canSendMedia) {
         throw new Error('Cuộc trò chuyện đang chờ chấp nhận nên chưa thể gửi ảnh.');
@@ -1736,6 +1909,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       const peerPublicId = params.conversation.peer.public_id;
       const clientMsgId = `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
       const nowIso = new Date().toISOString();
+      const replyToPayload = params.replyTo ?? undefined;
 
       const prepared = await prepareHdImageForEncryption(params.file);
       const tempPreviewUrl = URL.createObjectURL(
@@ -1757,6 +1931,18 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           messageType: 'image',
           ciphertext: null,
           cryptoHeader: null,
+          reactions: [],
+          replyToMeta: replyToPayload
+            ? {
+                messagePublicId: replyToPayload.messagePublicId,
+                senderPublicId: replyToPayload.senderPublicId,
+                seq: 0,
+                messageType: replyToPayload.messageType,
+                recalledAt: null,
+                deletedForViewer: false,
+              }
+            : null,
+          isPinned: false,
           editCount: 0,
           editedAt: null,
           recalledAt: null,
@@ -1775,6 +1961,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           height: prepared.height,
           ...(prepared.thumbnailDataUrl ? { thumbnailDataUrl: prepared.thumbnailDataUrl } : {}),
         },
+        ...(replyToPayload ? { replyTo: replyToPayload } : {}),
         localPreviewUrl: tempPreviewUrl,
         decryptionFailed: false,
         sending: true,
@@ -1863,6 +2050,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           clientMsgId,
           plaintext: '',
           media: mediaPayload,
+          ...(replyToPayload ? { replyTo: replyToPayload } : {}),
           senderDevice,
           recipientDevices: peerKeyBundle.devices,
           senderOtherDevices,
@@ -1880,6 +2068,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               attachmentPublicId: uploadGrant.attachmentPublicId,
               ciphertext: envelope.ciphertext,
               cryptoHeader: envelope.cryptoHeader,
+              ...(replyToPayload ? { replyToMessagePublicId: replyToPayload.messagePublicId } : {}),
             }),
           },
         );
@@ -1899,6 +2088,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           {
             plaintext: '',
             media: mediaPayload,
+            ...(replyToPayload ? { replyTo: replyToPayload } : {}),
             decryptionFailed: false,
           },
         );
@@ -1925,6 +2115,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
                     dto: data.message,
                     plaintext: '',
                     media: mediaPayload,
+                    ...(replyToPayload ? { replyTo: replyToPayload } : {}),
                     decryptionFailed: false,
                     sending: false,
                     sendError: null,
@@ -1951,7 +2142,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         setPrimaryConversations((prev) => {
           const filtered = prev.filter((c) => c.public_id !== convId);
-          return [data.conversation, ...filtered];
+          return sortPrimaryConversationsWithPins([data.conversation, ...filtered]);
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Không thể gửi ảnh lúc này.';
@@ -1999,6 +2190,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       readonly mimeType: string;
       readonly durationMs: number;
       readonly waveform: readonly number[];
+      readonly replyTo?: DecryptedMessageReplyPayload | null;
     }) => {
       if (!params.conversation.canSendMedia) {
         throw new Error('Cuộc trò chuyện đang chờ chấp nhận nên chưa thể gửi tin nhắn thoại.');
@@ -2017,6 +2209,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       const peerPublicId = params.conversation.peer.public_id;
       const clientMsgId = `voc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
       const nowIso = new Date().toISOString();
+      const replyToPayload = params.replyTo ?? undefined;
       const tempAudioUrl = URL.createObjectURL(new Blob([rawBytes], { type: validated.mimeType }));
 
       const currentThread = store.threadsByConvId.get(convId);
@@ -2034,6 +2227,18 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           messageType: 'voice',
           ciphertext: null,
           cryptoHeader: null,
+          reactions: [],
+          replyToMeta: replyToPayload
+            ? {
+                messagePublicId: replyToPayload.messagePublicId,
+                senderPublicId: replyToPayload.senderPublicId,
+                seq: 0,
+                messageType: replyToPayload.messageType,
+                recalledAt: null,
+                deletedForViewer: false,
+              }
+            : null,
+          isPinned: false,
           editCount: 0,
           editedAt: null,
           recalledAt: null,
@@ -2051,6 +2256,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           durationMs: validated.durationMs,
           waveform: normalizedWaveform,
         },
+        ...(replyToPayload ? { replyTo: replyToPayload } : {}),
         localPreviewUrl: tempAudioUrl,
         decryptionFailed: false,
         sending: true,
@@ -2138,6 +2344,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           clientMsgId,
           plaintext: '',
           media: mediaPayload,
+          ...(replyToPayload ? { replyTo: replyToPayload } : {}),
           senderDevice,
           recipientDevices: peerKeyBundle.devices,
           senderOtherDevices,
@@ -2155,6 +2362,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               attachmentPublicId: uploadGrant.attachmentPublicId,
               ciphertext: envelope.ciphertext,
               cryptoHeader: envelope.cryptoHeader,
+              ...(replyToPayload ? { replyToMessagePublicId: replyToPayload.messagePublicId } : {}),
             }),
           },
         );
@@ -2174,6 +2382,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           {
             plaintext: '',
             media: mediaPayload,
+            ...(replyToPayload ? { replyTo: replyToPayload } : {}),
             decryptionFailed: false,
           },
         );
@@ -2199,6 +2408,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
                     dto: data.message,
                     plaintext: '',
                     media: mediaPayload,
+                    ...(replyToPayload ? { replyTo: replyToPayload } : {}),
                     decryptionFailed: false,
                     sending: false,
                     sendError: null,
@@ -2225,7 +2435,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
         setPrimaryConversations((prev) => {
           const filtered = prev.filter((c) => c.public_id !== convId);
-          return [data.conversation, ...filtered];
+          return sortPrimaryConversationsWithPins([data.conversation, ...filtered]);
         });
       } catch (error) {
         const message =
@@ -2417,32 +2627,71 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           return {
             ...prev,
             items: prev.items.map((item) => {
-              if (item.dto.public_id !== messagePublicId) {
-                return item;
-              }
-              if (item.localPreviewUrl) {
-                try {
-                  URL.revokeObjectURL(item.localPreviewUrl);
-                } catch {
-                  // Bỏ qua nếu đã giải phóng.
+              if (item.dto.public_id === messagePublicId) {
+                if (item.localPreviewUrl) {
+                  try {
+                    URL.revokeObjectURL(item.localPreviewUrl);
+                  } catch {
+                    // Bỏ qua nếu đã giải phóng.
+                  }
                 }
+                return {
+                  ...item,
+                  dto: {
+                    ...item.dto,
+                    ciphertext: null,
+                    cryptoHeader: null,
+                    reactions: [],
+                    isPinned: false,
+                    recalledAt,
+                  },
+                  plaintext: RECALLED_MESSAGE_PLACEHOLDER,
+                  media: undefined,
+                  localPreviewUrl: undefined,
+                  decryptionFailed: false,
+                };
               }
-              return {
-                ...item,
-                dto: {
-                  ...item.dto,
-                  ciphertext: null,
-                  cryptoHeader: null,
-                  recalledAt,
-                },
-                plaintext: RECALLED_MESSAGE_PLACEHOLDER,
-                media: undefined,
-                localPreviewUrl: undefined,
-                decryptionFailed: false,
-              };
+
+              // Cập nhật tức thì trích dẫn trả lời trỏ tới tin vừa thu hồi mà không cần F5.
+              const repliesToRecalled =
+                item.dto.replyToMeta?.messagePublicId === messagePublicId ||
+                item.replyTo?.messagePublicId === messagePublicId;
+              if (repliesToRecalled) {
+                return {
+                  ...item,
+                  dto: {
+                    ...item.dto,
+                    replyToMeta: {
+                      messagePublicId,
+                      senderPublicId:
+                        item.dto.replyToMeta?.senderPublicId ?? item.replyTo?.senderPublicId ?? '',
+                      seq: item.dto.replyToMeta?.seq ?? seq ?? 0,
+                      messageType:
+                        item.dto.replyToMeta?.messageType ?? item.replyTo?.messageType ?? 'text',
+                      recalledAt,
+                      deletedForViewer: item.dto.replyToMeta?.deletedForViewer ?? false,
+                    },
+                  },
+                };
+              }
+
+              return item;
             }),
             lastAccessedAt: Date.now(),
           };
+        });
+      }
+
+      // Gỡ tin vừa thu hồi khỏi danh sách tin ghim trong RAM cache (nếu có).
+      const cachedPins = store.pinnedByConvId.get(conversationPublicId);
+      if (cachedPins && cachedPins.items.some((p) => p.message.dto.public_id === messagePublicId)) {
+        const nextItems = cachedPins.items.filter(
+          (p) => p.message.dto.public_id !== messagePublicId,
+        );
+        store.pinnedByConvId.set(conversationPublicId, {
+          ...cachedPins,
+          items: nextItems,
+          totalPinnedCount: Math.max(nextItems.length, cachedPins.totalPinnedCount - 1),
         });
       }
 
@@ -2530,6 +2779,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
       revokeMediaObjectUrlsByConversationId(store.mediaObjectUrlsByMsgId, conversationPublicId);
       store.threadsByConvId.delete(conversationPublicId);
+      store.pinnedByConvId.delete(conversationPublicId);
       store.unreadPrimaryConvIds.delete(conversationPublicId);
       store.lastSentReadSeqByConvId.delete(conversationPublicId);
 
@@ -2621,6 +2871,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         senderPublicId: currentUserPublicId,
         clientMsgId: params.message.dto.clientMsgId,
         plaintext: trimmed,
+        ...(params.message.replyTo ? { replyTo: params.message.replyTo } : {}),
+        ...(params.message.forwarded ? { forwarded: true } : {}),
         senderDevice,
         recipientDevices: peerKeyBundle.devices,
         senderOtherDevices,
@@ -2654,6 +2906,8 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         buildMessageDecryptCacheKey(updatedDto),
         {
           plaintext: trimmed,
+          ...(params.message.replyTo ? { replyTo: params.message.replyTo } : {}),
+          ...(params.message.forwarded ? { forwarded: true } : {}),
           decryptionFailed: false,
         },
       );
@@ -2818,6 +3072,17 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         const data = (await response.json()) as DeleteMessageForMeResult;
         purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, msgId);
         revokeMediaObjectUrlByMessageId(store.mediaObjectUrlsByMsgId, msgId);
+        const cachedPinsOnDelete = store.pinnedByConvId.get(convId);
+        if (
+          cachedPinsOnDelete &&
+          cachedPinsOnDelete.items.some((p) => p.message.dto.public_id === msgId)
+        ) {
+          store.pinnedByConvId.set(convId, {
+            ...cachedPinsOnDelete,
+            items: cachedPinsOnDelete.items.filter((p) => p.message.dto.public_id !== msgId),
+          });
+          bumpThreadVersion();
+        }
         if (removedItem?.localPreviewUrl) {
           try {
             URL.revokeObjectURL(removedItem.localPreviewUrl);
@@ -2887,6 +3152,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
     },
     [
+      bumpThreadVersion,
       currentUserPublicId,
       decryptSingleMessageCached,
       ensurePeerKeyBundle,
@@ -2931,6 +3197,734 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       });
     },
     [applyDeletedConversationLocally],
+  );
+
+  /**
+   * Giải mã tệp ảnh/thoại thành `Uint8Array` trực tiếp trong RAM để chuyển tiếp sang hội thoại khác
+   * (tuyệt đối KHÔNG gọi `fetch(blobUrl)` để tránh bị CSP `connect-src` chặn).
+   */
+  const decryptMessageMediaToRawBytes = React.useCallback(
+    async (
+      message: DecryptedMessageViewItem,
+    ): Promise<{
+      readonly plainBytes: Uint8Array<ArrayBuffer>;
+      readonly mimeType: string;
+    } | null> => {
+      const media = message.media;
+      if (
+        !media ||
+        message.decryptionFailed ||
+        message.dto.recalledAt !== null ||
+        message.sending ||
+        message.dto.seq <= 0
+      ) {
+        return null;
+      }
+
+      const grantRes = await authFetch(
+        `/api/v1/messages/${encodeURIComponent(message.dto.public_id)}/attachment`,
+      );
+      if (!grantRes.ok) {
+        return null;
+      }
+      const grant = (await grantRes.json()) as MessageAttachmentDownloadGrantDto;
+      if (grant.ciphertextSha256.toLowerCase() !== media.ciphertextSha256.toLowerCase()) {
+        return null;
+      }
+
+      const binaryRes = grant.downloadUrl.startsWith('/')
+        ? await authFetch(grant.downloadUrl)
+        : await fetch(grant.downloadUrl, { credentials: 'omit' });
+      if (!binaryRes.ok) {
+        return null;
+      }
+
+      const ciphertextBytes = new Uint8Array(await binaryRes.arrayBuffer());
+      const plainBytes = await decryptMediaBinary({
+        ciphertextBytes,
+        fileKey: media.fileKey,
+        fileIv: media.fileIv,
+        expectedSha256: media.ciphertextSha256,
+        conversationPublicId: message.dto.conversationPublicId,
+        senderPublicId: message.dto.senderPublicId,
+        clientMsgId: message.dto.clientMsgId,
+        mediaKind: media.kind,
+      });
+
+      return {
+        plainBytes,
+        mimeType: media.mimeType,
+      };
+    },
+    [],
+  );
+
+  /**
+   * Thả hoặc gỡ cảm xúc trên 1 tin nhắn (REST chuẩn: PUT khi thêm/đổi emoji, DELETE khi gỡ).
+   */
+  const reactToMessage = React.useCallback(
+    async (params: {
+      readonly conversationPublicId: string;
+      readonly messagePublicId: string;
+      readonly emoji: string | null;
+    }) => {
+      const { conversationPublicId, messagePublicId, emoji } = params;
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      const prevThread = store.threadsByConvId.get(conversationPublicId);
+      const prevReactions =
+        prevThread?.items.find((m) => m.dto.public_id === messagePublicId)?.dto.reactions ?? [];
+
+      const applyReactionsToThread = (nextReactions: readonly MessageReactionDto[]) => {
+        if (!store.threadsByConvId.has(conversationPublicId)) {
+          return;
+        }
+        updateThreadState(conversationPublicId, (prev) => {
+          if (!prev) {
+            return {
+              conversationPublicId,
+              items: [],
+              nextBeforeSeq: null,
+              highestSeq: 0,
+              hasInitialized: false,
+              loadingInitial: false,
+              loadingOlder: false,
+              lastAccessedAt: Date.now(),
+            };
+          }
+          return {
+            ...prev,
+            items: prev.items.map((item) =>
+              item.dto.public_id === messagePublicId
+                ? {
+                    ...item,
+                    dto: {
+                      ...item.dto,
+                      reactions: nextReactions,
+                    },
+                  }
+                : item,
+            ),
+            lastAccessedAt: Date.now(),
+          };
+        });
+      };
+
+      const optimisticReactions: MessageReactionDto[] = prevReactions.filter(
+        (r) => r.userPublicId.toLowerCase() !== currentUserPublicId.toLowerCase(),
+      );
+      if (emoji !== null) {
+        optimisticReactions.push({
+          userPublicId: currentUserPublicId,
+          emoji,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      applyReactionsToThread(optimisticReactions);
+
+      try {
+        const res =
+          emoji !== null
+            ? await authFetch(`/api/v1/messages/${encodeURIComponent(messagePublicId)}/reaction`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ emoji }),
+              })
+            : await authFetch(`/api/v1/messages/${encodeURIComponent(messagePublicId)}/reaction`, {
+                method: 'DELETE',
+              });
+
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as {
+            readonly error?: { readonly message?: string };
+          } | null;
+          throw new Error(errBody?.error?.message ?? 'Không thể cập nhật cảm xúc lúc này.');
+        }
+
+        const data = (await res.json()) as MessageReactionMutationResult;
+        applyReactionsToThread(data.reactions);
+      } catch (error) {
+        applyReactionsToThread(prevReactions);
+        throw error;
+      }
+    },
+    [currentUserPublicId, updateThreadState],
+  );
+
+  /**
+   * Ghim 1 tin nhắn (tối đa 5 tin/hội thoại, hỗ trợ gỡ ghim tin cũ ẩn phía mình khi đầy).
+   */
+  const pinMessage = React.useCallback(
+    async (params: {
+      readonly conversationPublicId: string;
+      readonly messagePublicId: string;
+      readonly unpinOldestHiddenIfFull?: boolean;
+    }): Promise<PinMessageOutcome> => {
+      const res = await authFetch(
+        `/api/v1/messages/${encodeURIComponent(params.messagePublicId)}/pin`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            params.unpinOldestHiddenIfFull ? { unpinOldestHiddenIfFull: true } : {},
+          ),
+        },
+      );
+
+      if (res.status === 409) {
+        const errBody = (await res.json().catch(() => null)) as {
+          readonly error?: {
+            readonly code?: string;
+            readonly message?: string;
+            readonly details?: ReadonlyArray<{
+              readonly field?: string;
+              readonly message?: string;
+            }>;
+          };
+        } | null;
+        const hiddenDetail = errBody?.error?.details?.find((d) => d.field === 'hiddenPinnedCount');
+        const hiddenPinnedCount = hiddenDetail
+          ? Number.parseInt(hiddenDetail.message ?? '0', 10) || 0
+          : 0;
+        return {
+          ok: false,
+          limitReached: errBody?.error?.code === 'CHAT_PINNED_MESSAGES_LIMIT_REACHED',
+          hiddenPinnedCount,
+          message:
+            errBody?.error?.message ??
+            'Đã đạt giới hạn tối đa 5 tin nhắn được ghim. Vui lòng gỡ ghim một tin nhắn trước khi ghim thêm.',
+        };
+      }
+
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        return {
+          ok: false,
+          limitReached: false,
+          hiddenPinnedCount: 0,
+          message: errBody?.error?.message ?? 'Không thể ghim tin nhắn lúc này.',
+        };
+      }
+
+      const data = (await res.json()) as MessagePinMutationResult;
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      if (store.threadsByConvId.has(params.conversationPublicId)) {
+        updateThreadState(params.conversationPublicId, (prev) => {
+          if (!prev) {
+            return {
+              conversationPublicId: params.conversationPublicId,
+              items: [],
+              nextBeforeSeq: null,
+              highestSeq: 0,
+              hasInitialized: false,
+              loadingInitial: false,
+              loadingOlder: false,
+              lastAccessedAt: Date.now(),
+            };
+          }
+          return {
+            ...prev,
+            items: prev.items.map((item) =>
+              item.dto.public_id === params.messagePublicId
+                ? { ...item, dto: { ...item.dto, isPinned: true } }
+                : item,
+            ),
+            lastAccessedAt: Date.now(),
+          };
+        });
+      }
+
+      void loadPinnedMessages(params.conversationPublicId, { force: true });
+      return { ok: true, totalPinnedCount: data.totalPinnedCount };
+    },
+    [currentUserPublicId, loadPinnedMessages, updateThreadState],
+  );
+
+  const unpinMessage = React.useCallback(
+    async (params: { readonly conversationPublicId: string; readonly messagePublicId: string }) => {
+      const res = await authFetch(
+        `/api/v1/messages/${encodeURIComponent(params.messagePublicId)}/pin`,
+        { method: 'DELETE' },
+      );
+
+      if (!res.ok && res.status !== 404) {
+        const errBody = (await res.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        throw new Error(errBody?.error?.message ?? 'Không thể gỡ ghim tin nhắn lúc này.');
+      }
+
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+      if (store.threadsByConvId.has(params.conversationPublicId)) {
+        updateThreadState(params.conversationPublicId, (prev) => {
+          if (!prev) {
+            return {
+              conversationPublicId: params.conversationPublicId,
+              items: [],
+              nextBeforeSeq: null,
+              highestSeq: 0,
+              hasInitialized: false,
+              loadingInitial: false,
+              loadingOlder: false,
+              lastAccessedAt: Date.now(),
+            };
+          }
+          return {
+            ...prev,
+            items: prev.items.map((item) =>
+              item.dto.public_id === params.messagePublicId
+                ? { ...item, dto: { ...item.dto, isPinned: false } }
+                : item,
+            ),
+            lastAccessedAt: Date.now(),
+          };
+        });
+      }
+
+      void loadPinnedMessages(params.conversationPublicId, { force: true });
+    },
+    [currentUserPublicId, loadPinnedMessages, updateThreadState],
+  );
+
+  /**
+   * Ghim / bỏ ghim đoạn chat (tối đa 3) & Tắt / bật thông báo đoạn chat (riêng tư từng tài khoản).
+   */
+  const updateConversationPreferences = React.useCallback(
+    async (params: {
+      readonly conversationPublicId: string;
+      readonly pinned?: boolean;
+      readonly muted?: boolean;
+    }): Promise<ConversationPreferencesResult> => {
+      const res = await authFetch(
+        `/api/v1/conversations/${encodeURIComponent(params.conversationPublicId)}/preferences`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...(params.pinned !== undefined ? { pinned: params.pinned } : {}),
+            ...(params.muted !== undefined ? { muted: params.muted } : {}),
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as {
+          readonly error?: { readonly message?: string };
+        } | null;
+        throw new Error(
+          errBody?.error?.message ?? 'Không thể cập nhật tùy chọn cuộc trò chuyện lúc này.',
+        );
+      }
+
+      const data = (await res.json()) as ConversationPreferencesResult;
+      const store = getOrInitUserChatRamCache(currentUserPublicId);
+
+      const patchConv = (c: ConversationSummaryDto): ConversationSummaryDto =>
+        c.public_id === data.conversationPublicId
+          ? {
+              ...c,
+              myState: {
+                ...c.myState,
+                pinnedAt: data.pinnedAt,
+                mutedAt: data.mutedAt,
+                isPinned: data.isPinned,
+                isMuted: data.isMuted,
+              },
+            }
+          : c;
+
+      setPrimaryConversations((prev) => {
+        const updated = sortPrimaryConversationsWithPins(prev.map(patchConv));
+        store.unreadPrimaryConvIds.clear();
+        for (const item of updated) {
+          if (isConversationUnreadForBadge(item)) {
+            store.unreadPrimaryConvIds.add(item.public_id);
+          }
+        }
+        return updated;
+      });
+      setPendingConversations((prev) => prev.map(patchConv));
+      if (selectedConvRef.current?.public_id === data.conversationPublicId) {
+        selectConversation(patchConv(selectedConvRef.current));
+      }
+      setUnreadConversationsCount(data.unreadConversationsCount);
+
+      return data;
+    },
+    [
+      currentUserPublicId,
+      selectConversation,
+      setPendingConversations,
+      setPrimaryConversations,
+      setUnreadConversationsCount,
+    ],
+  );
+
+  /**
+   * Chuyển tiếp 1 tin nhắn (văn bản / ảnh / thoại) tới tối đa 5 người nhận đủ điều kiện
+   * (Mutual Follow ∪ Đã từng trò chuyện). Mỗi người nhận được mã hóa lại độc lập (khóa & AAD mới)
+   * và xử lý lỗi độc lập để 1 người lỗi không làm hỏng các người nhận hợp lệ khác.
+   */
+  const forwardMessageToRecipients = React.useCallback(
+    async (params: {
+      readonly sourceMessage: DecryptedMessageViewItem;
+      readonly recipients: readonly ForwardTargetDto[];
+    }): Promise<ForwardMessageBatchResult> => {
+      const uniqueTargets = params.recipients.slice(0, MAX_FORWARD_RECIPIENTS);
+      const succeeded: ForwardRecipientOutcome[] = [];
+      const failed: ForwardRecipientOutcome[] = [];
+
+      if (uniqueTargets.length === 0) {
+        return { succeeded, failed };
+      }
+
+      const sourceType = params.sourceMessage.dto.messageType;
+      if (
+        sourceType === 'call_event' ||
+        params.sourceMessage.dto.recalledAt !== null ||
+        params.sourceMessage.decryptionFailed
+      ) {
+        for (const target of uniqueTargets) {
+          failed.push({
+            target,
+            ok: false,
+            errorMessage: 'Tin nhắn này hiện không thể chuyển tiếp.',
+          });
+        }
+        return { succeeded, failed };
+      }
+
+      // Giải mã trực tiếp byte gốc trong RAM 1 lần duy nhất cho ảnh/thoại (KHÔNG dùng fetch(blobUrl)).
+      let decryptedMediaBytes: {
+        readonly plainBytes: Uint8Array<ArrayBuffer>;
+        readonly mimeType: string;
+      } | null = null;
+      if (sourceType === 'image' || sourceType === 'voice') {
+        decryptedMediaBytes = await decryptMessageMediaToRawBytes(params.sourceMessage);
+        if (!decryptedMediaBytes || !params.sourceMessage.media) {
+          for (const target of uniqueTargets) {
+            failed.push({
+              target,
+              ok: false,
+              errorMessage: 'Không thể tải tệp đính kèm để chuyển tiếp. Vui lòng thử lại.',
+            });
+          }
+          return { succeeded, failed };
+        }
+      }
+
+      await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+      const [senderDevice, ownBundle] = await Promise.all([
+        getOrCreatePrimaryDeviceKeyMaterial(currentUserPublicId),
+        ownKeyBundleRef.current
+          ? Promise.resolve(ownKeyBundleRef.current)
+          : refreshOwnE2eeStatus({ forceRefresh: true }),
+      ]);
+      const senderOtherDevices = await buildOwnSenderOtherDevices(ownBundle);
+
+      for (const target of uniqueTargets) {
+        try {
+          const convRes = await authFetch('/api/v1/conversations/direct', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              recipientPublicId: target.public_id,
+              purpose: 'forward',
+            }),
+          });
+          if (!convRes.ok) {
+            const errBody = (await convRes.json().catch(() => null)) as {
+              readonly error?: { readonly message?: string };
+            } | null;
+            failed.push({
+              target,
+              ok: false,
+              errorMessage:
+                errBody?.error?.message ?? 'Không thể chuyển tiếp tới tài khoản này lúc này.',
+            });
+            continue;
+          }
+
+          const convPayload = (await convRes.json()) as {
+            readonly conversation: ConversationSummaryDto;
+          };
+          const targetConv = convPayload.conversation;
+
+          const peerKeyBundle = await ensureFreshPeerKeyBundleForEncryption(target.public_id);
+          if (!peerKeyBundle || peerKeyBundle.devices.length === 0) {
+            failed.push({
+              target,
+              ok: false,
+              errorMessage:
+                'Người này chưa kích hoạt hộp thư nên tạm thời chưa nhận được tin chuyển tiếp.',
+            });
+            continue;
+          }
+
+          const nowIso = new Date().toISOString();
+          const clientMsgId = `fwd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+
+          let attachmentPublicId: string | undefined;
+          let mediaPayload: DecryptedMessageMediaPayload | undefined;
+
+          if (
+            (sourceType === 'image' || sourceType === 'voice') &&
+            decryptedMediaBytes &&
+            params.sourceMessage.media
+          ) {
+            const encryptedBinary = await encryptMediaBinary({
+              plainBytes: decryptedMediaBytes.plainBytes,
+              conversationPublicId: targetConv.public_id,
+              senderPublicId: currentUserPublicId,
+              clientMsgId,
+              mediaKind: sourceType,
+            });
+
+            const tokenRes = await authFetch(
+              `/api/v1/conversations/${encodeURIComponent(targetConv.public_id)}/attachments/upload-token`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  mediaKind: sourceType,
+                  ciphertextSizeBytes: encryptedBinary.ciphertextSizeBytes,
+                  ciphertextSha256: encryptedBinary.ciphertextSha256,
+                }),
+              },
+            );
+            if (!tokenRes.ok) {
+              const errBody = (await tokenRes.json().catch(() => null)) as {
+                readonly error?: { readonly message?: string };
+              } | null;
+              failed.push({
+                target,
+                ok: false,
+                errorMessage:
+                  errBody?.error?.message ?? 'Không thể tải tệp đính kèm khi chuyển tiếp.',
+              });
+              continue;
+            }
+            const uploadGrant = (await tokenRes.json()) as CreateAttachmentUploadTokenResult;
+            await uploadEncryptedAttachmentBinary(uploadGrant, encryptedBinary.ciphertextBytes);
+
+            attachmentPublicId = uploadGrant.attachmentPublicId;
+            const srcMedia = params.sourceMessage.media;
+            mediaPayload =
+              sourceType === 'image'
+                ? {
+                    kind: 'image',
+                    attachmentPublicId: uploadGrant.attachmentPublicId,
+                    fileKey: encryptedBinary.fileKey,
+                    fileIv: encryptedBinary.fileIv,
+                    ciphertextSha256: encryptedBinary.ciphertextSha256,
+                    mimeType: decryptedMediaBytes.mimeType,
+                    sizeBytes: decryptedMediaBytes.plainBytes.byteLength,
+                    width: srcMedia.width,
+                    height: srcMedia.height,
+                    ...(srcMedia.thumbnailDataUrl
+                      ? { thumbnailDataUrl: srcMedia.thumbnailDataUrl }
+                      : {}),
+                  }
+                : {
+                    kind: 'voice',
+                    attachmentPublicId: uploadGrant.attachmentPublicId,
+                    fileKey: encryptedBinary.fileKey,
+                    fileIv: encryptedBinary.fileIv,
+                    ciphertextSha256: encryptedBinary.ciphertextSha256,
+                    mimeType: decryptedMediaBytes.mimeType,
+                    sizeBytes: decryptedMediaBytes.plainBytes.byteLength,
+                    durationMs: srcMedia.durationMs,
+                    waveform: srcMedia.waveform,
+                  };
+          }
+
+          const plaintextToSend = sourceType === 'text' ? params.sourceMessage.plaintext : '';
+          const envelope = await encryptDirectMessage({
+            conversationPublicId: targetConv.public_id,
+            senderPublicId: currentUserPublicId,
+            clientMsgId,
+            plaintext: plaintextToSend,
+            ...(mediaPayload ? { media: mediaPayload } : {}),
+            forwarded: true,
+            senderDevice,
+            recipientDevices: peerKeyBundle.devices,
+            senderOtherDevices,
+            sentAt: nowIso,
+          });
+
+          const sendRes = await authFetch(
+            `/api/v1/conversations/${encodeURIComponent(targetConv.public_id)}/messages`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                clientMsgId,
+                messageType: sourceType,
+                ...(attachmentPublicId ? { attachmentPublicId } : {}),
+                isForwarded: true,
+                ciphertext: envelope.ciphertext,
+                cryptoHeader: envelope.cryptoHeader,
+              }),
+            },
+          );
+
+          if (!sendRes.ok) {
+            const errBody = (await sendRes.json().catch(() => null)) as {
+              readonly error?: { readonly message?: string };
+            } | null;
+            failed.push({
+              target,
+              ok: false,
+              errorMessage:
+                errBody?.error?.message ?? 'Không thể gửi tin nhắn chuyển tiếp tới người này.',
+            });
+            continue;
+          }
+
+          const sentData = (await sendRes.json()) as SendMessageResult;
+          const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
+          putLruDecryptedMessageCache(
+            targetStore.decryptedMessagesByCacheKey,
+            buildMessageDecryptCacheKey(sentData.message),
+            {
+              plaintext: plaintextToSend,
+              ...(mediaPayload ? { media: mediaPayload } : {}),
+              forwarded: true,
+              decryptionFailed: false,
+            },
+          );
+
+          if (targetStore.threadsByConvId.has(targetConv.public_id)) {
+            updateThreadState(targetConv.public_id, (prev) => {
+              if (!prev) {
+                return {
+                  conversationPublicId: targetConv.public_id,
+                  items: [],
+                  nextBeforeSeq: null,
+                  highestSeq: sentData.message.seq,
+                  hasInitialized: false,
+                  loadingInitial: false,
+                  loadingOlder: false,
+                  lastAccessedAt: Date.now(),
+                };
+              }
+              const exists = prev.items.some((m) => m.dto.public_id === sentData.message.public_id);
+              const nextItems = exists
+                ? prev.items
+                : [
+                    ...prev.items,
+                    {
+                      dto: sentData.message,
+                      plaintext: plaintextToSend,
+                      ...(mediaPayload ? { media: mediaPayload } : {}),
+                      forwarded: true,
+                      decryptionFailed: false,
+                    },
+                  ].sort((a, b) => a.dto.seq - b.dto.seq);
+              return {
+                ...prev,
+                items: nextItems,
+                highestSeq: Math.max(prev.highestSeq, sentData.message.seq),
+                lastAccessedAt: Date.now(),
+              };
+            });
+          }
+
+          setPrimaryConversations((prev) => {
+            const filtered = prev.filter((c) => c.public_id !== targetConv.public_id);
+            return sortPrimaryConversationsWithPins([sentData.conversation, ...filtered]);
+          });
+
+          setPreviewsByConvId((prev) => ({
+            ...prev,
+            [targetConv.public_id]: getConversationPreviewText(
+              sentData.message,
+              plaintextToSend,
+              false,
+            ),
+          }));
+
+          succeeded.push({ target, ok: true });
+        } catch (err) {
+          failed.push({
+            target,
+            ok: false,
+            errorMessage:
+              err instanceof Error ? err.message : 'Không thể chuyển tiếp tới người này lúc này.',
+          });
+        }
+      }
+
+      if (succeeded.length > 0) {
+        void loadConversations('primary', { background: true });
+      }
+
+      return { succeeded, failed };
+    },
+    [
+      buildOwnSenderOtherDevices,
+      currentUserPublicId,
+      decryptMessageMediaToRawBytes,
+      ensureFreshPeerKeyBundleForEncryption,
+      loadConversations,
+      refreshOwnE2eeStatus,
+      setPreviewsByConvId,
+      setPrimaryConversations,
+      updateThreadState,
+      uploadEncryptedAttachmentBinary,
+    ],
+  );
+
+  /**
+   * Nhảy tới tin nhắn gốc (từ trích dẫn trả lời hoặc danh sách Tin nhắn đã ghim):
+   * Tự động tải tối đa 4 trang lịch sử cũ hơn (`MAX_JUMP_LOAD_PAGES`); tránh lặp vô hạn.
+   */
+  const jumpToMessageInConversation = React.useCallback(
+    async (
+      conversationPublicId: string,
+      targetMessagePublicId: string,
+    ): Promise<JumpToMessageResult> => {
+      const hasTargetInRam = (): boolean => {
+        const thread =
+          getOrInitUserChatRamCache(currentUserPublicId).threadsByConvId.get(conversationPublicId);
+        return Boolean(thread?.items.some((m) => m.dto.public_id === targetMessagePublicId));
+      };
+
+      if (hasTargetInRam()) {
+        return { status: 'found', messagePublicId: targetMessagePublicId };
+      }
+
+      for (let attempt = 0; attempt < MAX_JUMP_LOAD_PAGES; attempt += 1) {
+        const threadBefore =
+          getOrInitUserChatRamCache(currentUserPublicId).threadsByConvId.get(conversationPublicId);
+        if (!threadBefore || threadBefore.nextBeforeSeq === null) {
+          break;
+        }
+        const loaded = await loadOlderMessages(conversationPublicId);
+        if (hasTargetInRam()) {
+          return { status: 'found', messagePublicId: targetMessagePublicId };
+        }
+        if (!loaded) {
+          break;
+        }
+      }
+
+      const threadAfter =
+        getOrInitUserChatRamCache(currentUserPublicId).threadsByConvId.get(conversationPublicId);
+      if (threadAfter && threadAfter.nextBeforeSeq !== null) {
+        return {
+          status: 'too_old',
+          notice: 'Tin nhắn nằm ở phần lịch sử cũ hơn — hãy cuộn lên để xem',
+        };
+      }
+
+      return {
+        status: 'not_found',
+        notice: 'Tin nhắn gốc không còn hiển thị trong cuộc trò chuyện này.',
+      };
+    },
+    [currentUserPublicId, loadOlderMessages],
   );
 
   const openOrCreateDirectConversation = React.useCallback(
@@ -3179,6 +4173,32 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           ...thread,
           items: reDecryptedItems,
           lastAccessedAt: Date.now(),
+        });
+      }
+
+      // Giải mã lại toàn bộ tin nhắn đã ghim đang có trong RAM cache (hỗ trợ mở khóa tức thì sau khi nhập mã PIN).
+      for (const [convId, pinnedState] of Array.from(store.pinnedByConvId.entries())) {
+        if (pinnedState.items.length === 0) {
+          continue;
+        }
+        const peerId = peerByConvId.get(convId);
+        const peerBundle = peerId ? await ensurePeerKeyBundle(peerId) : null;
+        const reDecryptedPins: DecryptedPinnedMessageViewItem[] = await Promise.all(
+          pinnedState.items.map(async (entry) => {
+            if (!entry.message.decryptionFailed) {
+              return entry;
+            }
+            const senderBundle = entry.message.dto.isOwnMessage ? latestOwnBundle : peerBundle;
+            const dec = await decryptSingleMessageCached(entry.message.dto, senderBundle);
+            return {
+              ...entry,
+              message: dec,
+            };
+          }),
+        );
+        store.pinnedByConvId.set(convId, {
+          ...pinnedState,
+          items: reDecryptedPins,
         });
       }
 
@@ -3431,14 +4451,17 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           if (!isActivelyViewingThisPrimaryConv) {
             const wasAlreadyTrackedUnread = store.unreadPrimaryConvIds.has(convId);
             const existingPrimary = primaryConvsRef.current.find((c) => c.public_id === convId);
-            const wasAlreadyUnreadInList = existingPrimary
-              ? isConversationUnread(existingPrimary)
-              : false;
-            store.unreadPrimaryConvIds.add(convId);
-            if (!wasAlreadyTrackedUnread && !wasAlreadyUnreadInList) {
-              setUnreadConversationsCount((count) =>
-                Math.max(count + 1, store.unreadPrimaryConvIds.size),
-              );
+            const isMutedConv = Boolean(existingPrimary?.myState.isMuted);
+            if (!isMutedConv) {
+              const wasAlreadyUnreadInList = existingPrimary
+                ? isConversationUnreadForBadge(existingPrimary)
+                : false;
+              store.unreadPrimaryConvIds.add(convId);
+              if (!wasAlreadyTrackedUnread && !wasAlreadyUnreadInList) {
+                setUnreadConversationsCount((count) =>
+                  Math.max(count + 1, store.unreadPrimaryConvIds.size),
+                );
+              }
             }
           }
         }
@@ -3615,6 +4638,163 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         return;
       }
 
+      if (event.event === 'chat.message.reaction.updated') {
+        const convId =
+          typeof event.data.conversationPublicId === 'string'
+            ? event.data.conversationPublicId
+            : null;
+        const messagePublicId =
+          typeof event.data.messagePublicId === 'string' ? event.data.messagePublicId : null;
+        const actorPublicId =
+          typeof event.data.actorPublicId === 'string' ? event.data.actorPublicId : null;
+        const emoji = typeof event.data.emoji === 'string' ? event.data.emoji : null;
+        const updatedAt =
+          typeof event.data.updatedAt === 'string'
+            ? event.data.updatedAt
+            : new Date().toISOString();
+
+        if (convId && messagePublicId && actorPublicId && store.threadsByConvId.has(convId)) {
+          updateThreadState(convId, (prev) => {
+            if (!prev) {
+              return {
+                conversationPublicId: convId,
+                items: [],
+                nextBeforeSeq: null,
+                highestSeq: 0,
+                hasInitialized: false,
+                loadingInitial: false,
+                loadingOlder: false,
+                lastAccessedAt: Date.now(),
+              };
+            }
+            return {
+              ...prev,
+              items: prev.items.map((item) => {
+                if (item.dto.public_id !== messagePublicId) {
+                  return item;
+                }
+                const remaining = (item.dto.reactions ?? []).filter(
+                  (r) => r.userPublicId.toLowerCase() !== actorPublicId.toLowerCase(),
+                );
+                const nextReactions: MessageReactionDto[] =
+                  emoji !== null
+                    ? [...remaining, { userPublicId: actorPublicId, emoji, updatedAt }]
+                    : remaining;
+                return {
+                  ...item,
+                  dto: {
+                    ...item.dto,
+                    reactions: nextReactions,
+                  },
+                };
+              }),
+              lastAccessedAt: Date.now(),
+            };
+          });
+        }
+        return;
+      }
+
+      if (event.event === 'chat.message.pin.updated') {
+        const convId =
+          typeof event.data.conversationPublicId === 'string'
+            ? event.data.conversationPublicId
+            : null;
+        const messagePublicId =
+          typeof event.data.messagePublicId === 'string' ? event.data.messagePublicId : null;
+        const pinned = event.data.pinned === true;
+
+        if (convId && messagePublicId) {
+          if (store.threadsByConvId.has(convId)) {
+            updateThreadState(convId, (prev) => {
+              if (!prev) {
+                return {
+                  conversationPublicId: convId,
+                  items: [],
+                  nextBeforeSeq: null,
+                  highestSeq: 0,
+                  hasInitialized: false,
+                  loadingInitial: false,
+                  loadingOlder: false,
+                  lastAccessedAt: Date.now(),
+                };
+              }
+              return {
+                ...prev,
+                items: prev.items.map((item) =>
+                  item.dto.public_id === messagePublicId
+                    ? { ...item, dto: { ...item.dto, isPinned: pinned } }
+                    : item,
+                ),
+                lastAccessedAt: Date.now(),
+              };
+            });
+          }
+          if (
+            store.pinnedByConvId.has(convId) ||
+            selectedConvRef.current?.public_id === convId ||
+            floatingActiveConvIdRef.current === convId
+          ) {
+            void loadPinnedMessages(convId, { force: true });
+          }
+        }
+        return;
+      }
+
+      if (event.event === 'chat.conversation.preferences.updated') {
+        const convId =
+          typeof event.data.conversationPublicId === 'string'
+            ? event.data.conversationPublicId
+            : null;
+        if (!convId) {
+          return;
+        }
+        const pinnedAt = typeof event.data.pinnedAt === 'string' ? event.data.pinnedAt : null;
+        const mutedAt = typeof event.data.mutedAt === 'string' ? event.data.mutedAt : null;
+        const isPinned = event.data.isPinned === true || pinnedAt !== null;
+        const isMuted = event.data.isMuted === true || mutedAt !== null;
+        const serverUnreadCount =
+          typeof event.data.unreadConversationsCount === 'number'
+            ? event.data.unreadConversationsCount
+            : null;
+
+        const patchConv = (c: ConversationSummaryDto): ConversationSummaryDto =>
+          c.public_id === convId
+            ? {
+                ...c,
+                myState: {
+                  ...c.myState,
+                  pinnedAt,
+                  mutedAt,
+                  isPinned,
+                  isMuted,
+                },
+              }
+            : c;
+
+        setPrimaryConversations((prev) => {
+          const updated = sortPrimaryConversationsWithPins(prev.map(patchConv));
+          store.unreadPrimaryConvIds.clear();
+          for (const item of updated) {
+            if (isConversationUnreadForBadge(item)) {
+              store.unreadPrimaryConvIds.add(item.public_id);
+            }
+          }
+          return updated;
+        });
+        setPendingConversations((prev) => prev.map(patchConv));
+        if (selectedConvRef.current?.public_id === convId) {
+          selectConversation(patchConv(selectedConvRef.current));
+        }
+
+        if (serverUnreadCount !== null) {
+          setUnreadConversationsCount(serverUnreadCount);
+        } else {
+          setUnreadConversationsCount(store.unreadPrimaryConvIds.size);
+        }
+        return;
+      }
+
       if (event.event === 'chat.conversation.deleted') {
         const convId =
           typeof event.data.conversationPublicId === 'string'
@@ -3667,9 +4847,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     currentUserPublicId,
     deltaSyncConversationThread,
     loadConversations,
+    loadPinnedMessages,
     readReceiptsEnabled,
     resolveConversationById,
     selectConversation,
+    setPendingConversations,
     setPrimaryConversations,
     setUnreadConversationsCount,
     subscribeChatEvents,
@@ -3748,6 +4930,14 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       sendOptimisticTextMessage,
       sendOptimisticImageMessage,
       sendOptimisticVoiceMessage,
+      getPinnedState,
+      loadPinnedMessages,
+      reactToMessage,
+      pinMessage,
+      unpinMessage,
+      updateConversationPreferences,
+      forwardMessageToRecipients,
+      jumpToMessageInConversation,
       resolveMessageMediaObjectUrl,
       getCachedMediaObjectUrl,
       editTextMessage,
@@ -3772,14 +4962,18 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       deleteMessageForMe,
       editTextMessage,
       ensurePeerKeyBundle,
+      forwardMessageToRecipients,
       getCachedMediaObjectUrl,
       getCachedPeerKeyBundle,
+      getPinnedState,
       getThreadState,
       hasLoadedPending,
       hasLoadedPrimary,
       hasLocalRestoredBackup,
+      jumpToMessageInConversation,
       loadConversations,
       loadOlderMessages,
+      loadPinnedMessages,
       loadingConversations,
       markConversationReadOptimistic,
       openConversationThread,
@@ -3787,10 +4981,12 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       ownKeyBundle,
       pendingConversations,
       pendingCount,
+      pinMessage,
       pinSyncState,
       presences,
       previewsByConvId,
       primaryConversations,
+      reactToMessage,
       recallMessage,
       refreshOwnE2eeStatus,
       removeBlockedPeerConversationLocally,
@@ -3806,7 +5002,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setMessagesViewportActive,
       syncAfterPinOperation,
       threadVersion,
+      unpinMessage,
       unreadConversationsCount,
+      updateConversationPreferences,
     ],
   );
 

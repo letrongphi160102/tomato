@@ -1,12 +1,13 @@
 'use client';
 
 import * as React from 'react';
-import { MoreHorizontal, Trash2 } from 'lucide-react';
+import { Bell, BellOff, MoreHorizontal, Pin, PinOff, Trash2 } from 'lucide-react';
 
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
@@ -15,16 +16,36 @@ export interface ConversationActionsMenuProps {
   readonly peerFullName: string;
   readonly compact?: boolean;
   readonly alwaysVisible?: boolean;
-  readonly onRequestDeleteConversation: () => void;
+  readonly isPinned?: boolean;
+  readonly isMuted?: boolean;
+  readonly canPin?: boolean;
+  readonly showDelete?: boolean;
+  readonly onTogglePin?: () => void;
+  readonly onToggleMute?: () => void;
+  readonly onRequestDeleteConversation?: () => void;
 }
 
 export function ConversationActionsMenu({
   peerFullName,
   compact = false,
   alwaysVisible = false,
+  isPinned = false,
+  isMuted = false,
+  canPin = false,
+  showDelete = true,
+  onTogglePin,
+  onToggleMute,
   onRequestDeleteConversation,
 }: ConversationActionsMenuProps) {
   const [open, setOpen] = React.useState(false);
+
+  const hasPinAction = canPin && typeof onTogglePin === 'function';
+  const hasMuteAction = typeof onToggleMute === 'function';
+  const hasDeleteAction = showDelete && typeof onRequestDeleteConversation === 'function';
+
+  if (!hasPinAction && !hasMuteAction && !hasDeleteAction) {
+    return null;
+  }
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -45,13 +66,49 @@ export function ConversationActionsMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" sideOffset={4}>
-        <DropdownMenuItem
-          onSelect={onRequestDeleteConversation}
-          className="text-destructive focus:bg-destructive/10 focus:text-destructive"
-        >
-          <Trash2 className="size-3.5" aria-hidden="true" />
-          <span>Xóa đoạn chat</span>
-        </DropdownMenuItem>
+        {hasPinAction ? (
+          <DropdownMenuItem onSelect={() => onTogglePin?.()}>
+            {isPinned ? (
+              <>
+                <PinOff className="size-3.5" aria-hidden="true" />
+                <span>Bỏ ghim</span>
+              </>
+            ) : (
+              <>
+                <Pin className="size-3.5" aria-hidden="true" />
+                <span>Ghim đoạn chat</span>
+              </>
+            )}
+          </DropdownMenuItem>
+        ) : null}
+
+        {hasMuteAction ? (
+          <DropdownMenuItem onSelect={() => onToggleMute?.()}>
+            {isMuted ? (
+              <>
+                <Bell className="size-3.5" aria-hidden="true" />
+                <span>Bật thông báo</span>
+              </>
+            ) : (
+              <>
+                <BellOff className="size-3.5" aria-hidden="true" />
+                <span>Tắt thông báo</span>
+              </>
+            )}
+          </DropdownMenuItem>
+        ) : null}
+
+        {hasDeleteAction && (hasPinAction || hasMuteAction) ? <DropdownMenuSeparator /> : null}
+
+        {hasDeleteAction ? (
+          <DropdownMenuItem
+            onSelect={() => onRequestDeleteConversation?.()}
+            className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+            <span>Xóa đoạn chat</span>
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

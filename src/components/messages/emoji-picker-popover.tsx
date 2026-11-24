@@ -4,100 +4,9 @@ import * as React from 'react';
 import { Smile } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { CHAT_EMOJI_CATEGORIES } from '@/lib/chat/emoji';
 import { sanitizeChatPlaintext } from '@/lib/e2ee/utils';
 import { cn } from '@/lib/utils';
-
-interface EmojiCategory {
-  readonly id: string;
-  readonly label: string;
-  readonly emojis: readonly string[];
-}
-
-const EMOJI_CATEGORIES: readonly EmojiCategory[] = [
-  {
-    id: 'smileys',
-    label: 'Cảm xúc',
-    emojis: [
-      '😀',
-      '😃',
-      '😄',
-      '😁',
-      '😆',
-      '🥹',
-      '😅',
-      '😂',
-      '🤣',
-      '😊',
-      '😇',
-      '🙂',
-      '😉',
-      '😌',
-      '😍',
-      '🥰',
-      '😘',
-      '😋',
-      '😜',
-      '🤪',
-      '😎',
-      '🥳',
-      '🤩',
-      '😏',
-      '🥺',
-      '😢',
-      '😭',
-      '😤',
-      '🤔',
-      '😴',
-    ],
-  },
-  {
-    id: 'hearts',
-    label: 'Yêu thích',
-    emojis: [
-      '❤️',
-      '🧡',
-      '💛',
-      '💚',
-      '💙',
-      '💜',
-      '🤍',
-      '💖',
-      '💗',
-      '💓',
-      '💞',
-      '💕',
-      '✨',
-      '🔥',
-      '🌟',
-      '🎉',
-      '🎊',
-      '💯',
-      '🌹',
-      '🌸',
-    ],
-  },
-  {
-    id: 'gestures',
-    label: 'Cử chỉ',
-    emojis: [
-      '👍',
-      '👎',
-      '👏',
-      '🙌',
-      '🤝',
-      '🙏',
-      '💪',
-      '👋',
-      '✌️',
-      '🤞',
-      '🤟',
-      '👌',
-      '🫶',
-      '🫡',
-      '👀',
-    ],
-  },
-];
 
 export interface EmojiPickerPopoverProps {
   readonly compact?: boolean;
@@ -144,7 +53,7 @@ export function EmojiPickerPopover({
   }, [open]);
 
   const activeCategory =
-    EMOJI_CATEGORIES.find((cat) => cat.id === activeCategoryId) ?? EMOJI_CATEGORIES[0]!;
+    CHAT_EMOJI_CATEGORIES.find((cat) => cat.id === activeCategoryId) ?? CHAT_EMOJI_CATEGORIES[0]!;
 
   function handlePick(rawEmoji: string) {
     const clean = sanitizeChatPlaintext(rawEmoji);
@@ -182,7 +91,7 @@ export function EmojiPickerPopover({
           )}
         >
           <div className="mb-2 flex items-center gap-1 border-b pb-2">
-            {EMOJI_CATEGORIES.map((category) => (
+            {CHAT_EMOJI_CATEGORIES.map((category) => (
               <button
                 key={category.id}
                 type="button"

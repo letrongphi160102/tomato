@@ -414,6 +414,8 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: r.joinedAt,
           }));
           if (rows[0]) {
@@ -579,6 +581,8 @@ describe('Security M9: Ma trận BOLA Nhắn tin 1-1 E2EE, Tin nhắn đang ch�
           cryptoHeader: params.cryptoHeader,
           callEventMeta: null,
           attachmentStorageKey: null,
+          replyToMessageId: params.replyToMessageId ?? null,
+          isForwarded: params.isForwarded === true,
           editCount: 0,
           editedAt: null,
           recalledAt: null,

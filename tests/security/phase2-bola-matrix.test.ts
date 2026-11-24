@@ -13,14 +13,25 @@ import {
   POST as messagesPost,
 } from '@/app/api/v1/conversations/[conversationPublicId]/messages/route';
 import { POST as readConversationPost } from '@/app/api/v1/conversations/[conversationPublicId]/read/route';
+import { GET as pinsListGet } from '@/app/api/v1/conversations/[conversationPublicId]/pins/route';
+import { PATCH as preferencesPatch } from '@/app/api/v1/conversations/[conversationPublicId]/preferences/route';
 import {
   DELETE as conversationDelete,
   GET as conversationDetailGet,
 } from '@/app/api/v1/conversations/[conversationPublicId]/route';
 import { POST as directConversationPost } from '@/app/api/v1/conversations/direct/route';
+import { GET as forwardTargetsGet } from '@/app/api/v1/conversations/forward-targets/route';
 import { PUT as localChatMediaPut } from '@/app/api/v1/media/local/chat/[attachmentPublicId]/route';
 import { GET as messageAttachmentGet } from '@/app/api/v1/messages/[messagePublicId]/attachment/route';
 import { DELETE as messageDeleteForMe } from '@/app/api/v1/messages/[messagePublicId]/for-me/route';
+import {
+  DELETE as messagePinDelete,
+  POST as messagePinPost,
+} from '@/app/api/v1/messages/[messagePublicId]/pin/route';
+import {
+  DELETE as messageReactionDelete,
+  PUT as messageReactionPut,
+} from '@/app/api/v1/messages/[messagePublicId]/reaction/route';
 import { POST as messageRecallPost } from '@/app/api/v1/messages/[messagePublicId]/recall/route';
 import { PATCH as messageEditPatch } from '@/app/api/v1/messages/[messagePublicId]/route';
 import { DELETE as notificationDelete } from '@/app/api/v1/notifications/[notificationPublicId]/route';
@@ -913,6 +924,8 @@ describe('Security CI Matrix (M12): Ma trận BOLA 5 nhân vật (A/B/C/D/Anon) 
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: r.joinedAt,
           }));
           if (rows[0]) participantsByConv.set(rows[0].conversationId, created);
@@ -975,6 +988,8 @@ describe('Security CI Matrix (M12): Ma trận BOLA 5 nhân vật (A/B/C/D/Anon) 
           cryptoHeader: input.cryptoHeader,
           callEventMeta: null,
           attachmentStorageKey: input.attachmentStorageKey ?? null,
+          replyToMessageId: input.replyToMessageId ?? null,
+          isForwarded: input.isForwarded === true,
           editCount: 0,
           editedAt: null,
           recalledAt: null,
@@ -1366,7 +1381,88 @@ describe('Security CI Matrix (M12): Ma trận BOLA 5 nhân vật (A/B/C/D/Anon) 
           )
         ).status,
       ).toBe(404);
+      // Nhóm 12 (M13 Interactions): C & D bị chặn 404 đồng nhất trên reaction, pin, pins, preferences.
+      expect(
+        (
+          await messageReactionPut(
+            new Request(`${origin}/api/v1/messages/${textMsgId}/reaction`, {
+              method: 'PUT',
+              headers: createAuthHeaders(origin, outsiderTok, {
+                contentType: 'application/json',
+              }),
+              body: JSON.stringify({ emoji: '❤️' }),
+            }),
+            { params: Promise.resolve({ messagePublicId: textMsgId }) },
+          )
+        ).status,
+      ).toBe(404);
+      expect(
+        (
+          await messageReactionDelete(
+            new Request(`${origin}/api/v1/messages/${textMsgId}/reaction`, {
+              method: 'DELETE',
+              headers: createAuthHeaders(origin, outsiderTok),
+            }),
+            { params: Promise.resolve({ messagePublicId: textMsgId }) },
+          )
+        ).status,
+      ).toBe(404);
+      expect(
+        (
+          await messagePinPost(
+            new Request(`${origin}/api/v1/messages/${textMsgId}/pin`, {
+              method: 'POST',
+              headers: createAuthHeaders(origin, outsiderTok, {
+                contentType: 'application/json',
+              }),
+              body: '{}',
+            }),
+            { params: Promise.resolve({ messagePublicId: textMsgId }) },
+          )
+        ).status,
+      ).toBe(404);
+      expect(
+        (
+          await messagePinDelete(
+            new Request(`${origin}/api/v1/messages/${textMsgId}/pin`, {
+              method: 'DELETE',
+              headers: createAuthHeaders(origin, outsiderTok),
+            }),
+            { params: Promise.resolve({ messagePublicId: textMsgId }) },
+          )
+        ).status,
+      ).toBe(404);
+      expect(
+        (
+          await pinsListGet(
+            new Request(`${origin}/api/v1/conversations/${abConvId}/pins`, {
+              headers: createAuthHeaders(origin, outsiderTok),
+            }),
+            { params: Promise.resolve({ conversationPublicId: abConvId }) },
+          )
+        ).status,
+      ).toBe(404);
+      expect(
+        (
+          await preferencesPatch(
+            new Request(`${origin}/api/v1/conversations/${abConvId}/preferences`, {
+              method: 'PATCH',
+              headers: createAuthHeaders(origin, outsiderTok, {
+                contentType: 'application/json',
+              }),
+              body: JSON.stringify({ muted: true }),
+            }),
+            { params: Promise.resolve({ conversationPublicId: abConvId }) },
+          )
+        ).status,
+      ).toBe(404);
     }
+
+    // Forward targets endpoint: Anon -> 401.
+    expect(
+      (await forwardTargetsGet(new Request(`${origin}/api/v1/conversations/forward-targets`)))
+        .status,
+    ).toBe(401);
 
     // Tải ảnh E2EE lên hội thoại primary A-B:
     const mediaBlob = await encryptMediaBinary({
@@ -1574,6 +1670,8 @@ describe('Security CI Matrix (M12): Ma trận BOLA 5 nhân vật (A/B/C/D/Anon) 
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: now,
           },
           {
@@ -1584,6 +1682,8 @@ describe('Security CI Matrix (M12): Ma trận BOLA 5 nhân vật (A/B/C/D/Anon) 
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: now,
           },
         ],
@@ -1599,6 +1699,8 @@ describe('Security CI Matrix (M12): Ma trận BOLA 5 nhân vật (A/B/C/D/Anon) 
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: now,
           },
           {
@@ -1609,6 +1711,8 @@ describe('Security CI Matrix (M12): Ma trận BOLA 5 nhân vật (A/B/C/D/Anon) 
             lastReadSeq: 0,
             clearedBeforeSeq: 0,
             hiddenAt: null,
+            pinnedAt: null,
+            mutedAt: null,
             joinedAt: now,
           },
         ],
