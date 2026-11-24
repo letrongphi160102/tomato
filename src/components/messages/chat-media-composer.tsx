@@ -360,7 +360,7 @@ function ChatVoiceRecorderBar({
       aria-label="Đang ghi âm tin nhắn thoại"
       className={cn(
         'flex items-center gap-2 rounded-2xl border border-destructive/40 bg-destructive/5',
-        compact ? 'px-2 py-1.5' : 'px-3 py-2',
+        compact ? 'px-1.5 py-1.5' : 'px-2 py-1.5',
       )}
     >
       <Button
@@ -373,10 +373,10 @@ function ChatVoiceRecorderBar({
         onClick={handleCancelClick}
         className={cn(
           'shrink-0 rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive',
-          compact ? 'size-7' : 'size-8',
+          compact ? 'size-8' : 'size-9',
         )}
       >
-        <Trash2 className={cn(compact ? 'size-3.5' : 'size-4')} aria-hidden="true" />
+        <Trash2 className={cn(compact ? 'size-[18px]' : 'size-5')} aria-hidden="true" />
       </Button>
 
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -409,15 +409,12 @@ function ChatVoiceRecorderBar({
         size="sm"
         disabled={finalizing || disabled}
         onClick={handleSendClick}
-        className={cn(
-          'shrink-0 rounded-xl',
-          compact ? 'h-7 px-2.5 text-[11px]' : 'h-8 px-3 text-xs',
-        )}
+        className={cn('shrink-0 rounded-full text-xs', compact ? 'h-8 px-3' : 'h-9 px-3.5')}
       >
         {finalizing ? (
-          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+          <Loader2 className="size-4 animate-spin" aria-hidden="true" />
         ) : (
-          <Send className="size-3.5" aria-hidden="true" />
+          <Send className="size-4" aria-hidden="true" />
         )}
         <span>Gửi</span>
       </Button>
@@ -466,6 +463,8 @@ export function ChatComposerWithMedia({
   onError,
 }: ChatComposerWithMediaProps) {
   const isEditing = editingOriginalText !== null;
+  const fileInputId = React.useId();
+  const messageInputId = React.useId();
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [stagedImages, setStagedImages] = React.useState<readonly StagedChatImage[]>([]);
@@ -660,86 +659,94 @@ export function ChatComposerWithMedia({
         onSubmit={(e) => void handleFormSubmit(e)}
         className={cn(
           'flex items-end rounded-2xl border bg-muted/30 focus-within:border-primary/60 focus-within:bg-background',
-          compact ? 'gap-1 px-2 py-1' : 'gap-1.5 px-2.5 py-1.5',
+          compact ? 'gap-1 px-1.5 py-1.5' : 'gap-1.5 px-2 py-1.5',
         )}
       >
-        <EmojiPickerPopover
-          disabled={(!isEditing && !canSendMoreMessages) || sendingMedia}
-          onSelectEmoji={(emoji) =>
-            isEditing
-              ? onChangeEditDraftText(`${editDraftText}${emoji}`)
-              : onChangeDraftText(`${draftText}${emoji}`)
-          }
-        />
+        <div className="flex shrink-0 items-center gap-0.5">
+          <EmojiPickerPopover
+            compact={compact}
+            disabled={(!isEditing && !canSendMoreMessages) || sendingMedia}
+            onSelectEmoji={(emoji) =>
+              isEditing
+                ? onChangeEditDraftText(`${editDraftText}${emoji}`)
+                : onChangeDraftText(`${draftText}${emoji}`)
+            }
+          />
 
-        {!isEditing ? (
-          <div className="flex shrink-0 items-center gap-0.5">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              multiple
-              tabIndex={-1}
-              aria-hidden="true"
-              className="hidden"
-              onChange={(event) => {
-                const picked = Array.from(event.target.files ?? []);
-                event.target.value = '';
-                if (picked.length > 0) {
-                  addCandidateFiles(picked);
+          {!isEditing ? (
+            <>
+              <input
+                ref={fileInputRef}
+                id={fileInputId}
+                name="chatMediaFiles"
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                multiple
+                tabIndex={-1}
+                aria-hidden="true"
+                className="hidden"
+                onChange={(event) => {
+                  const picked = Array.from(event.target.files ?? []);
+                  event.target.value = '';
+                  if (picked.length > 0) {
+                    addCandidateFiles(picked);
+                  }
+                }}
+              />
+
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                disabled={
+                  !canSendMedia || sendingMedia || stagedImages.length >= MAX_CHAT_IMAGES_PER_BATCH
                 }
-              }}
-            />
+                title={canSendMedia ? 'Gửi ảnh' : pendingHint}
+                aria-label={canSendMedia ? 'Gửi ảnh' : 'Gửi ảnh (đang khóa trong tin nhắn chờ)'}
+                onClick={() => fileInputRef.current?.click()}
+                className={cn(
+                  'shrink-0 rounded-full text-muted-foreground hover:text-foreground',
+                  compact ? 'size-8' : 'size-9',
+                  !canSendMedia ? 'opacity-40' : null,
+                )}
+              >
+                <ImageIcon className={cn(compact ? 'size-[18px]' : 'size-5')} aria-hidden="true" />
+              </Button>
 
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              disabled={
-                !canSendMedia || sendingMedia || stagedImages.length >= MAX_CHAT_IMAGES_PER_BATCH
-              }
-              title={canSendMedia ? 'Gửi ảnh' : pendingHint}
-              aria-label={canSendMedia ? 'Gửi ảnh' : 'Gửi ảnh (đang khóa trong tin nhắn chờ)'}
-              onClick={() => fileInputRef.current?.click()}
-              className={cn(
-                'rounded-full text-muted-foreground hover:text-foreground',
-                compact ? 'size-7' : 'size-8',
-                !canSendMedia ? 'opacity-40' : null,
-              )}
-            >
-              <ImageIcon className={cn(compact ? 'size-3.5' : 'size-4')} aria-hidden="true" />
-            </Button>
-
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              disabled={!canSendMedia || sendingMedia}
-              title={canSendMedia ? 'Ghi âm tin nhắn thoại' : pendingHint}
-              aria-label={
-                canSendMedia
-                  ? 'Ghi âm tin nhắn thoại'
-                  : 'Ghi âm tin nhắn thoại (đang khóa trong tin nhắn chờ)'
-              }
-              onClick={() => {
-                onError(null);
-                setIsRecordingVoice(true);
-              }}
-              className={cn(
-                'rounded-full text-muted-foreground hover:text-foreground',
-                compact ? 'size-7' : 'size-8',
-                !canSendMedia ? 'opacity-40' : null,
-              )}
-            >
-              <Mic className={cn(compact ? 'size-3.5' : 'size-4')} aria-hidden="true" />
-            </Button>
-          </div>
-        ) : null}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                disabled={!canSendMedia || sendingMedia}
+                title={canSendMedia ? 'Ghi âm tin nhắn thoại' : pendingHint}
+                aria-label={
+                  canSendMedia
+                    ? 'Ghi âm tin nhắn thoại'
+                    : 'Ghi âm tin nhắn thoại (đang khóa trong tin nhắn chờ)'
+                }
+                onClick={() => {
+                  onError(null);
+                  setIsRecordingVoice(true);
+                }}
+                className={cn(
+                  'shrink-0 rounded-full text-muted-foreground hover:text-foreground',
+                  compact ? 'size-8' : 'size-9',
+                  !canSendMedia ? 'opacity-40' : null,
+                )}
+              >
+                <Mic className={cn(compact ? 'size-[18px]' : 'size-5')} aria-hidden="true" />
+              </Button>
+            </>
+          ) : null}
+        </div>
 
         <textarea
           ref={composerInputRef}
+          id={messageInputId}
+          name="chatMessage"
           rows={1}
           value={activeText}
+          aria-label={isEditing ? 'Chỉnh sửa nội dung tin nhắn' : 'Nhập tin nhắn'}
           disabled={editSaving || sendingMedia || (!isEditing && !canSendMoreMessages)}
           placeholder={
             isEditing
@@ -768,27 +775,24 @@ export function ChatComposerWithMedia({
             }
           }}
           className={cn(
-            'flex-1 resize-none bg-transparent py-1.5 text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
-            compact ? 'max-h-24 min-h-[32px] text-xs' : 'max-h-28 min-h-[34px] text-sm',
+            'min-w-0 flex-1 resize-none bg-transparent px-1 leading-5 text-foreground placeholder:text-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+            compact ? 'max-h-24 min-h-8 py-1.5 text-xs' : 'max-h-28 min-h-9 py-2 text-sm',
           )}
         />
 
         <Button
           type="submit"
-          size="sm"
+          size={compact ? 'icon' : 'sm'}
           disabled={!canSubmit}
           aria-label={isEditing ? 'Lưu chỉnh sửa' : 'Gửi tin nhắn'}
-          className={cn('rounded-xl text-xs', compact ? 'h-7 px-2.5' : 'h-8 px-3')}
+          className={cn('shrink-0 rounded-full', compact ? 'size-8 p-0' : 'h-9 px-3.5 text-xs')}
         >
           {editSaving || sendingMedia ? (
-            <Loader2
-              className={cn(compact ? 'size-3' : 'size-3.5', 'animate-spin')}
-              aria-hidden="true"
-            />
+            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
           ) : isEditing ? (
-            <Check className={cn(compact ? 'size-3' : 'size-3.5')} aria-hidden="true" />
+            <Check className="size-4" aria-hidden="true" />
           ) : (
-            <Send className={cn(compact ? 'size-3' : 'size-3.5')} aria-hidden="true" />
+            <Send className="size-4" aria-hidden="true" />
           )}
           {!compact ? <span>{isEditing ? 'Lưu' : 'Gửi'}</span> : null}
         </Button>

@@ -116,7 +116,11 @@ export function NewMessageModal({ open, onClose, onSelectRecipient }: NewMessage
               aria-hidden="true"
             />
             <Input
+              id="new-message-recipient-search"
+              name="newMessageRecipientSearch"
               type="search"
+              autoComplete="off"
+              aria-label="Tìm người nhận tin nhắn"
               placeholder="Tìm theo @tên_người_dùng hoặc tên hiển thị..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}

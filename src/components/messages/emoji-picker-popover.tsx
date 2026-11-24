@@ -100,11 +100,16 @@ const EMOJI_CATEGORIES: readonly EmojiCategory[] = [
 ];
 
 export interface EmojiPickerPopoverProps {
+  readonly compact?: boolean;
   readonly disabled?: boolean;
   readonly onSelectEmoji: (emoji: string) => void;
 }
 
-export function EmojiPickerPopover({ disabled = false, onSelectEmoji }: EmojiPickerPopoverProps) {
+export function EmojiPickerPopover({
+  compact = false,
+  disabled = false,
+  onSelectEmoji,
+}: EmojiPickerPopoverProps) {
   const [open, setOpen] = React.useState(false);
   const [activeCategoryId, setActiveCategoryId] = React.useState<string>('smileys');
   const containerRef = React.useRef<HTMLDivElement | null>(null);
@@ -149,7 +154,7 @@ export function EmojiPickerPopover({ disabled = false, onSelectEmoji }: EmojiPic
   }
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className="relative flex shrink-0 items-center">
       <Button
         type="button"
         variant="ghost"
@@ -157,17 +162,24 @@ export function EmojiPickerPopover({ disabled = false, onSelectEmoji }: EmojiPic
         disabled={disabled}
         aria-label="Chọn biểu tượng cảm xúc"
         aria-expanded={open}
+        title="Biểu tượng cảm xúc"
         onClick={() => setOpen((prev) => !prev)}
-        className="size-9 rounded-full text-muted-foreground hover:text-foreground"
+        className={cn(
+          'shrink-0 rounded-full text-muted-foreground hover:text-foreground',
+          compact ? 'size-8' : 'size-9',
+        )}
       >
-        <Smile className="size-5" aria-hidden="true" />
+        <Smile className={cn(compact ? 'size-[18px]' : 'size-5')} aria-hidden="true" />
       </Button>
 
       {open ? (
         <div
           role="dialog"
           aria-label="Bảng biểu tượng cảm xúc"
-          className="absolute bottom-12 left-0 z-50 w-72 rounded-2xl border bg-background p-3 shadow-xl"
+          className={cn(
+            'absolute left-0 z-50 w-72 rounded-2xl border bg-background p-3 shadow-xl',
+            compact ? 'bottom-11' : 'bottom-12',
+          )}
         >
           <div className="mb-2 flex items-center gap-1 border-b pb-2">
             {EMOJI_CATEGORIES.map((category) => (

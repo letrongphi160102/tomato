@@ -176,6 +176,7 @@ export function MandatoryPinSetupPanel({
           </Label>
           <Input
             id="mandatory-pin-input"
+            name="mandatoryPin"
             type="password"
             inputMode="numeric"
             pattern="\d{6}"
@@ -198,6 +199,7 @@ export function MandatoryPinSetupPanel({
           </Label>
           <Input
             id="mandatory-pin-confirm"
+            name="mandatoryPinConfirm"
             type="password"
             inputMode="numeric"
             pattern="\d{6}"
@@ -726,6 +728,7 @@ export function PinBackupModal({
                   <Label htmlFor="pin-reset-otp">Mã xác nhận qua email (6 chữ số)</Label>
                   <Input
                     id="pin-reset-otp"
+                    name="pinResetOtp"
                     type="text"
                     inputMode="numeric"
                     autoComplete="one-time-code"
@@ -748,6 +751,7 @@ export function PinBackupModal({
                 <Label htmlFor="chat-current-pin-input">Mã PIN hiện tại (6 chữ số)</Label>
                 <Input
                   id="chat-current-pin-input"
+                  name="currentPin"
                   type="password"
                   inputMode="numeric"
                   pattern="\d{6}"
@@ -773,6 +777,7 @@ export function PinBackupModal({
               </Label>
               <Input
                 id="chat-pin-input"
+                name="chatPin"
                 type="password"
                 inputMode="numeric"
                 pattern="\d{6}"
@@ -798,6 +803,7 @@ export function PinBackupModal({
                 </Label>
                 <Input
                   id="chat-pin-confirm"
+                  name="chatPinConfirm"
                   type="password"
                   inputMode="numeric"
                   pattern="\d{6}"
