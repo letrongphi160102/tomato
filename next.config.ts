@@ -28,8 +28,13 @@ export default withSentryConfig(nextConfig, {
   org: process.env.SENTRY_ORG,
   project: process.env.SENTRY_PROJECT,
   authToken: process.env.SENTRY_AUTH_TOKEN,
-  silent: !process.env.CI,
+  silent: !hasSentryUploadAuth,
   telemetry: false,
+  // Chỉ tạo/hoàn tất Sentry release khi có đủ thông tin xác thực (tránh warning khi build không có SENTRY_AUTH_TOKEN).
+  release: {
+    create: hasSentryUploadAuth,
+    finalize: hasSentryUploadAuth,
+  },
   // Chỉ tạo & tải source maps khi có đủ thông tin xác thực Sentry (không làm hỏng build local/CI).
   // Tự động xóa `.map` sau khi tải lên để không lộ mã nguồn gốc cho trình duyệt.
   sourcemaps: {
