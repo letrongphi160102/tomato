@@ -7,6 +7,7 @@ import {
   useChatStore,
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
+import { computeImageDisplaySize } from '@/components/messages/image-layout';
 import type { ImageLightboxTarget } from '@/components/messages/image-lightbox-modal';
 import { cn } from '@/lib/utils';
 
@@ -119,16 +120,19 @@ export function MessageMediaContent({
   }, [chatStore, effectiveUrl, isImage, item, media, mediaError, retryToken]);
 
   if (isImage) {
-    const width = media?.width ?? 4;
-    const height = media?.height ?? 3;
-    const safeRatio = Math.max(0.55, Math.min(2.1, width / Math.max(1, height)));
-    const maxWidthPx = isCompact ? 220 : 290;
-    const computedHeightPx = Math.min(isCompact ? 260 : 340, Math.round(maxWidthPx / safeRatio));
-    const displayWidthPx = Math.min(maxWidthPx, Math.round(computedHeightPx * safeRatio));
+    const { widthPx: displayWidthPx, heightPx: computedHeightPx } = computeImageDisplaySize(
+      media?.width,
+      media?.height,
+      isCompact,
+    );
 
     return (
       <div
-        style={{ width: `${displayWidthPx}px`, height: `${computedHeightPx}px` }}
+        style={{
+          width: `${displayWidthPx}px`,
+          maxWidth: '100%',
+          aspectRatio: `${displayWidthPx} / ${computedHeightPx}`,
+        }}
         className="relative overflow-hidden bg-muted/50"
       >
         {media?.thumbnailDataUrl && !effectiveUrl ? (
@@ -361,7 +365,7 @@ function VoiceMessagePlayer({
       onClick={(event) => event.stopPropagation()}
       className={cn(
         'flex items-center gap-2',
-        isCompact ? 'min-w-[196px] max-w-[235px]' : 'min-w-[232px] max-w-[290px]',
+        isCompact ? 'w-[188px] min-w-0 max-w-full' : 'w-[260px] min-w-0 max-w-full',
       )}
     >
       <audio

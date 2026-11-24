@@ -433,7 +433,7 @@ export function MessageBubbleRow({
                   className={cn(
                     'min-w-0 leading-relaxed break-words whitespace-pre-wrap transition-all focus:outline-none',
                     !isRecalled && item.dto.messageType === 'image' && !item.decryptionFailed
-                      ? 'overflow-hidden border border-border/60 p-0 shadow-2xs'
+                      ? 'max-w-full overflow-hidden border border-border/60 p-0 shadow-2xs'
                       : isCompact
                         ? 'px-3 py-1.5 text-xs'
                         : 'px-3.5 py-2 text-sm',
@@ -525,7 +525,7 @@ export function MessageBubbleRow({
           {hasAnyQuickAction ? (
             <div
               className={cn(
-                'flex shrink-0 items-center gap-0.5 self-center transition-opacity duration-150',
+                'relative z-10 flex shrink-0 items-center gap-0.5 self-center transition-opacity duration-150',
                 menuOpen || reactionPickerOpen || isTapSelected
                   ? 'opacity-100'
                   : 'opacity-0 group-hover/msg:opacity-100 group-focus-within/msg:opacity-100',
