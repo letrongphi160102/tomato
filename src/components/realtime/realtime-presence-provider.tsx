@@ -4,6 +4,8 @@ import * as React from 'react';
 
 import { clearChatRamMemorySingleton } from '@/components/messages/chat-store-context';
 import {
+  clearRealtimeNotificationRamCache,
+  getOrInitUserRealtimeNotificationRamCache,
   RealtimePresenceContext,
   type ChatRealtimeListener,
   type DeleteNotificationOutcome,
@@ -24,6 +26,8 @@ import type { NotificationItemDto } from '@/modules/notifications/notification.s
 
 /** Chu kỳ gửi tín hiệu duy trì trạng thái hoạt động từ trình duyệt: 60 giây. */
 export const PRESENCE_CLIENT_HEARTBEAT_INTERVAL_MS = 60_000;
+/** Khoảng cách tối thiểu giữa 2 lần gửi heartbeat khi điều hướng qua lại giữa `/` và Dashboard. */
+const PRESENCE_CLIENT_HEARTBEAT_MIN_GAP_MS = 30_000;
 
 export interface RealtimePresenceProviderProps {
   readonly currentUserPublicId?: string;
@@ -57,16 +61,26 @@ export function RealtimePresenceProvider({
   initialAccessTokenRemainingMs,
   children,
 }: RealtimePresenceProviderProps) {
-  const [notifications, setNotifications] = React.useState<readonly NotificationItemDto[]>([]);
-  const [unreadCount, setUnreadCount] = React.useState(0);
-  const [nextCursor, setNextCursor] = React.useState<string | null>(null);
-  const [loadingInitial, setLoadingInitial] = React.useState(true);
+  const [notifications, setNotificationsState] = React.useState<readonly NotificationItemDto[]>(
+    () => getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).notifications,
+  );
+  const [unreadCount, setUnreadCountState] = React.useState<number>(
+    () => getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).unreadCount,
+  );
+  const [nextCursor, setNextCursorState] = React.useState<string | null>(
+    () => getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).nextCursor,
+  );
+  const [loadingInitial, setLoadingInitialState] = React.useState<boolean>(
+    () => !getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).hasLoadedInitial,
+  );
   const [loadingMore, setLoadingMore] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [deletingIds, setDeletingIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [activeStatusEnabled, setActiveStatusEnabled] = React.useState(initialShowActiveStatus);
   const [readReceiptsEnabled, setReadReceiptsEnabled] = React.useState(initialShowReadReceipts);
-  const [e2eeReady, setE2eeReady] = React.useState(false);
+  const [e2eeReady, setE2eeReadyState] = React.useState<boolean>(
+    () => getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).e2eeReady,
+  );
 
   const notificationsRef = React.useRef<readonly NotificationItemDto[]>(notifications);
   const deletingIdsRef = React.useRef<Set<string>>(new Set());
@@ -76,6 +90,64 @@ export function RealtimePresenceProvider({
   const connectionRef = React.useRef<RealtimeClientConnection | null>(null);
   const heartbeatIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const loggedOutRef = React.useRef(false);
+
+  const setNotifications = React.useCallback(
+    (
+      updater:
+        | readonly NotificationItemDto[]
+        | ((prev: readonly NotificationItemDto[]) => readonly NotificationItemDto[]),
+    ) => {
+      setNotificationsState((prev) => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        if (!loggedOutRef.current && currentUserPublicId) {
+          getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).notifications = next;
+        }
+        return next;
+      });
+    },
+    [currentUserPublicId],
+  );
+
+  const setUnreadCount = React.useCallback(
+    (updater: number | ((prev: number) => number)) => {
+      setUnreadCountState((prev) => {
+        const rawNext = typeof updater === 'function' ? updater(prev) : updater;
+        const next = Math.max(0, rawNext);
+        if (!loggedOutRef.current && currentUserPublicId) {
+          getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).unreadCount = next;
+        }
+        return next;
+      });
+    },
+    [currentUserPublicId],
+  );
+
+  const setNextCursor = React.useCallback(
+    (cursor: string | null) => {
+      setNextCursorState(cursor);
+      if (!loggedOutRef.current && currentUserPublicId) {
+        getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).nextCursor = cursor;
+      }
+    },
+    [currentUserPublicId],
+  );
+
+  const markInitialNotificationsLoaded = React.useCallback(() => {
+    setLoadingInitialState(false);
+    if (!loggedOutRef.current && currentUserPublicId) {
+      getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).hasLoadedInitial = true;
+    }
+  }, [currentUserPublicId]);
+
+  const setE2eeReady = React.useCallback(
+    (ready: boolean) => {
+      setE2eeReadyState(ready);
+      if (!loggedOutRef.current && currentUserPublicId) {
+        getOrInitUserRealtimeNotificationRamCache(currentUserPublicId).e2eeReady = ready;
+      }
+    },
+    [currentUserPublicId],
+  );
 
   React.useEffect(() => {
     notificationsRef.current = notifications;
@@ -96,6 +168,14 @@ export function RealtimePresenceProvider({
     ) {
       return;
     }
+    const nowMs = Date.now();
+    if (currentUserPublicId) {
+      const cache = getOrInitUserRealtimeNotificationRamCache(currentUserPublicId);
+      if (nowMs - cache.lastHeartbeatAtMs < PRESENCE_CLIENT_HEARTBEAT_MIN_GAP_MS) {
+        return;
+      }
+      cache.lastHeartbeatAtMs = nowMs;
+    }
     try {
       await authFetch('/api/v1/presence/heartbeat', {
         method: 'POST',
@@ -105,7 +185,7 @@ export function RealtimePresenceProvider({
     } catch {
       // Bỏ qua lỗi mạng tạm thời; chu kỳ tiếp theo sẽ tự gửi lại.
     }
-  }, []);
+  }, [currentUserPublicId]);
 
   const refreshNotifications = React.useCallback(async () => {
     if (loggedOutRef.current) {
@@ -131,16 +211,17 @@ export function RealtimePresenceProvider({
       setNotifications(Array.isArray(data.items) ? data.items : []);
       setUnreadCount(typeof data.unreadCount === 'number' ? Math.max(0, data.unreadCount) : 0);
       setNextCursor(typeof data.nextCursor === 'string' ? data.nextCursor : null);
+      markInitialNotificationsLoaded();
     } catch {
       if (!loggedOutRef.current) {
         setErrorMessage('Không thể kết nối. Vui lòng thử lại.');
       }
     } finally {
       if (!loggedOutRef.current) {
-        setLoadingInitial(false);
+        setLoadingInitialState(false);
       }
     }
-  }, []);
+  }, [markInitialNotificationsLoaded, setNextCursor, setNotifications, setUnreadCount]);
 
   const loadMoreNotifications = React.useCallback(async () => {
     if (!nextCursor || loadingMore || loggedOutRef.current) {
@@ -183,48 +264,49 @@ export function RealtimePresenceProvider({
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, nextCursor]);
+  }, [loadingMore, nextCursor, setNextCursor, setNotifications, setUnreadCount]);
 
-  const markAsRead = React.useCallback(async (notificationPublicIds: readonly string[]) => {
-    const uniqueIds = Array.from(new Set(notificationPublicIds));
-    if (uniqueIds.length === 0 || loggedOutRef.current) {
-      return;
-    }
+  const markAsRead = React.useCallback(
+    async (notificationPublicIds: readonly string[]) => {
+      const uniqueIds = Array.from(new Set(notificationPublicIds));
+      if (uniqueIds.length === 0 || loggedOutRef.current) {
+        return;
+      }
 
-    const nowIso = new Date().toISOString();
-    const idSet = new Set(uniqueIds);
+      const nowIso = new Date().toISOString();
+      const idSet = new Set(uniqueIds);
+      const newlyReadCount = notificationsRef.current.reduce(
+        (acc, item) => (idSet.has(item.public_id) && item.readAt === null ? acc + 1 : acc),
+        0,
+      );
 
-    setNotifications((prev) => {
-      let newlyReadCount = 0;
-      const updated = prev.map((item) => {
-        if (idSet.has(item.public_id) && item.readAt === null) {
-          newlyReadCount += 1;
-          return { ...item, readAt: nowIso };
-        }
-        return item;
-      });
+      setNotifications((prev) =>
+        prev.map((item) =>
+          idSet.has(item.public_id) && item.readAt === null ? { ...item, readAt: nowIso } : item,
+        ),
+      );
       if (newlyReadCount > 0) {
         setUnreadCount((count) => Math.max(0, count - newlyReadCount));
       }
-      return updated;
-    });
 
-    try {
-      const response = await authFetch('/api/v1/notifications/read', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ notificationPublicIds: uniqueIds }),
-      });
-      if (response.ok) {
-        const data = (await response.json()) as { readonly unreadCount?: number };
-        if (typeof data.unreadCount === 'number') {
-          setUnreadCount(Math.max(0, data.unreadCount));
+      try {
+        const response = await authFetch('/api/v1/notifications/read', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ notificationPublicIds: uniqueIds }),
+        });
+        if (response.ok) {
+          const data = (await response.json()) as { readonly unreadCount?: number };
+          if (typeof data.unreadCount === 'number') {
+            setUnreadCount(Math.max(0, data.unreadCount));
+          }
         }
+      } catch {
+        // Giữ trạng thái cục bộ và sẽ tự đồng bộ ở lần tải tiếp theo.
       }
-    } catch {
-      // Giữ trạng thái cục bộ và sẽ tự đồng bộ ở lần tải tiếp theo.
-    }
-  }, []);
+    },
+    [setNotifications, setUnreadCount],
+  );
 
   const markAllAsRead = React.useCallback(async () => {
     if (loggedOutRef.current) {
@@ -251,17 +333,18 @@ export function RealtimePresenceProvider({
     } catch {
       // Đồng bộ lại khi tab active hoặc mở lại bảng thông báo.
     }
-  }, []);
+  }, [setNotifications, setUnreadCount]);
 
-  const removeNotificationLocally = React.useCallback((publicId: string) => {
-    setNotifications((prev) => {
-      const target = prev.find((item) => item.public_id === publicId);
+  const removeNotificationLocally = React.useCallback(
+    (publicId: string) => {
+      const target = notificationsRef.current.find((item) => item.public_id === publicId);
+      setNotifications((prev) => prev.filter((item) => item.public_id !== publicId));
       if (target && target.readAt === null) {
         setUnreadCount((count) => Math.max(0, count - 1));
       }
-      return prev.filter((item) => item.public_id !== publicId);
-    });
-  }, []);
+    },
+    [setNotifications, setUnreadCount],
+  );
 
   /**
    * Xóa 1 thông báo với Optimistic UI an toàn khi xóa nhanh nhiều dòng song song:
@@ -396,118 +479,121 @@ export function RealtimePresenceProvider({
         return rollbackItemOnly('Không thể kết nối. Vui lòng thử lại.');
       }
     },
-    [],
+    [setNotifications, setUnreadCount],
   );
 
-  const handleRealtimeEvent = React.useCallback((incoming: RealtimeClientEvent) => {
-    if (loggedOutRef.current) {
-      return;
-    }
-
-    if (incoming.event === 'notification.created') {
-      const maybeNotification = incoming.data.notification;
-      if (isNotificationItemDto(maybeNotification)) {
-        setNotifications((prev) => {
-          const withoutDuplicate = prev.filter(
-            (item) => item.public_id !== maybeNotification.public_id,
-          );
-          return [maybeNotification, ...withoutDuplicate];
-        });
+  const handleRealtimeEvent = React.useCallback(
+    (incoming: RealtimeClientEvent) => {
+      if (loggedOutRef.current) {
+        return;
       }
-      if (typeof incoming.data.unreadCount === 'number') {
-        setUnreadCount(Math.max(0, incoming.data.unreadCount));
+
+      if (incoming.event === 'notification.created') {
+        const maybeNotification = incoming.data.notification;
+        if (isNotificationItemDto(maybeNotification)) {
+          setNotifications((prev) => {
+            const withoutDuplicate = prev.filter(
+              (item) => item.public_id !== maybeNotification.public_id,
+            );
+            return [maybeNotification, ...withoutDuplicate];
+          });
+        }
+        if (typeof incoming.data.unreadCount === 'number') {
+          setUnreadCount(Math.max(0, incoming.data.unreadCount));
+        }
+        return;
       }
-      return;
-    }
 
-    if (incoming.event === 'notification.read') {
-      const markAll = incoming.data.markAll === true;
-      const readIds = Array.isArray(incoming.data.notificationPublicIds)
-        ? new Set(
-            incoming.data.notificationPublicIds.filter(
-              (id): id is string => typeof id === 'string',
-            ),
-          )
-        : new Set<string>();
-      const nowIso = new Date().toISOString();
+      if (incoming.event === 'notification.read') {
+        const markAll = incoming.data.markAll === true;
+        const readIds = Array.isArray(incoming.data.notificationPublicIds)
+          ? new Set(
+              incoming.data.notificationPublicIds.filter(
+                (id): id is string => typeof id === 'string',
+              ),
+            )
+          : new Set<string>();
+        const nowIso = new Date().toISOString();
 
-      setNotifications((prev) =>
-        prev.map((item) => {
-          if (item.readAt !== null) {
+        setNotifications((prev) =>
+          prev.map((item) => {
+            if (item.readAt !== null) {
+              return item;
+            }
+            if (markAll || readIds.has(item.public_id)) {
+              return { ...item, readAt: nowIso };
+            }
             return item;
-          }
-          if (markAll || readIds.has(item.public_id)) {
-            return { ...item, readAt: nowIso };
-          }
-          return item;
-        }),
-      );
-      if (typeof incoming.data.unreadCount === 'number') {
-        setUnreadCount(Math.max(0, incoming.data.unreadCount));
-      }
-      return;
-    }
-
-    if (incoming.event === 'notification.removed') {
-      const removedIds = Array.isArray(incoming.data.notificationPublicIds)
-        ? new Set(
-            incoming.data.notificationPublicIds.filter(
-              (id): id is string => typeof id === 'string',
-            ),
-          )
-        : new Set<string>();
-
-      if (removedIds.size > 0) {
-        setNotifications((prev) => prev.filter((item) => !removedIds.has(item.public_id)));
-      }
-      if (typeof incoming.data.unreadCount === 'number') {
-        setUnreadCount(
-          Math.max(0, incoming.data.unreadCount - inFlightUnreadDeleteIdsRef.current.size),
+          }),
         );
-      }
-      return;
-    }
-
-    if (incoming.event === 'notification.deleted') {
-      const deletedId =
-        typeof incoming.data.notificationPublicId === 'string'
-          ? incoming.data.notificationPublicId
-          : null;
-
-      if (deletedId) {
-        const timer = exitTimersRef.current.get(deletedId);
-        if (timer !== undefined) {
-          clearTimeout(timer);
-          exitTimersRef.current.delete(deletedId);
+        if (typeof incoming.data.unreadCount === 'number') {
+          setUnreadCount(Math.max(0, incoming.data.unreadCount));
         }
-        setNotifications((prev) => prev.filter((item) => item.public_id !== deletedId));
+        return;
       }
-      if (typeof incoming.data.unreadCount === 'number') {
-        setUnreadCount(
-          Math.max(0, incoming.data.unreadCount - inFlightUnreadDeleteIdsRef.current.size),
-        );
-      }
-      return;
-    }
 
-    if (
-      incoming.event === 'chat.message.created' ||
-      incoming.event === 'chat.message.updated' ||
-      incoming.event === 'chat.message.recalled' ||
-      incoming.event === 'chat.message.deleted_for_me' ||
-      incoming.event === 'chat.conversation.read' ||
-      incoming.event === 'chat.conversation.updated' ||
-      incoming.event === 'chat.conversation.deleted'
-    ) {
-      for (const listener of Array.from(chatListenersRef.current)) {
-        try {
-          listener(incoming);
-        } catch {
-          // Không để lỗi ở 1 subscriber ảnh hưởng tới subscriber khác.
+      if (incoming.event === 'notification.removed') {
+        const removedIds = Array.isArray(incoming.data.notificationPublicIds)
+          ? new Set(
+              incoming.data.notificationPublicIds.filter(
+                (id): id is string => typeof id === 'string',
+              ),
+            )
+          : new Set<string>();
+
+        if (removedIds.size > 0) {
+          setNotifications((prev) => prev.filter((item) => !removedIds.has(item.public_id)));
+        }
+        if (typeof incoming.data.unreadCount === 'number') {
+          setUnreadCount(
+            Math.max(0, incoming.data.unreadCount - inFlightUnreadDeleteIdsRef.current.size),
+          );
+        }
+        return;
+      }
+
+      if (incoming.event === 'notification.deleted') {
+        const deletedId =
+          typeof incoming.data.notificationPublicId === 'string'
+            ? incoming.data.notificationPublicId
+            : null;
+
+        if (deletedId) {
+          const timer = exitTimersRef.current.get(deletedId);
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            exitTimersRef.current.delete(deletedId);
+          }
+          setNotifications((prev) => prev.filter((item) => item.public_id !== deletedId));
+        }
+        if (typeof incoming.data.unreadCount === 'number') {
+          setUnreadCount(
+            Math.max(0, incoming.data.unreadCount - inFlightUnreadDeleteIdsRef.current.size),
+          );
+        }
+        return;
+      }
+
+      if (
+        incoming.event === 'chat.message.created' ||
+        incoming.event === 'chat.message.updated' ||
+        incoming.event === 'chat.message.recalled' ||
+        incoming.event === 'chat.message.deleted_for_me' ||
+        incoming.event === 'chat.conversation.read' ||
+        incoming.event === 'chat.conversation.updated' ||
+        incoming.event === 'chat.conversation.deleted'
+      ) {
+        for (const listener of Array.from(chatListenersRef.current)) {
+          try {
+            listener(incoming);
+          } catch {
+            // Không để lỗi ở 1 subscriber ảnh hưởng tới subscriber khác.
+          }
         }
       }
-    }
-  }, []);
+    },
+    [setNotifications, setUnreadCount],
+  );
 
   const subscribeChatEvents = React.useCallback((listener: ChatRealtimeListener) => {
     chatListenersRef.current.add(listener);
@@ -525,12 +611,13 @@ export function RealtimePresenceProvider({
       setE2eeReady(true);
     }
     return ok;
-  }, [currentUserPublicId]);
+  }, [currentUserPublicId, setE2eeReady]);
 
   const disconnectAll = React.useCallback(() => {
     loggedOutRef.current = true;
     stopHeartbeatTimer();
     clearChatRamMemorySingleton();
+    clearRealtimeNotificationRamCache();
     clearE2eeClientBootstrapState();
     for (const timer of exitTimersRef.current.values()) {
       clearTimeout(timer);
@@ -584,6 +671,7 @@ export function RealtimePresenceProvider({
         setNotifications(Array.isArray(data.items) ? data.items : []);
         setUnreadCount(typeof data.unreadCount === 'number' ? Math.max(0, data.unreadCount) : 0);
         setNextCursor(typeof data.nextCursor === 'string' ? data.nextCursor : null);
+        markInitialNotificationsLoaded();
       })
       .catch(() => {
         if (!controller.signal.aborted && !loggedOutRef.current) {
@@ -592,7 +680,7 @@ export function RealtimePresenceProvider({
       })
       .finally(() => {
         if (!controller.signal.aborted && !loggedOutRef.current) {
-          setLoadingInitial(false);
+          setLoadingInitialState(false);
         }
       });
 
@@ -609,7 +697,14 @@ export function RealtimePresenceProvider({
         connectionRef.current = null;
       }
     };
-  }, [currentUserPublicId, handleRealtimeEvent]);
+  }, [
+    currentUserPublicId,
+    handleRealtimeEvent,
+    markInitialNotificationsLoaded,
+    setNextCursor,
+    setNotifications,
+    setUnreadCount,
+  ]);
 
   // Duy trì nhịp cập nhật trạng thái hoạt động mỗi 60 giây khi tab đang mở và người dùng đang bật tính năng.
   React.useEffect(() => {

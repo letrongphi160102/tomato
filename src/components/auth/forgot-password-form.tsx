@@ -182,14 +182,14 @@ export function ForgotPasswordForm() {
             </div>
           </Alert>
 
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Button asChild className="w-full">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <Button asChild className="w-full px-3">
               <Link href="/login">Quay lại Đăng nhập</Link>
             </Button>
             <Button
               type="button"
               variant="outline"
-              className="w-full"
+              className="w-full px-3"
               onClick={() => {
                 setStatus('idle');
                 setBannerMessage('');

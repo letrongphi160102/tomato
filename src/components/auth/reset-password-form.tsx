@@ -285,13 +285,13 @@ export function ResetPasswordForm() {
           </CardDescription>
         </CardHeader>
 
-        <CardContent className="flex flex-col gap-2 sm:flex-row">
-          <Button asChild className="w-full">
+        <CardContent className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Button asChild className="w-full px-3">
             <Link href="/forgot-password" rel="noreferrer">
               Yêu cầu liên kết mới
             </Link>
           </Button>
-          <Button asChild variant="outline" className="w-full">
+          <Button asChild variant="outline" className="w-full px-3">
             <Link href="/login" rel="noreferrer">
               Quay lại Đăng nhập
             </Link>

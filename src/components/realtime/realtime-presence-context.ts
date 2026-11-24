@@ -41,3 +41,64 @@ export const RealtimePresenceContext = React.createContext<RealtimePresenceConte
 export function useRealtimePresence(): RealtimePresenceContextValue | null {
   return React.useContext(RealtimePresenceContext);
 }
+
+// ============================================================================
+// Bộ nhớ đệm RAM cấp phiên cho Thông báo & Hiện diện (Chỉ lưu trong JS Heap RAM)
+// Tuyệt đối không dùng localStorage/sessionStorage — xóa sạch ngay khi đăng xuất.
+// ============================================================================
+
+export interface UserRealtimeNotificationRamCache {
+  readonly userPublicId: string;
+  notifications: readonly NotificationItemDto[];
+  unreadCount: number;
+  nextCursor: string | null;
+  hasLoadedInitial: boolean;
+  e2eeReady: boolean;
+  lastHeartbeatAtMs: number;
+}
+
+let activeUserRealtimeNotificationRamCache: UserRealtimeNotificationRamCache | null = null;
+
+function createEmptyRealtimeNotificationRamCache(
+  userPublicId: string,
+): UserRealtimeNotificationRamCache {
+  return {
+    userPublicId,
+    notifications: [],
+    unreadCount: 0,
+    nextCursor: null,
+    hasLoadedInitial: false,
+    e2eeReady: false,
+    lastHeartbeatAtMs: 0,
+  };
+}
+
+export function getOrInitUserRealtimeNotificationRamCache(
+  userPublicId?: string | null,
+): UserRealtimeNotificationRamCache {
+  const norm = (userPublicId ?? '').trim().toLowerCase();
+  if (!norm) {
+    return createEmptyRealtimeNotificationRamCache('');
+  }
+  if (
+    activeUserRealtimeNotificationRamCache &&
+    activeUserRealtimeNotificationRamCache.userPublicId === norm
+  ) {
+    return activeUserRealtimeNotificationRamCache;
+  }
+
+  activeUserRealtimeNotificationRamCache = createEmptyRealtimeNotificationRamCache(norm);
+  return activeUserRealtimeNotificationRamCache;
+}
+
+export function clearRealtimeNotificationRamCache(): void {
+  if (activeUserRealtimeNotificationRamCache) {
+    activeUserRealtimeNotificationRamCache.notifications = [];
+    activeUserRealtimeNotificationRamCache.unreadCount = 0;
+    activeUserRealtimeNotificationRamCache.nextCursor = null;
+    activeUserRealtimeNotificationRamCache.hasLoadedInitial = false;
+    activeUserRealtimeNotificationRamCache.e2eeReady = false;
+    activeUserRealtimeNotificationRamCache.lastHeartbeatAtMs = 0;
+  }
+  activeUserRealtimeNotificationRamCache = null;
+}

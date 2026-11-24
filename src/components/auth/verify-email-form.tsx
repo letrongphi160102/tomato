@@ -273,11 +273,11 @@ export function VerifyEmailForm() {
               </AlertDescription>
             </div>
           </Alert>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Button asChild className="w-full">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <Button asChild className="w-full px-3">
               <Link href="/login">Đăng nhập ngay</Link>
             </Button>
-            <Button asChild variant="outline" className="w-full">
+            <Button asChild variant="outline" className="w-full px-3">
               <Link href="/">Về trang chủ Tomato</Link>
             </Button>
           </div>
@@ -296,11 +296,11 @@ export function VerifyEmailForm() {
             nhận mã xác nhận.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-2 sm:flex-row">
-          <Button asChild className="w-full">
+        <CardContent className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <Button asChild className="w-full px-3">
             <Link href="/login">Đăng nhập</Link>
           </Button>
-          <Button asChild variant="outline" className="w-full">
+          <Button asChild variant="outline" className="w-full px-3">
             <Link href="/register">Đăng ký tài khoản</Link>
           </Button>
         </CardContent>
