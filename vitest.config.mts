@@ -15,6 +15,7 @@ export default defineConfig({
     },
   },
   test: {
+    pool: 'threads',
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     setupFiles: ['tests/setup/load-local-env.ts'],

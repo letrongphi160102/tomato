@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { cache } from 'react';
 import { cookies } from 'next/headers';
 
 import { getCookieNames } from '@/core/security/cookies';
@@ -31,7 +32,7 @@ export type ServerAuthState =
  *   chạy Single-Flight Silent Refresh qua `POST /api/v1/auth/refresh` (giữ đủ 3 lớp phòng thủ CSRF).
  * - Ngược lại -> `unauthenticated`.
  */
-export async function resolveServerAuthState(): Promise<ServerAuthState> {
+export const resolveServerAuthState = cache(async (): Promise<ServerAuthState> => {
   const cookieStore = await cookies();
   const names = getCookieNames();
   const accessToken = cookieStore.get(names.accessToken)?.value ?? null;
@@ -61,4 +62,4 @@ export async function resolveServerAuthState(): Promise<ServerAuthState> {
   }
 
   return { status: 'unauthenticated' };
-}
+});

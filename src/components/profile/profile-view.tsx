@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import {
   ArrowLeft,
@@ -19,12 +20,26 @@ import {
   UserX,
 } from 'lucide-react';
 
-import { ShareProfileModal } from '@/components/profile/share-profile-modal';
+import { useCall } from '@/components/calls/call-context';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
-import { FollowListModal, type FollowListType } from '@/components/social/follow-list-modal';
-import { FollowRequestsModal } from '@/components/social/follow-requests-modal';
+import type { FollowListType } from '@/components/social/follow-list-modal';
+
+const ShareProfileModal = dynamic(
+  () => import('@/components/profile/share-profile-modal').then((m) => m.ShareProfileModal),
+  { ssr: false },
+);
+
+const FollowListModal = dynamic(
+  () => import('@/components/social/follow-list-modal').then((m) => m.FollowListModal),
+  { ssr: false },
+);
+
+const FollowRequestsModal = dynamic(
+  () => import('@/components/social/follow-requests-modal').then((m) => m.FollowRequestsModal),
+  { ssr: false },
+);
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -49,6 +64,7 @@ function formatCompactCount(value: number): string {
 
 export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }: ProfileViewProps) {
   const realtime = useRealtimePresence();
+  const call = useCall();
   const [profile, setProfile] = React.useState<UserProfileDto>(initialProfile);
   const [presence, setPresence] = React.useState<PresenceStatusDto | null>(null);
   const [pendingRequestsCount, setPendingRequestsCount] = React.useState<number>(
@@ -205,6 +221,12 @@ export function ProfileView({ initialProfile, initialPendingRequestsCount = 0 }:
         return;
       }
 
+      if (
+        call?.activeCall?.peer.public_id === profile.public_id ||
+        call?.incomingCall?.caller.public_id === profile.public_id
+      ) {
+        void call.endActiveCall();
+      }
       setConfirmBlockOpen(false);
       setBlockedLocally(true);
     } catch {

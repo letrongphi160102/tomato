@@ -4,7 +4,7 @@ import { CallProvider } from '@/components/calls/call-provider';
 import { AppLeftSidebar } from '@/components/layout/app-left-sidebar';
 import { AppTopBar } from '@/components/layout/app-top-bar';
 import { ChatStoreProvider } from '@/components/messages/chat-store-provider';
-import { FloatingMessagesWidget } from '@/components/messages/floating-messages-widget';
+import { FloatingMessagesLauncher } from '@/components/messages/floating-messages-launcher';
 import { RealtimePresenceProvider } from '@/components/realtime/realtime-presence-provider';
 import type { PublicUserProfile } from '@/modules/auth/session.service';
 import type { UserProfileDto } from '@/modules/profile';
@@ -49,7 +49,7 @@ export function AppShell({
                 {children}
               </main>
             </div>
-            <FloatingMessagesWidget />
+            <FloatingMessagesLauncher />
           </div>
         </CallProvider>
       </ChatStoreProvider>

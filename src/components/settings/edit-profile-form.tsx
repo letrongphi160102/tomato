@@ -1,12 +1,17 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Camera, CheckCircle2, ExternalLink, Loader2, Trash2 } from 'lucide-react';
 
-import { AvatarCropModal } from '@/components/profile/avatar-crop-modal';
 import { UserAvatar } from '@/components/profile/user-avatar';
+
+const AvatarCropModal = dynamic(
+  () => import('@/components/profile/avatar-crop-modal').then((m) => m.AvatarCropModal),
+  { ssr: false },
+);
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';

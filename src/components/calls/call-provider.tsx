@@ -88,9 +88,11 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
   const [remoteStream, setRemoteStream] = React.useState<MediaStream | null>(null);
   const [isMicMuted, setIsMicMuted] = React.useState(false);
   const [isCameraEnabled, setIsCameraEnabled] = React.useState(false);
-  const [durationSeconds, setDurationSeconds] = React.useState(0);
   const [noticeMessage, setNoticeMessage] = React.useState<string | null>(null);
 
+  const mountedRef = React.useRef(true);
+  const callAttemptSeqRef = React.useRef(0);
+  const cameraToggleInFlightRef = React.useRef(false);
   const phaseRef = React.useRef<CallUiPhase>(phase);
   const activeCallRef = React.useRef<ActiveCallSessionUi | null>(activeCall);
   const incomingCallRef = React.useRef<IncomingCallSessionUi | null>(incomingCall);
@@ -99,7 +101,6 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
   const ringtoneRef = React.useRef<RingtoneController | null>(null);
   const ringTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
-  const durationIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const noticeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const pagehideEndSentForCallIdRef = React.useRef<string | null>(null);
 
@@ -144,10 +145,6 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       clearInterval(heartbeatIntervalRef.current);
       heartbeatIntervalRef.current = null;
     }
-    if (durationIntervalRef.current !== null) {
-      clearInterval(durationIntervalRef.current);
-      durationIntervalRef.current = null;
-    }
   }, []);
 
   const stopRingtone = React.useCallback(() => {
@@ -163,6 +160,8 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
 
   const teardownLocalCallResources = React.useCallback(
     (options?: { readonly notice?: string }) => {
+      callAttemptSeqRef.current += 1;
+      cameraToggleInFlightRef.current = false;
       clearCallTimers();
       stopRingtone();
 
@@ -172,16 +171,18 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       }
 
       earlySignalsByCallIdRef.current.clear();
+      activeCallRef.current = null;
+      incomingCallRef.current = null;
+      phaseRef.current = 'idle';
       setActiveCall(null);
       setIncomingCall(null);
       setLocalStream(null);
       setRemoteStream(null);
       setIsMicMuted(false);
       setIsCameraEnabled(false);
-      setDurationSeconds(0);
       setPhase('idle');
 
-      if (options?.notice) {
+      if (options?.notice && mountedRef.current) {
         showTransientNotice(options.notice);
       }
     },
@@ -322,19 +323,29 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
         return;
       }
 
+      const attemptSeq = ++callAttemptSeqRef.current;
       dismissNotice();
+      phaseRef.current = 'starting';
       setPhase('starting');
 
       let acquiredStream: MediaStream | null = null;
       let hasVideo = false;
       try {
         const media = await acquireLocalCallMediaStream(callType === 'video');
+        if (!mountedRef.current || callAttemptSeqRef.current !== attemptSeq) {
+          stopAllMediaStreamTracks(media.stream);
+          return;
+        }
         acquiredStream = media.stream;
         hasVideo = media.hasVideo;
         if (media.notice) {
           showTransientNotice(media.notice);
         }
       } catch (error) {
+        if (!mountedRef.current || callAttemptSeqRef.current !== attemptSeq) {
+          return;
+        }
+        phaseRef.current = 'idle';
         setPhase('idle');
         showTransientNotice(
           error instanceof Error ? error.message : 'Không thể truy cập micro hoặc camera.',
@@ -352,8 +363,22 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
           }),
         });
 
+        if (!mountedRef.current || callAttemptSeqRef.current !== attemptSeq) {
+          stopAllMediaStreamTracks(acquiredStream);
+          if (response.ok) {
+            const staleData = (await response.json().catch(() => null)) as {
+              readonly call?: CallSessionDto;
+            } | null;
+            if (staleData?.call?.public_id) {
+              sendKeepaliveEndForCall(staleData.call.public_id);
+            }
+          }
+          return;
+        }
+
         if (!response.ok) {
           stopAllMediaStreamTracks(acquiredStream);
+          phaseRef.current = 'idle';
           setPhase('idle');
           const errBody = (await response.json().catch(() => null)) as {
             readonly error?: { readonly message?: string };
@@ -366,6 +391,11 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
 
         const data = (await response.json()) as { readonly call: CallSessionDto };
         const session = data.call;
+        if (!mountedRef.current || callAttemptSeqRef.current !== attemptSeq) {
+          stopAllMediaStreamTracks(acquiredStream);
+          sendKeepaliveEndForCall(session.public_id);
+          return;
+        }
         pagehideEndSentForCallIdRef.current = null;
 
         const engine = createConfiguredEngine(session.public_id, true);
@@ -373,7 +403,7 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
         setIsMicMuted(false);
         setIsCameraEnabled(hasVideo);
 
-        setActiveCall({
+        const nextActiveCall: ActiveCallSessionUi = {
           callPublicId: session.public_id,
           conversationPublicId: session.conversationPublicId,
           callType: session.callType,
@@ -381,13 +411,18 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
           peer: session.peer,
           startedAtIso: session.startedAt,
           connectedAtMs: null,
-        });
+        };
+        activeCallRef.current = nextActiveCall;
+        phaseRef.current = 'outgoing_ringing';
+        setActiveCall(nextActiveCall);
         setPhase('outgoing_ringing');
         startRingtone('outgoing');
 
         // Nạp sẵn ICE/TURN ngắn hạn song song lúc đang đổ chuông để kết nối nhanh khi đối phương nhấc máy.
         const iceServers = await fetchIceServers();
         if (
+          mountedRef.current &&
+          callAttemptSeqRef.current === attemptSeq &&
           engineRef.current === engine &&
           activeCallRef.current?.callPublicId === session.public_id
         ) {
@@ -422,6 +457,7 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       dismissNotice,
       fetchIceServers,
       sendCallActionApi,
+      sendKeepaliveEndForCall,
       showTransientNotice,
       startRingtone,
       teardownLocalCallResources,
@@ -438,21 +474,34 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       return;
     }
 
+    const attemptSeq = ++callAttemptSeqRef.current;
     stopRingtone();
     clearCallTimers();
     dismissNotice();
+    phaseRef.current = 'connecting';
     setPhase('connecting');
 
     let acquiredStream: MediaStream | null = null;
     let hasVideo = false;
     try {
       const media = await acquireLocalCallMediaStream(incoming.callType === 'video');
+      if (
+        !mountedRef.current ||
+        callAttemptSeqRef.current !== attemptSeq ||
+        incomingCallRef.current?.callPublicId !== incoming.callPublicId
+      ) {
+        stopAllMediaStreamTracks(media.stream);
+        return;
+      }
       acquiredStream = media.stream;
       hasVideo = media.hasVideo;
       if (media.notice) {
         showTransientNotice(media.notice);
       }
     } catch (error) {
+      if (!mountedRef.current || callAttemptSeqRef.current !== attemptSeq) {
+        return;
+      }
       void sendCallActionApi(incoming.callPublicId, 'decline');
       teardownLocalCallResources({
         notice:
@@ -470,8 +519,9 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
     engine.setLocalStream(acquiredStream);
     setIsMicMuted(false);
     setIsCameraEnabled(hasVideo);
+    incomingCallRef.current = null;
     setIncomingCall(null);
-    setActiveCall({
+    const nextActiveCall: ActiveCallSessionUi = {
       callPublicId: callId,
       conversationPublicId: incoming.conversationPublicId,
       callType: incoming.callType,
@@ -479,10 +529,16 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       peer: incoming.caller,
       startedAtIso: incoming.startedAtIso,
       connectedAtMs: Date.now(),
-    });
+    };
+    activeCallRef.current = nextActiveCall;
+    setActiveCall(nextActiveCall);
 
     const iceServers = await fetchIceServers();
-    if (engineRef.current !== engine) {
+    if (
+      !mountedRef.current ||
+      callAttemptSeqRef.current !== attemptSeq ||
+      engineRef.current !== engine
+    ) {
       return;
     }
     engine.initializePeerConnection(iceServers);
@@ -495,6 +551,9 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
     }
 
     const acceptRes = await sendCallActionApi(callId, 'accept');
+    if (!mountedRef.current || callAttemptSeqRef.current !== attemptSeq) {
+      return;
+    }
     if (!acceptRes || !acceptRes.ok) {
       const errBody = (await acceptRes?.json().catch(() => null)) as {
         readonly error?: { readonly message?: string };
@@ -506,7 +565,10 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
     }
 
     await engine.flushPendingSignalsAfterInit();
-    setPhase('connected');
+    if (mountedRef.current && callAttemptSeqRef.current === attemptSeq) {
+      phaseRef.current = 'connected';
+      setPhase('connected');
+    }
   }, [
     clearCallTimers,
     createConfiguredEngine,
@@ -550,14 +612,23 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
 
   const toggleCamera = React.useCallback(async () => {
     const engine = engineRef.current;
-    if (!engine) {
+    if (!engine || cameraToggleInFlightRef.current) {
       return;
     }
-    const nextEnable = !isCameraEnabled;
-    const result = await engine.setCameraEnabled(nextEnable);
-    setIsCameraEnabled(result.enabled);
-    if (result.errorMessage) {
-      showTransientNotice(result.errorMessage);
+    cameraToggleInFlightRef.current = true;
+    const attemptSeq = callAttemptSeqRef.current;
+    try {
+      const nextEnable = !isCameraEnabled;
+      const result = await engine.setCameraEnabled(nextEnable);
+      if (!mountedRef.current || callAttemptSeqRef.current !== attemptSeq) {
+        return;
+      }
+      setIsCameraEnabled(result.enabled);
+      if (result.errorMessage) {
+        showTransientNotice(result.errorMessage);
+      }
+    } finally {
+      cameraToggleInFlightRef.current = false;
     }
   }, [isCameraEnabled, showTransientNotice]);
 
@@ -570,7 +641,7 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
   }, [sendKeepaliveEndForCall, teardownLocalCallResources]);
 
   // =========================================================================
-  // 3. Nhịp Heartbeat 30 giây (`connected`) & Bộ đếm thời gian cuộc gọi
+  // 3. Nhịp Heartbeat 30 giây (`connected`) — bộ đếm giây UI tách riêng trong ActiveCallScreen
   // =========================================================================
 
   React.useEffect(() => {
@@ -579,19 +650,10 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
         clearInterval(heartbeatIntervalRef.current);
         heartbeatIntervalRef.current = null;
       }
-      if (durationIntervalRef.current !== null) {
-        clearInterval(durationIntervalRef.current);
-        durationIntervalRef.current = null;
-      }
       return;
     }
 
     const callId = activeCall.callPublicId;
-    const startedMs = activeCall.connectedAtMs ?? Date.now();
-
-    durationIntervalRef.current = setInterval(() => {
-      setDurationSeconds(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)));
-    }, 1_000);
 
     heartbeatIntervalRef.current = setInterval(() => {
       if (activeCallRef.current?.callPublicId === callId && phaseRef.current === 'connected') {
@@ -603,10 +665,6 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       if (heartbeatIntervalRef.current !== null) {
         clearInterval(heartbeatIntervalRef.current);
         heartbeatIntervalRef.current = null;
-      }
-      if (durationIntervalRef.current !== null) {
-        clearInterval(durationIntervalRef.current);
-        durationIntervalRef.current = null;
       }
     };
   }, [activeCall, phase, sendCallActionApi]);
@@ -636,7 +694,9 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
 
   // Dọn tài nguyên khi unmount hoặc đổi tài khoản.
   React.useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       teardownLocalCallResources();
       if (noticeTimerRef.current !== null) {
         clearTimeout(noticeTimerRef.current);
@@ -685,14 +745,17 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
           return;
         }
 
-        setIncomingCall({
+        const nextIncoming: IncomingCallSessionUi = {
           callPublicId,
           conversationPublicId,
           callType,
           caller,
           startedAtIso,
           expiresAtIso,
-        });
+        };
+        incomingCallRef.current = nextIncoming;
+        phaseRef.current = 'incoming_ringing';
+        setIncomingCall(nextIncoming);
         setPhase('incoming_ringing');
         startRingtone('incoming');
 
@@ -811,7 +874,7 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       remoteStream,
       isMicMuted,
       isCameraEnabled,
-      durationSeconds,
+      durationSeconds: 0,
       noticeMessage,
       isBusyInCall: phase !== 'idle',
       startCall,
@@ -829,7 +892,6 @@ export function CallProvider({ currentUserPublicId, children }: CallProviderProp
       cleanupOnLogout,
       declineIncomingCall,
       dismissNotice,
-      durationSeconds,
       endActiveCall,
       incomingCall,
       isCameraEnabled,

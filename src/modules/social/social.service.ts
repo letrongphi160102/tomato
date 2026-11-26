@@ -1426,6 +1426,9 @@ export class SocialService {
         }
 
         const batchDispatches: (PendingRealtimeDispatch | null)[] = [];
+        let deferredBatchRecords: Awaited<
+          ReturnType<NotificationService['recordNotificationsBatchInTx']>
+        >['deferredRecords'] = [];
 
         const batchOutcome = await this.repository.getDb().transaction(async (tx) => {
           if (!acceptPendingRequests) {
@@ -1525,9 +1528,22 @@ export class SocialService {
                 actorIds: acceptedIds,
               }),
             );
-            for (const acceptedId of acceptedIds) {
-              const acceptedUser = lockedUsers.get(acceptedId);
-              if (acceptedUser) {
+            const acceptedUsers = acceptedIds
+              .map((id) => lockedUsers.get(id))
+              .filter((u): u is NonNullable<typeof u> => u !== undefined);
+
+            if (typeof this.notificationService.recordNotificationsBatchInTx === 'function') {
+              const batchResult = await this.notificationService.recordNotificationsBatchInTx(tx, {
+                recipients: acceptedUsers,
+                actor: lockedActor,
+                type: 'follow_accepted',
+                entityPublicId: lockedActor.publicId,
+                now: currentTime,
+              });
+              batchDispatches.push(...batchResult.immediateDispatches);
+              deferredBatchRecords = batchResult.deferredRecords;
+            } else {
+              for (const acceptedUser of acceptedUsers) {
                 batchDispatches.push(
                   await this.notificationService.recordNotificationInTx(tx, {
                     recipient: acceptedUser,
@@ -1550,8 +1566,18 @@ export class SocialService {
           };
         });
 
-        if (this.notificationService && batchDispatches.length > 0) {
-          await this.notificationService.dispatchRealtimeEvents(batchDispatches);
+        if (this.notificationService) {
+          if (
+            deferredBatchRecords.length > 0 &&
+            typeof this.notificationService.buildBatchCreatedDispatches === 'function'
+          ) {
+            const hydrated =
+              await this.notificationService.buildBatchCreatedDispatches(deferredBatchRecords);
+            batchDispatches.push(...hydrated);
+          }
+          if (batchDispatches.length > 0) {
+            await this.notificationService.dispatchRealtimeEvents(batchDispatches);
+          }
         }
 
         acceptedRequestsCount += batchOutcome.accepted;

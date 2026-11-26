@@ -78,7 +78,7 @@ export interface MessageBubbleRowProps {
   readonly onOpenLightbox?: (target: ImageLightboxTarget) => void;
 }
 
-export function MessageBubbleRow({
+export const MessageBubbleRow = React.memo(function MessageBubbleRow({
   entry,
   index,
   peer,
@@ -754,4 +754,4 @@ export function MessageBubbleRow({
       </div>
     </React.Fragment>
   );
-}
+});

@@ -21,13 +21,28 @@ export interface AvatarCropModalProps {
 const CROP_OUTPUT_PX = 1024;
 const PREVIEW_OUTPUT_PX = 160;
 
+let cachedDecodedAvatarImage: {
+  readonly src: string;
+  readonly promise: Promise<HTMLImageElement>;
+} | null = null;
+
 function loadImageElement(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
+  if (cachedDecodedAvatarImage?.src === src) {
+    return cachedDecodedAvatarImage.promise;
+  }
+  const promise = new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Không thể đọc ảnh đã chọn.'));
+    img.onerror = () => {
+      if (cachedDecodedAvatarImage?.src === src) {
+        cachedDecodedAvatarImage = null;
+      }
+      reject(new Error('Không thể đọc ảnh đã chọn.'));
+    };
     img.src = src;
   });
+  cachedDecodedAvatarImage = { src, promise };
+  return promise;
 }
 
 async function renderCroppedBlob(
@@ -42,6 +57,8 @@ async function renderCroppedBlob(
 
   const ctx = canvas.getContext('2d');
   if (!ctx) {
+    canvas.width = 0;
+    canvas.height = 0;
     throw new Error('Trình duyệt không hỗ trợ xử lý ảnh.');
   }
 
@@ -62,6 +79,9 @@ async function renderCroppedBlob(
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
+        // Giải phóng ngay bộ nhớ đệm bitmap của <canvas> sau khi xuất JPEG.
+        canvas.width = 0;
+        canvas.height = 0;
         if (!blob) {
           reject(new Error('Không thể tạo ảnh sau khi cắt.'));
           return;

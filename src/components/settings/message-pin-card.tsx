@@ -1,14 +1,19 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import { CheckCircle2, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 
 import { useChatStore } from '@/components/messages/chat-store-context';
-import {
-  PinBackupModal,
-  type PinBackupModalMode,
-  type PinOperationCompletedPayload,
+import type {
+  PinBackupModalMode,
+  PinOperationCompletedPayload,
 } from '@/components/messages/pin-backup-modal';
+
+const PinBackupModal = dynamic(
+  () => import('@/components/messages/pin-backup-modal').then((m) => m.PinBackupModal),
+  { ssr: false },
+);
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';

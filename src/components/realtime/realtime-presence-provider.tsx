@@ -189,6 +189,8 @@ export function RealtimePresenceProvider({
     }
   }, [currentUserPublicId]);
 
+  const lastNotificationsSyncedAtMsRef = React.useRef<number>(0);
+
   const refreshNotifications = React.useCallback(async () => {
     if (loggedOutRef.current) {
       return;
@@ -209,6 +211,7 @@ export function RealtimePresenceProvider({
         readonly unreadCount?: number;
         readonly nextCursor?: string | null;
       };
+      lastNotificationsSyncedAtMsRef.current = Date.now();
       setErrorMessage(null);
       setNotifications(Array.isArray(data.items) ? data.items : []);
       setUnreadCount(typeof data.unreadCount === 'number' ? Math.max(0, data.unreadCount) : 0);
@@ -762,12 +765,20 @@ export function RealtimePresenceProvider({
     };
   }, [activeStatusEnabled, sendPresenceHeartbeat, stopHeartbeatTimer]);
 
-  // Tự đồng bộ lại thông báo khi người dùng quay lại tab sau một khoảng thời gian ẩn.
+  // Tự đồng bộ lại thông báo khi người dùng quay lại tab sau ít nhất 60 giây ẩn (tiết kiệm quota Serverless khi Alt-Tab liên tục).
   React.useEffect(() => {
+    const VISIBILITY_NOTIFICATION_SYNC_COOLDOWN_MS = 60_000;
     const handleVisibilityRefresh = () => {
-      if (!loggedOutRef.current && document.visibilityState === 'visible') {
-        void refreshNotifications();
+      if (loggedOutRef.current || document.visibilityState !== 'visible') {
+        return;
       }
+      if (
+        Date.now() - lastNotificationsSyncedAtMsRef.current <
+        VISIBILITY_NOTIFICATION_SYNC_COOLDOWN_MS
+      ) {
+        return;
+      }
+      void refreshNotifications();
     };
     document.addEventListener('visibilitychange', handleVisibilityRefresh);
     return () => {

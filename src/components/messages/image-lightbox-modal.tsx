@@ -64,7 +64,7 @@ export function ImageLightboxModal({ target, onClose }: ImageLightboxModalProps)
           onClose();
         }
       }}
-      className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-[60] flex flex-col items-center justify-center bg-black/85 p-4 backdrop-blur-xs"
     >
       <div className="absolute top-4 right-4 flex items-center gap-2">
         <Button

@@ -1,3 +1,5 @@
+import { getBrowserAudioContextConstructor } from '@/lib/audio-context';
+
 /**
  * Bộ tạo âm báo nhẹ nhàng bằng Web Audio API cho cuộc gọi đến / chuông chờ.
  * Không phụ thuộc tệp âm thanh bên ngoài và tự tôn trọng chính sách autoplay của trình duyệt.
@@ -12,13 +14,7 @@ export function createCallRingtoneController(): RingtoneController {
   let intervalId: ReturnType<typeof setInterval> | null = null;
 
   const playBurst = (mode: 'incoming' | 'outgoing') => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    const AudioContextCtor =
-      window.AudioContext ??
-      (window as unknown as { readonly webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
+    const AudioContextCtor = getBrowserAudioContextConstructor();
     if (!AudioContextCtor) {
       return;
     }
@@ -38,6 +34,14 @@ export function createCallRingtoneController(): RingtoneController {
       const osc = audioCtx.createOscillator();
       osc.type = 'sine';
       osc.connect(gain);
+      osc.onended = () => {
+        try {
+          osc.disconnect();
+          gain.disconnect();
+        } catch {
+          // Bỏ qua nếu AudioContext đã đóng.
+        }
+      };
 
       if (mode === 'incoming') {
         // 2 nốt chuông êm dịu cách nhau ngắn

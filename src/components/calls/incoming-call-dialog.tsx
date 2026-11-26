@@ -40,7 +40,7 @@ export function IncomingCallDialog({
       role="dialog"
       aria-modal="true"
       aria-label={isVideo ? 'Cuộc gọi video đến' : 'Cuộc gọi thoại đến'}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
     >
       <div className="w-full max-w-xs overflow-hidden rounded-3xl border bg-background p-6 text-center shadow-2xl">
         <div className="relative mx-auto flex size-24 items-center justify-center">

@@ -18,10 +18,14 @@ import {
   Smartphone,
 } from 'lucide-react';
 
+import { useCall } from '@/components/calls/call-context';
+import { useChatStore } from '@/components/messages/chat-store-context';
+import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { authFetch, clearAccessTokenFreshness } from '@/lib/auth-client';
+import { disconnectAllRealtimeConnections } from '@/lib/realtime-client';
 import {
   groupDevicesForDisplay,
   type ActiveDeviceGroup,
@@ -78,6 +82,9 @@ function renderDeviceIcon(deviceInfo: string, muted = false) {
 
 export function SecuritySessionsPanel() {
   const router = useRouter();
+  const call = useCall();
+  const chatStore = useChatStore();
+  const realtime = useRealtimePresence();
 
   const [sessions, setSessions] = React.useState<readonly DeviceSessionRecord[]>([]);
   const [history, setHistory] = React.useState<readonly DeviceHistoryRecord[]>([]);
@@ -228,6 +235,10 @@ export function SecuritySessionsPanel() {
       if (response.ok) {
         if (sessionItem.isCurrent) {
           clearAccessTokenFreshness();
+          call?.cleanupOnLogout();
+          chatStore?.clearAllChatCache();
+          realtime?.disconnectAll();
+          disconnectAllRealtimeConnections();
           router.replace('/login');
           router.refresh();
           return;

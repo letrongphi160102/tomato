@@ -110,6 +110,51 @@ export class NotificationRepository {
     return row;
   }
 
+  /**
+   * Chèn hoặc cập nhật chống trùng lặp nhiều thông báo chưa đọc trong 1 câu SQL duy nhất
+   * (phục vụ duyệt hàng loạt lời mời theo dõi khi chuyển tài khoản Riêng tư -> Công khai).
+   */
+  async upsertUnreadNotificationsBatch(
+    items: readonly UpsertNotificationParams[],
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<NotificationRow[]> {
+    if (items.length === 0) {
+      return [];
+    }
+
+    // Khử trùng theo (recipient_id, dedupe_key) để PostgreSQL ON CONFLICT DO UPDATE không chạm cùng 1 dòng 2 lần.
+    const dedupedByKey = new Map<string, UpsertNotificationParams>();
+    for (const item of items) {
+      dedupedByKey.set(`${item.recipientId}|${item.dedupeKey}`, item);
+    }
+    const uniqueItems = Array.from(dedupedByKey.values());
+
+    return executor
+      .insert(notifications)
+      .values(
+        uniqueItems.map((params) => ({
+          id: generateUuidV7(),
+          publicId: generatePublicId(),
+          recipientId: params.recipientId,
+          actorId: params.actorId,
+          type: params.type,
+          entityPublicId: params.entityPublicId ?? null,
+          dedupeKey: params.dedupeKey,
+          readAt: null,
+          createdAt: params.now,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [notifications.recipientId, notifications.dedupeKey],
+        targetWhere: sql`read_at IS NULL`,
+        set: {
+          entityPublicId: sql`excluded.entity_public_id`,
+          createdAt: sql`excluded.created_at`,
+        },
+      })
+      .returning();
+  }
+
   async deleteByRecipientActorsAndType(
     recipientId: string,
     actorIds: readonly string[],
@@ -266,6 +311,52 @@ export class NotificationRepository {
       );
 
     return Number(rows[0]?.count ?? 0);
+  }
+
+  /**
+   * Đếm số lượng thông báo chưa đọc theo lô cho nhiều `recipientUserIds` khác nhau
+   * bằng 1 truy vấn `GROUP BY recipient_id` duy nhất (ngoài transaction `FOR UPDATE`).
+   */
+  async countUnreadForRecipients(
+    recipientUserIds: readonly string[],
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<Map<string, number>> {
+    const uniqueIds = Array.from(new Set(recipientUserIds));
+    const countsByRecipient = new Map<string, number>();
+    if (uniqueIds.length === 0) {
+      return countsByRecipient;
+    }
+    for (const id of uniqueIds) {
+      countsByRecipient.set(id, 0);
+    }
+
+    const rows = await executor
+      .select({
+        recipientId: notifications.recipientId,
+        count: sql<number>`CAST(COUNT(*) AS INTEGER)`,
+      })
+      .from(notifications)
+      .innerJoin(users, eq(notifications.actorId, users.id))
+      .where(
+        and(
+          inArray(notifications.recipientId, uniqueIds),
+          isNull(notifications.readAt),
+          eq(users.status, 'active'),
+          isNull(users.deletedAt),
+          sql`NOT EXISTS (
+            SELECT 1 FROM ${blocks} b
+            WHERE (b.blocker_id = ${notifications.recipientId} AND b.blocked_id = ${users.id})
+               OR (b.blocker_id = ${users.id} AND b.blocked_id = ${notifications.recipientId})
+          )`,
+        ),
+      )
+      .groupBy(notifications.recipientId);
+
+    for (const row of rows) {
+      countsByRecipient.set(row.recipientId, Number(row.count ?? 0));
+    }
+
+    return countsByRecipient;
   }
 
   async markReadForRecipient(

@@ -1,16 +1,18 @@
 'use client';
 
 import * as React from 'react';
-import { put as putVercelBlobClient } from '@vercel/blob/client';
 import { usePathname } from 'next/navigation';
 
 import {
   buildMessageDecryptCacheKey,
   canAutoMarkConversationRead,
+  ChatLogoutActionsContext,
   ChatStoreContext,
+  ChatUnreadContext,
   clearChatRamMemorySingleton,
   computeHighestVisibleMessageSeq,
   DEFAULT_MESSAGES_PAGE_LIMIT,
+  getChatRamCacheEpoch,
   getOrInitUserChatRamCache,
   PEER_KEY_BUNDLE_CACHE_TTL_MS,
   purgeDecryptedMessageCacheByPublicId,
@@ -20,6 +22,7 @@ import {
   resolvePinSyncState,
   revokeMediaObjectUrlByMessageId,
   revokeMediaObjectUrlsByConversationId,
+  revokeThreadLocalPreviewUrls,
   shouldRenderFloatingMessagesWidget,
   type CachedConversationThreadState,
   type CachedPinnedMessagesState,
@@ -152,7 +155,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   const [hasLoadedPending, setHasLoadedPendingState] = React.useState(
     () => getOrInitUserChatRamCache(currentUserPublicId).hasLoadedPending,
   );
-  const [loadingConversations, setLoadingConversations] = React.useState(false);
+  const [loadingConversationsByTab, setLoadingConversationsByTab] = React.useState<{
+    readonly primary: boolean;
+    readonly pending: boolean;
+  }>({ primary: false, pending: false });
+  const loadingConversations = loadingConversationsByTab[activeTab];
   const [unreadConversationsCount, setUnreadConversationsCountState] = React.useState(
     () => getOrInitUserChatRamCache(currentUserPublicId).unreadConversationsCount,
   );
@@ -202,6 +209,10 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   );
   const inFlightReadReqRef = React.useRef<Map<string, Promise<void>>>(new Map());
   const inFlightOwnStatusRef = React.useRef<Promise<UserE2eeKeyBundleDto | null> | null>(null);
+  const activeThreadOpenAbortRef = React.useRef<{
+    readonly convId: string;
+    readonly controller: AbortController;
+  } | null>(null);
   const prevReadReceiptsEnabledRef = React.useRef<boolean | undefined>(
     realtime?.readReceiptsEnabled,
   );
@@ -232,9 +243,53 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     ownKeyBundleRef.current = ownKeyBundle;
   }, [ownKeyBundle]);
 
+  const setPreviewsByConvId = React.useCallback(
+    (updater: (prev: Readonly<Record<string, string>>) => Record<string, string>) => {
+      setPreviewsByConvIdState((prev) => {
+        const next = updater(prev);
+        const store = getOrInitUserChatRamCache(currentUserPublicId);
+        store.previewsByConvId = next;
+        return next;
+      });
+    },
+    [currentUserPublicId],
+  );
+
   React.useEffect(() => {
     pinSyncStateRef.current = pinSyncState;
-  }, [pinSyncState]);
+    if (pinSyncState !== 'needs_restore') {
+      return;
+    }
+    // Khi `refreshOwnE2eeStatus` vừa chuyển `pinSyncState` sang `needs_restore` sau khi `loadConversations` đã chạy xong,
+    // cập nhật lại ngay các dòng preview chưa giải mã thành nhãn "Nhập mã PIN..." thân thiện.
+    const allConvs = [...primaryConvsRef.current, ...pendingConvsRef.current];
+    if (allConvs.length === 0) {
+      return;
+    }
+    const store = getOrInitUserChatRamCache(currentUserPublicId);
+    setPreviewsByConvId((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const conv of allConvs) {
+        if (!conv.lastMessage || conv.lastMessage.recalledAt !== null) {
+          continue;
+        }
+        const cachedDec = store.decryptedMessagesByCacheKey.get(
+          buildMessageDecryptCacheKey(conv.lastMessage),
+        );
+        if (cachedDec?.decryptionFailed) {
+          const updatedLabel = getConversationPreviewText(conv.lastMessage, '', true, {
+            needsPinSync: true,
+          });
+          if (next[conv.public_id] !== updatedLabel) {
+            next[conv.public_id] = updatedLabel;
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [currentUserPublicId, pinSyncState, setPreviewsByConvId]);
 
   const bumpThreadVersion = React.useCallback(() => {
     setThreadVersion((v) => v + 1);
@@ -319,18 +374,6 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     [currentUserPublicId],
   );
 
-  const setPreviewsByConvId = React.useCallback(
-    (updater: (prev: Readonly<Record<string, string>>) => Record<string, string>) => {
-      setPreviewsByConvIdState((prev) => {
-        const next = updater(prev);
-        const store = getOrInitUserChatRamCache(currentUserPublicId);
-        store.previewsByConvId = next;
-        return next;
-      });
-    },
-    [currentUserPublicId],
-  );
-
   const setPresences = React.useCallback(
     (
       updater:
@@ -365,7 +408,12 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       const prev = store.threadsByConvId.get(conversationPublicId) ?? null;
       const next = updater(prev);
-      putLruConversationThreadCache(store.threadsByConvId, conversationPublicId, next);
+      putLruConversationThreadCache(
+        store.threadsByConvId,
+        conversationPublicId,
+        next,
+        store.mediaObjectUrlsByMsgId,
+      );
       bumpThreadVersion();
     },
     [bumpThreadVersion, currentUserPublicId],
@@ -455,6 +503,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
 
       const task = (async (): Promise<UserE2eeKeyBundleDto | null> => {
+        const startEpoch = getChatRamCacheEpoch();
         const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
         await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
         try {
@@ -463,11 +512,18 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             getBackupDeviceKeyMaterial(currentUserPublicId),
           ]);
 
+          if (getChatRamCacheEpoch() !== startEpoch) {
+            return null;
+          }
           if (!keysRes.ok) {
             return targetStore.ownKeyBundle;
           }
 
           const bundle = (await keysRes.json()) as UserE2eeKeyBundleDto;
+          if (getChatRamCacheEpoch() !== startEpoch) {
+            return null;
+          }
+          const prevPinSyncState = pinSyncStateRef.current;
           targetStore.ownKeyBundle = bundle;
           ownKeyBundleRef.current = bundle;
           setOwnKeyBundleState(bundle);
@@ -479,7 +535,39 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           );
           targetStore.hasLocalRestoredBackup = alreadyRestoredLocally;
           setHasLocalRestoredBackupState(alreadyRestoredLocally);
-          pinSyncStateRef.current = resolvePinSyncState(bundle, alreadyRestoredLocally);
+          const nextPinSyncState = resolvePinSyncState(bundle, alreadyRestoredLocally);
+          pinSyncStateRef.current = nextPinSyncState;
+
+          // Nếu loadConversations hoàn tất sớm trước khi biết `needs_restore`, cập nhật ngay nhãn preview sang nhắc nhập mã PIN.
+          if (nextPinSyncState === 'needs_restore' && prevPinSyncState !== 'needs_restore') {
+            const allLoadedConvs = [...primaryConvsRef.current, ...pendingConvsRef.current];
+            const patchedPreviews: Array<readonly [string, string]> = [];
+            for (const conv of allLoadedConvs) {
+              if (!conv.lastMessage || conv.lastMessage.recalledAt !== null) {
+                continue;
+              }
+              const cachedDec = targetStore.decryptedMessagesByCacheKey.get(
+                buildMessageDecryptCacheKey(conv.lastMessage),
+              );
+              if (cachedDec?.decryptionFailed) {
+                patchedPreviews.push([
+                  conv.public_id,
+                  getConversationPreviewText(conv.lastMessage, cachedDec.plaintext, true, {
+                    needsPinSync: true,
+                  }),
+                ]);
+              }
+            }
+            if (patchedPreviews.length > 0) {
+              setPreviewsByConvId((prev) => {
+                const next = { ...prev };
+                for (const [cid, text] of patchedPreviews) {
+                  next[cid] = text;
+                }
+                return next;
+              });
+            }
+          }
 
           if (!bundle.hasKeyBackup) {
             targetStore.serverKeyBackup = null;
@@ -493,13 +581,16 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               expectedBackupFingerprint: bundle.backupKeyFingerprint,
               forceRefresh: options?.forceBackupFetch,
             });
+            if (getChatRamCacheEpoch() !== startEpoch) {
+              return null;
+            }
             targetStore.serverKeyBackup = backup;
             setServerKeyBackupState(backup);
           }
 
           return bundle;
         } catch {
-          return targetStore.ownKeyBundle;
+          return getChatRamCacheEpoch() === startEpoch ? targetStore.ownKeyBundle : null;
         }
       })();
 
@@ -512,7 +603,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         }
       }
     },
-    [currentUserPublicId],
+    [currentUserPublicId, setPreviewsByConvId],
   );
 
   /**
@@ -859,19 +950,23 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
 
   const loadConversations = React.useCallback(
     async (tabToLoad: 'primary' | 'pending', options?: { readonly background?: boolean }) => {
+      const startEpoch = getChatRamCacheEpoch();
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       const alreadyLoaded =
         tabToLoad === 'primary' ? store.hasLoadedPrimary : store.hasLoadedPending;
       if (!options?.background && !alreadyLoaded) {
-        setLoadingConversations(true);
+        setLoadingConversationsByTab((prev) => ({ ...prev, [tabToLoad]: true }));
       }
 
       try {
         const response = await authFetch(`/api/v1/conversations?tab=${tabToLoad}&limit=30`);
-        if (!response.ok) {
+        if (!response.ok || getChatRamCacheEpoch() !== startEpoch) {
           return;
         }
         const data = (await response.json()) as ConversationListResult;
+        if (getChatRamCacheEpoch() !== startEpoch) {
+          return;
+        }
         const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
 
         let normalizedItems: readonly ConversationSummaryDto[] = data.items;
@@ -954,6 +1049,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }),
         );
 
+        if (getChatRamCacheEpoch() !== startEpoch) {
+          return;
+        }
         setPreviewsByConvId((prev) => {
           const next = { ...prev };
           for (const [cid, text] of previewEntries) {
@@ -975,11 +1073,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ userPublicIds: peerIds }),
             });
-            if (presRes.ok) {
+            if (presRes.ok && getChatRamCacheEpoch() === startEpoch) {
               const presData = (await presRes.json()) as {
                 readonly presences?: Record<string, PresenceStatusDto | null>;
               };
-              if (presData.presences) {
+              if (presData.presences && getChatRamCacheEpoch() === startEpoch) {
                 setPresences((prev) => ({
                   ...prev,
                   ...presData.presences,
@@ -991,7 +1089,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       } catch {
         // Bỏ qua lỗi mạng tạm thời; giữ nguyên dữ liệu từ RAM cache.
       } finally {
-        setLoadingConversations(false);
+        setLoadingConversationsByTab((prev) => ({ ...prev, [tabToLoad]: false }));
       }
     },
     [
@@ -1021,6 +1119,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       }
 
       const lastKnownSeq = existingThread.highestSeq;
+      const startEpoch = getChatRamCacheEpoch();
       try {
         const [msgRes, peerBundle] = await Promise.all([
           authFetch(
@@ -1029,11 +1128,11 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           peerPublicId ? ensurePeerKeyBundle(peerPublicId) : Promise.resolve(null),
         ]);
 
-        if (!msgRes.ok) {
+        if (getChatRamCacheEpoch() !== startEpoch || !msgRes.ok) {
           return;
         }
         const data = (await msgRes.json()) as MessageListResult;
-        if (data.items.length === 0) {
+        if (getChatRamCacheEpoch() !== startEpoch || data.items.length === 0) {
           return;
         }
 
@@ -1043,6 +1142,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             return decryptSingleMessageCached(item, senderBundle);
           }),
         );
+        if (getChatRamCacheEpoch() !== startEpoch) {
+          return;
+        }
 
         let nextHighestSeq = lastKnownSeq;
         for (const item of data.items) {
@@ -1300,6 +1402,20 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         return existingLoad;
       }
 
+      if (
+        activeThreadOpenAbortRef.current &&
+        activeThreadOpenAbortRef.current.convId !== conv.public_id
+      ) {
+        activeThreadOpenAbortRef.current.controller.abort();
+        activeThreadOpenAbortRef.current = null;
+      }
+      const abortController = new AbortController();
+      activeThreadOpenAbortRef.current = {
+        convId: conv.public_id,
+        controller: abortController,
+      };
+      const startEpoch = getChatRamCacheEpoch();
+
       updateThreadState(conv.public_id, (prev) => ({
         conversationPublicId: conv.public_id,
         items: prev?.items ?? [],
@@ -1315,15 +1431,23 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       const loadPromise = (async () => {
         try {
           await ensureE2eeDeviceRegisteredSingleton(currentUserPublicId);
+          if (abortController.signal.aborted || getChatRamCacheEpoch() !== startEpoch) {
+            return;
+          }
           const [msgRes, currentPeerBundle] = await Promise.all([
             authFetch(
               `/api/v1/conversations/${encodeURIComponent(conv.public_id)}/messages?limit=${DEFAULT_MESSAGES_PAGE_LIMIT}`,
+              { signal: abortController.signal },
             ),
             ensurePeerKeyBundle(conv.peer.public_id),
             ownKeyBundleRef.current
               ? Promise.resolve(ownKeyBundleRef.current)
               : refreshOwnE2eeStatus(),
           ]);
+
+          if (abortController.signal.aborted || getChatRamCacheEpoch() !== startEpoch) {
+            return;
+          }
 
           if (!msgRes.ok) {
             updateThreadState(conv.public_id, (prev) => ({
@@ -1341,12 +1465,18 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }
 
           const msgData = (await msgRes.json()) as MessageListResult;
+          if (abortController.signal.aborted || getChatRamCacheEpoch() !== startEpoch) {
+            return;
+          }
           const decryptedItems = await Promise.all(
             msgData.items.map((item) => {
               const senderBundle = item.isOwnMessage ? ownKeyBundleRef.current : currentPeerBundle;
               return decryptSingleMessageCached(item, senderBundle);
             }),
           );
+          if (abortController.signal.aborted || getChatRamCacheEpoch() !== startEpoch) {
+            return;
+          }
 
           let highestSeq = conv.lastSeq;
           for (const item of msgData.items) {
@@ -1380,6 +1510,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             void markConversationReadOptimistic(conv.public_id, highestVisibleSeq);
           }
         } catch {
+          if (abortController.signal.aborted || getChatRamCacheEpoch() !== startEpoch) {
+            return;
+          }
           updateThreadState(conv.public_id, (prev) => ({
             conversationPublicId: conv.public_id,
             items: prev?.items ?? [],
@@ -1393,27 +1526,32 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }));
         } finally {
           inFlightThreadLoadByConvRef.current.delete(conv.public_id);
-          updateThreadState(conv.public_id, (prev) => {
-            if (!prev || !prev.loadingInitial) {
-              return (
-                prev ?? {
-                  conversationPublicId: conv.public_id,
-                  items: [],
-                  nextBeforeSeq: null,
-                  highestSeq: 0,
-                  hasInitialized: false,
-                  loadingInitial: false,
-                  loadingOlder: false,
-                  errorMessage: null,
-                  lastAccessedAt: Date.now(),
-                }
-              );
-            }
-            return {
-              ...prev,
-              loadingInitial: false,
-            };
-          });
+          if (activeThreadOpenAbortRef.current?.controller === abortController) {
+            activeThreadOpenAbortRef.current = null;
+          }
+          if (getChatRamCacheEpoch() === startEpoch) {
+            updateThreadState(conv.public_id, (prev) => {
+              if (!prev || !prev.loadingInitial) {
+                return (
+                  prev ?? {
+                    conversationPublicId: conv.public_id,
+                    items: [],
+                    nextBeforeSeq: null,
+                    highestSeq: 0,
+                    hasInitialized: false,
+                    loadingInitial: false,
+                    loadingOlder: false,
+                    errorMessage: null,
+                    lastAccessedAt: Date.now(),
+                  }
+                );
+              }
+              return {
+                ...prev,
+                loadingInitial: false,
+              };
+            });
+          }
         }
       })();
 
@@ -1792,12 +1930,13 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         return existing;
       }
 
+      const startEpoch = getChatRamCacheEpoch();
       const task = (async (): Promise<string | null> => {
         try {
           const grantRes = await authFetch(
             `/api/v1/messages/${encodeURIComponent(msgId)}/attachment`,
           );
-          if (!grantRes.ok) {
+          if (!grantRes.ok || getChatRamCacheEpoch() !== startEpoch) {
             return null;
           }
           const grant = (await grantRes.json()) as MessageAttachmentDownloadGrantDto;
@@ -1810,7 +1949,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           const binaryRes = grant.downloadUrl.startsWith('/')
             ? await authFetch(grant.downloadUrl)
             : await fetch(grant.downloadUrl, { credentials: 'omit' });
-          if (!binaryRes.ok) {
+          if (!binaryRes.ok || getChatRamCacheEpoch() !== startEpoch) {
             return null;
           }
 
@@ -1825,9 +1964,21 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             clientMsgId: message.dto.clientMsgId,
             mediaKind: media.kind,
           });
+          if (getChatRamCacheEpoch() !== startEpoch) {
+            return null;
+          }
 
           const decryptedBlob = new Blob([plainBytes], { type: media.mimeType });
           const objectUrl = URL.createObjectURL(decryptedBlob);
+
+          if (getChatRamCacheEpoch() !== startEpoch) {
+            try {
+              URL.revokeObjectURL(objectUrl);
+            } catch {
+              // noop
+            }
+            return null;
+          }
 
           const targetStore = getOrInitUserChatRamCache(currentUserPublicId);
           putLruMediaObjectUrlCache(targetStore.mediaObjectUrlsByMsgId, {
@@ -1861,6 +2012,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         if (!grant.clientToken) {
           throw new Error('Không thể khởi tạo phiên tải tệp lên lúc này.');
         }
+        const { put: putVercelBlobClient } = await import('@vercel/blob/client');
         await putVercelBlobClient(grant.pathname, payloadBlob, {
           access: 'public',
           token: grant.clientToken,
@@ -1904,6 +2056,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         throw new Error('Cuộc trò chuyện đang chờ chấp nhận nên chưa thể gửi ảnh.');
       }
 
+      const startEpoch = getChatRamCacheEpoch();
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       const convId = params.conversation.public_id;
       const peerPublicId = params.conversation.peer.public_id;
@@ -1912,6 +2065,9 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       const replyToPayload = params.replyTo ?? undefined;
 
       const prepared = await prepareHdImageForEncryption(params.file);
+      if (getChatRamCacheEpoch() !== startEpoch) {
+        return;
+      }
       const tempPreviewUrl = URL.createObjectURL(
         new Blob([prepared.plainBytes], { type: prepared.mimeType }),
       );
@@ -2145,6 +2301,14 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           return sortPrimaryConversationsWithPins([data.conversation, ...filtered]);
         });
       } catch (error) {
+        try {
+          URL.revokeObjectURL(tempPreviewUrl);
+        } catch {
+          // Bỏ qua nếu đã giải phóng.
+        }
+        if (getChatRamCacheEpoch() !== startEpoch) {
+          throw error;
+        }
         const message = error instanceof Error ? error.message : 'Không thể gửi ảnh lúc này.';
         updateThreadState(convId, (prev) => ({
           conversationPublicId: convId,
@@ -2152,6 +2316,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             item.dto.clientMsgId === clientMsgId
               ? {
                   ...item,
+                  localPreviewUrl: undefined,
                   sending: false,
                   sendError: message,
                 }
@@ -2204,12 +2369,16 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       });
       const normalizedWaveform = normalizeWaveformBars(params.waveform);
 
+      const startEpochVoice = getChatRamCacheEpoch();
       const store = getOrInitUserChatRamCache(currentUserPublicId);
       const convId = params.conversation.public_id;
       const peerPublicId = params.conversation.peer.public_id;
       const clientMsgId = `voc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
       const nowIso = new Date().toISOString();
       const replyToPayload = params.replyTo ?? undefined;
+      if (getChatRamCacheEpoch() !== startEpochVoice) {
+        return;
+      }
       const tempAudioUrl = URL.createObjectURL(new Blob([rawBytes], { type: validated.mimeType }));
 
       const currentThread = store.threadsByConvId.get(convId);
@@ -2438,6 +2607,14 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           return sortPrimaryConversationsWithPins([data.conversation, ...filtered]);
         });
       } catch (error) {
+        try {
+          URL.revokeObjectURL(tempAudioUrl);
+        } catch {
+          // Bỏ qua nếu đã giải phóng.
+        }
+        if (getChatRamCacheEpoch() !== startEpochVoice) {
+          throw error;
+        }
         const message =
           error instanceof Error ? error.message : 'Không thể gửi tin nhắn thoại lúc này.';
         updateThreadState(convId, (prev) => ({
@@ -2446,6 +2623,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
             item.dto.clientMsgId === clientMsgId
               ? {
                   ...item,
+                  localPreviewUrl: undefined,
                   sending: false,
                   sendError: message,
                 }
@@ -3059,6 +3237,13 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         if (response.status === 404) {
           purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, msgId);
           revokeMediaObjectUrlByMessageId(store.mediaObjectUrlsByMsgId, msgId);
+          if (removedItem?.localPreviewUrl) {
+            try {
+              URL.revokeObjectURL(removedItem.localPreviewUrl);
+            } catch {
+              // Bỏ qua nếu đã giải phóng.
+            }
+          }
           return;
         }
 
@@ -4008,6 +4193,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setPendingConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
       setPendingCount((c) => Math.max(0, c - 1));
       const store = getOrInitUserChatRamCache(currentUserPublicId);
+      revokeThreadLocalPreviewUrls(store.threadsByConvId.get(conversationPublicId));
       revokeMediaObjectUrlsByConversationId(store.mediaObjectUrlsByMsgId, conversationPublicId);
       store.threadsByConvId.delete(conversationPublicId);
       bumpThreadVersion();
@@ -4035,6 +4221,7 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
       setPrimaryConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
       setPendingConversations((prev) => prev.filter((c) => c.public_id !== conversationPublicId));
       const store = getOrInitUserChatRamCache(currentUserPublicId);
+      revokeThreadLocalPreviewUrls(store.threadsByConvId.get(conversationPublicId));
       revokeMediaObjectUrlsByConversationId(store.mediaObjectUrlsByMsgId, conversationPublicId);
       store.threadsByConvId.delete(conversationPublicId);
       bumpThreadVersion();
@@ -4052,12 +4239,15 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
   );
 
   const clearAllChatCache = React.useCallback(() => {
+    activeThreadOpenAbortRef.current?.controller.abort();
+    activeThreadOpenAbortRef.current = null;
     clearChatRamMemorySingleton();
     clearE2eeClientBootstrapState();
     setPrimaryConversationsState([]);
     setPendingConversationsState([]);
     setHasLoadedPrimaryState(false);
     setHasLoadedPendingState(false);
+    setLoadingConversationsByTab({ primary: false, pending: false });
     setUnreadConversationsCountState(0);
     setPendingCountState(0);
     setSelectedConversationState(null);
@@ -4169,11 +4359,16 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
           }),
         );
         reDecryptedByConvId.set(convId, reDecryptedItems);
-        putLruConversationThreadCache(store.threadsByConvId, convId, {
-          ...thread,
-          items: reDecryptedItems,
-          lastAccessedAt: Date.now(),
-        });
+        putLruConversationThreadCache(
+          store.threadsByConvId,
+          convId,
+          {
+            ...thread,
+            items: reDecryptedItems,
+            lastAccessedAt: Date.now(),
+          },
+          store.mediaObjectUrlsByMsgId,
+        );
       }
 
       // Giải mã lại toàn bộ tin nhắn đã ghim đang có trong RAM cache (hỗ trợ mở khóa tức thì sau khi nhập mã PIN).
@@ -4605,6 +4800,17 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
         }
 
         if (convId && messagePublicId) {
+          const existingThread = store.threadsByConvId.get(convId);
+          const deletedItem = existingThread?.items.find(
+            (m) => m.dto.public_id === messagePublicId,
+          );
+          if (deletedItem?.localPreviewUrl) {
+            try {
+              URL.revokeObjectURL(deletedItem.localPreviewUrl);
+            } catch {
+              // noop
+            }
+          }
           purgeDecryptedMessageCacheByPublicId(store.decryptedMessagesByCacheKey, messagePublicId);
           revokeMediaObjectUrlByMessageId(store.mediaObjectUrlsByMsgId, messagePublicId);
           if (store.threadsByConvId.has(convId)) {
@@ -5008,5 +5214,13 @@ export function ChatStoreProvider({ currentUserPublicId, children }: ChatStorePr
     ],
   );
 
-  return <ChatStoreContext.Provider value={contextValue}>{children}</ChatStoreContext.Provider>;
+  const logoutActionsValue = React.useMemo(() => ({ clearAllChatCache }), [clearAllChatCache]);
+
+  return (
+    <ChatLogoutActionsContext.Provider value={logoutActionsValue}>
+      <ChatUnreadContext.Provider value={unreadConversationsCount}>
+        <ChatStoreContext.Provider value={contextValue}>{children}</ChatStoreContext.Provider>
+      </ChatUnreadContext.Provider>
+    </ChatLogoutActionsContext.Provider>
+  );
 }

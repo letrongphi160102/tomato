@@ -9,8 +9,10 @@ const IDB_DATABASE_NAME = 'tomato_e2ee_keystore_v1';
 const IDB_STORE_NAME = 'device_keys';
 const IDB_VERSION = 1;
 
-// Bộ nhớ dự phòng cho môi trường kiểm thử hoặc khi IndexedDB không khả dụng.
+// Bộ nhớ đệm đọc xuyên suốt (read-through RAM cache) + fallback khi IndexedDB không khả dụng.
+// Lưu ý bảo mật: `CryptoKey` riêng tư luôn có `extractable: false`, tuyệt đối không ghi ra localStorage/sessionStorage.
 const memoryKeystore = new Map<string, E2eeDeviceKeyPairMaterial>();
+let sharedDbPromise: Promise<IDBDatabase> | null = null;
 
 function buildStoreKey(userPublicId: string, slotOrFingerprint: string): string {
   return `${userPublicId.toLowerCase()}:${slotOrFingerprint.toLowerCase()}`;
@@ -20,8 +22,12 @@ function isIndexedDbAvailable(): boolean {
   return typeof globalThis.indexedDB !== 'undefined' && globalThis.indexedDB !== null;
 }
 
-function openKeystoreDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+function getSharedKeystoreDb(): Promise<IDBDatabase> {
+  if (sharedDbPromise) {
+    return sharedDbPromise;
+  }
+
+  sharedDbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = globalThis.indexedDB.open(IDB_DATABASE_NAME, IDB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -29,31 +35,57 @@ function openKeystoreDb(): Promise<IDBDatabase> {
         db.createObjectStore(IDB_STORE_NAME);
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error('Không thể mở IndexedDB'));
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        sharedDbPromise = null;
+        try {
+          db.close();
+        } catch {
+          // Bỏ qua nếu kết nối đã đóng.
+        }
+      };
+      db.onclose = () => {
+        sharedDbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      sharedDbPromise = null;
+      reject(request.error ?? new Error('Không thể mở IndexedDB'));
+    };
   });
+
+  return sharedDbPromise;
 }
 
 async function idbGet(key: string): Promise<E2eeDeviceKeyPairMaterial | null> {
+  const cachedInRam = memoryKeystore.get(key);
+  if (cachedInRam) {
+    return cachedInRam;
+  }
   if (!isIndexedDbAvailable()) {
-    return memoryKeystore.get(key) ?? null;
+    return null;
   }
   try {
-    const db = await openKeystoreDb();
-    return await new Promise<E2eeDeviceKeyPairMaterial | null>((resolve, reject) => {
+    const db = await getSharedKeystoreDb();
+    const found = await new Promise<E2eeDeviceKeyPairMaterial | null>((resolve, reject) => {
       const tx = db.transaction(IDB_STORE_NAME, 'readonly');
       const store = tx.objectStore(IDB_STORE_NAME);
       const req = store.get(key);
       req.onsuccess = () => {
-        db.close();
         resolve((req.result as E2eeDeviceKeyPairMaterial | undefined) ?? null);
       };
       req.onerror = () => {
-        db.close();
         reject(req.error);
       };
     });
+    if (found) {
+      memoryKeystore.set(key, found);
+    }
+    return found;
   } catch {
+    sharedDbPromise = null;
     return memoryKeystore.get(key) ?? null;
   }
 }
@@ -64,21 +96,20 @@ async function idbPut(key: string, value: E2eeDeviceKeyPairMaterial): Promise<vo
     return;
   }
   try {
-    const db = await openKeystoreDb();
+    const db = await getSharedKeystoreDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
       const store = tx.objectStore(IDB_STORE_NAME);
       const req = store.put(value, key);
       req.onsuccess = () => {
-        db.close();
         resolve();
       };
       req.onerror = () => {
-        db.close();
         reject(req.error);
       };
     });
   } catch {
+    sharedDbPromise = null;
     // Đã lưu trong memoryKeystore làm fallback an toàn.
   }
 }
@@ -283,6 +314,10 @@ export async function getOrCreatePrimaryDeviceKeyMaterial(
   return material;
 }
 
-export function clearMemoryKeystoreForTesting(): void {
+export function clearInMemoryKeystore(): void {
   memoryKeystore.clear();
+}
+
+export function clearMemoryKeystoreForTesting(): void {
+  clearInMemoryKeystore();
 }

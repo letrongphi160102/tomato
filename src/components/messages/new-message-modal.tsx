@@ -61,6 +61,20 @@ export function NewMessageModal({ open, onClose, onSelectRecipient }: NewMessage
     };
   }, [cleanQuery, open]);
 
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !startingId) {
+        event.stopPropagation();
+        onClose();
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, open, startingId]);
+
   if (!open) {
     return null;
   }

@@ -1,14 +1,29 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { AlertCircle, CheckCircle2, Clock, Loader2, LogIn, ShieldAlert } from 'lucide-react';
 
 import { PasswordInput } from '@/components/auth/password-input';
 import { savePendingVerificationHint } from '@/components/auth/pending-verification-storage';
-import { TurnstileWidget } from '@/components/auth/turnstile-widget';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+
+const TurnstileWidget = dynamic(
+  () => import('@/components/auth/turnstile-widget').then((m) => m.TurnstileWidget),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        aria-hidden="true"
+        className="flex min-h-[65px] items-center justify-center rounded-md border border-dashed border-border/70 bg-muted/20 p-2 text-xs text-muted-foreground"
+      >
+        Đang tải bước xác nhận bảo mật...
+      </div>
+    ),
+  },
+);
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';

@@ -7,6 +7,7 @@ import { EmojiPickerPopover } from '@/components/messages/emoji-picker-popover';
 import { MessageEditBanner } from '@/components/messages/message-edit-banner';
 import { MessageReplyBanner } from '@/components/messages/message-reply-banner';
 import { Button } from '@/components/ui/button';
+import { getBrowserAudioContextConstructor } from '@/lib/audio-context';
 import {
   MAX_CHAT_IMAGE_INPUT_BYTES,
   MAX_CHAT_IMAGES_PER_BATCH,
@@ -117,7 +118,6 @@ function ChatVoiceRecorderBar({
   const samplesRef = React.useRef<number[]>([]);
   const startedAtRef = React.useRef<number>(0);
   const timerIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
-  const levelIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const actionOnStopRef = React.useRef<'send' | 'cancel'>('cancel');
   const disposedRef = React.useRef(false);
   const onSendVoiceRef = React.useRef(onSendVoice);
@@ -134,10 +134,6 @@ function ChatVoiceRecorderBar({
     if (timerIntervalRef.current !== null) {
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
-    }
-    if (levelIntervalRef.current !== null) {
-      clearInterval(levelIntervalRef.current);
-      levelIntervalRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => {
@@ -199,11 +195,10 @@ function ChatVoiceRecorderBar({
 
       streamRef.current = stream;
 
+      let analyserNode: AnalyserNode | null = null;
+      let analyserBuffer: Uint8Array<ArrayBuffer> | null = null;
       try {
-        const AudioCtxCtor =
-          window.AudioContext ||
-          (window as unknown as { readonly webkitAudioContext?: typeof AudioContext })
-            .webkitAudioContext;
+        const AudioCtxCtor = getBrowserAudioContextConstructor();
         if (AudioCtxCtor) {
           const ctx = new AudioCtxCtor();
           audioCtxRef.current = ctx;
@@ -211,20 +206,8 @@ function ChatVoiceRecorderBar({
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 256;
           source.connect(analyser);
-          const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-          levelIntervalRef.current = setInterval(() => {
-            analyser.getByteTimeDomainData(dataArray);
-            let sumSquares = 0;
-            for (let i = 0; i < dataArray.length; i += 1) {
-              const centered = (dataArray[i]! - 128) / 128;
-              sumSquares += centered * centered;
-            }
-            const rms = Math.sqrt(sumSquares / dataArray.length);
-            const scaled = Math.max(12, Math.min(100, Math.round(rms * 380)));
-            samplesRef.current.push(scaled);
-            setLiveLevels((prev) => [...prev.slice(1), scaled]);
-          }, 120);
+          analyserNode = analyser;
+          analyserBuffer = new Uint8Array(analyser.frequencyBinCount);
         }
       } catch {
         // Fallback giữ thanh sóng âm mặc định nếu AudioContext không khởi tạo được.
@@ -300,6 +283,19 @@ function ChatVoiceRecorderBar({
       recorder.start(250);
 
       timerIntervalRef.current = setInterval(() => {
+        if (analyserNode && analyserBuffer) {
+          analyserNode.getByteTimeDomainData(analyserBuffer);
+          let sumSquares = 0;
+          for (let i = 0; i < analyserBuffer.length; i += 1) {
+            const centered = (analyserBuffer[i]! - 128) / 128;
+            sumSquares += centered * centered;
+          }
+          const rms = Math.sqrt(sumSquares / analyserBuffer.length);
+          const scaled = Math.max(12, Math.min(100, Math.round(rms * 380)));
+          samplesRef.current.push(scaled);
+          setLiveLevels((prev) => [...prev.slice(1), scaled]);
+        }
+
         const nowElapsed = Date.now() - startedAtRef.current;
         setElapsedMs(Math.min(MAX_CHAT_VOICE_DURATION_MS, nowElapsed));
         if (nowElapsed >= MAX_CHAT_VOICE_DURATION_MS) {
@@ -311,7 +307,7 @@ function ChatVoiceRecorderBar({
             releaseMicrophoneResources();
           }
         }
-      }, 200);
+      }, 120);
     }
 
     void startRecording();
@@ -427,8 +423,7 @@ export interface ChatComposerWithMediaProps {
   readonly compact?: boolean;
   readonly canSendMedia: boolean;
   readonly canSendMoreMessages: boolean;
-  readonly draftText: string;
-  readonly editDraftText: string;
+  readonly editingMessageKey?: string | null;
   readonly editingOriginalText: string | null;
   readonly editSaving: boolean;
   readonly replyingTo?: {
@@ -436,11 +431,9 @@ export interface ChatComposerWithMediaProps {
     readonly previewText: string;
   } | null;
   readonly composerInputRef: React.RefObject<HTMLTextAreaElement | null>;
-  readonly onChangeDraftText: (next: string) => void;
-  readonly onChangeEditDraftText: (next: string) => void;
   readonly onCancelEdit: () => void;
   readonly onCancelReply?: () => void;
-  readonly onSubmitTextOrEdit: (event?: React.FormEvent) => Promise<void>;
+  readonly onSubmitTextOrEdit: (submittedText: string) => Promise<boolean | void>;
   readonly onSendImageFile: (file: File) => Promise<void>;
   readonly onSendVoice: (recorded: RecordedChatVoice) => Promise<void>;
   readonly onError: (message: string | null) => void;
@@ -448,6 +441,7 @@ export interface ChatComposerWithMediaProps {
 
 /**
  * Thanh soạn tin nhắn dùng chung cho cả `/messages` và `FloatingMessagesWidget`.
+ * Quản lý state gõ phím cục bộ ngay trong component để gõ nhanh không gây re-render danh sách hội thoại/tin nhắn.
  * Bắt buộc truyền `key={conversation.public_id}` khi render để mọi thao tác chuyển cuộc trò chuyện
  * tự động hủy khay ảnh nháp (kèm `URL.revokeObjectURL`) và tắt sạch micro đang ghi âm.
  */
@@ -455,14 +449,11 @@ export function ChatComposerWithMedia({
   compact = false,
   canSendMedia,
   canSendMoreMessages,
-  draftText,
-  editDraftText,
+  editingMessageKey = null,
   editingOriginalText,
   editSaving,
   replyingTo = null,
   composerInputRef,
-  onChangeDraftText,
-  onChangeEditDraftText,
   onCancelEdit,
   onCancelReply,
   onSubmitTextOrEdit,
@@ -474,6 +465,15 @@ export function ChatComposerWithMedia({
   const fileInputId = React.useId();
   const messageInputId = React.useId();
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  const [draftText, setDraftText] = React.useState('');
+  const [editDraftText, setEditDraftText] = React.useState<string>(() => editingOriginalText ?? '');
+  const editSyncToken = isEditing ? `${editingMessageKey ?? 'edit'}:${editingOriginalText}` : '';
+  const [prevEditSyncToken, setPrevEditSyncToken] = React.useState(editSyncToken);
+  if (editSyncToken !== prevEditSyncToken) {
+    setPrevEditSyncToken(editSyncToken);
+    setEditDraftText(editingOriginalText ?? '');
+  }
 
   const [stagedImages, setStagedImages] = React.useState<readonly StagedChatImage[]>([]);
   const [isRecordingVoice, setIsRecordingVoice] = React.useState(false);
@@ -549,18 +549,26 @@ export function ChatComposerWithMedia({
   async function handleFormSubmit(event?: React.FormEvent) {
     event?.preventDefault();
     if (isEditing) {
-      await onSubmitTextOrEdit(event);
+      const outcome = await onSubmitTextOrEdit(editDraftText);
+      if (outcome !== false) {
+        setEditDraftText('');
+      }
       return;
     }
 
-    const hasText = draftText.trim().length > 0;
+    const trimmedDraft = draftText.trim();
+    const hasText = trimmedDraft.length > 0;
     const hasImages = stagedImagesRef.current.length > 0;
 
     if (hasImages) {
       await sendAllStagedImagesSequentially();
     }
     if (hasText) {
-      await onSubmitTextOrEdit();
+      setDraftText('');
+      const outcome = await onSubmitTextOrEdit(trimmedDraft);
+      if (outcome === false) {
+        setDraftText(trimmedDraft);
+      }
     }
   }
 
@@ -683,8 +691,8 @@ export function ChatComposerWithMedia({
             disabled={(!isEditing && !canSendMoreMessages) || sendingMedia}
             onSelectEmoji={(emoji) =>
               isEditing
-                ? onChangeEditDraftText(`${editDraftText}${emoji}`)
-                : onChangeDraftText(`${draftText}${emoji}`)
+                ? setEditDraftText((prev) => `${prev}${emoji}`)
+                : setDraftText((prev) => `${prev}${emoji}`)
             }
           />
 
@@ -775,7 +783,7 @@ export function ChatComposerWithMedia({
                   : 'Đã gửi tối đa 3 tin nhắn đang chờ chấp nhận'
           }
           onChange={(e) =>
-            isEditing ? onChangeEditDraftText(e.target.value) : onChangeDraftText(e.target.value)
+            isEditing ? setEditDraftText(e.target.value) : setDraftText(e.target.value)
           }
           onPaste={handlePaste}
           onKeyDown={(e) => {

@@ -1,5 +1,7 @@
 import { authFetch } from '@/lib/auth-client';
+import { clearCachedE2eeCryptoHelpers } from '@/lib/e2ee/cipher';
 import {
+  clearInMemoryKeystore,
   getBackupDeviceKeyMaterial,
   getBootstrapDeviceKeyMaterial,
   getOrCreatePrimaryDeviceKeyMaterial,
@@ -331,6 +333,8 @@ export function setCachedServerKeyBackupInSession(
  * và các khóa `tomato_e2ee_reg:*` trong `sessionStorage` khi người dùng đăng xuất.
  */
 export function clearE2eeClientBootstrapState(): void {
+  clearInMemoryKeystore();
+  clearCachedE2eeCryptoHelpers();
   inFlightBootstrapByUser.clear();
   registeredFingerprintByUser.clear();
   deviceRegisterCooldownUntilByUser.clear();

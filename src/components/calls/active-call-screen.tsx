@@ -72,10 +72,51 @@ export function ActiveCallScreen({
     () => false,
   );
   const [pipCornerIdx, setPipCornerIdx] = React.useState(0);
+  const [liveElapsedSeconds, setLiveElapsedSeconds] = React.useState(durationSeconds);
   const [remoteVideoTrackState, setRemoteVideoTrackState] = React.useState<{
     readonly stream: MediaStream;
     readonly live: boolean;
   } | null>(null);
+
+  React.useEffect(() => {
+    if (phase !== 'connected' || activeCall.connectedAtMs === null) {
+      return;
+    }
+
+    const startedMs = activeCall.connectedAtMs;
+    const syncClock = () => {
+      setLiveElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)));
+    };
+
+    const immediateId = setTimeout(syncClock, 0);
+    let intervalId: ReturnType<typeof setInterval> | null =
+      typeof document !== 'undefined' && document.visibilityState === 'hidden'
+        ? null
+        : setInterval(syncClock, 1_000);
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        if (intervalId !== null) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        return;
+      }
+      syncClock();
+      if (intervalId === null) {
+        intervalId = setInterval(syncClock, 1_000);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      clearTimeout(immediateId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [activeCall.connectedAtMs, phase]);
 
   const remoteAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const remoteVideoRef = React.useRef<HTMLVideoElement | null>(null);
@@ -163,6 +204,11 @@ export function ActiveCallScreen({
     return null;
   }
 
+  const displayedDurationSeconds =
+    phase === 'connected' && activeCall.connectedAtMs !== null
+      ? liveElapsedSeconds
+      : durationSeconds;
+
   const statusText =
     phase === 'starting'
       ? 'Đang chuẩn bị cuộc gọi...'
@@ -170,7 +216,7 @@ export function ActiveCallScreen({
         ? 'Đang đổ chuông...'
         : phase === 'connecting'
           ? 'Đang kết nối...'
-          : formatCallDurationClock(durationSeconds);
+          : formatCallDurationClock(displayedDurationSeconds);
 
   const currentCorner = PIP_CORNER_ORDER[pipCornerIdx % PIP_CORNER_ORDER.length] ?? 'bottom-right';
   const showLocalSelfView =
@@ -181,7 +227,7 @@ export function ActiveCallScreen({
       role="dialog"
       aria-modal="true"
       aria-label={`Cuộc gọi với ${activeCall.peer.fullName}`}
-      className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-white select-none"
+      className="fixed inset-0 z-[70] flex flex-col bg-zinc-950 text-white select-none"
     >
       {/* Phần tử âm thanh nền đảm bảo giọng nói luôn trong trẻo dù đang gọi thoại hay đối phương tắt cam */}
       <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />

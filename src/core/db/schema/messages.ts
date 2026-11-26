@@ -82,6 +82,11 @@ export const messages = pgTable(
       table.clientMsgId,
     ),
     index('idx_messages_conversation_seq_desc').on(table.conversationId, table.seq.desc()),
+    index('idx_messages_conv_sender_seq_desc').on(
+      table.conversationId,
+      table.senderId,
+      table.seq.desc(),
+    ),
     index('idx_messages_reply_to')
       .on(table.conversationId, table.replyToMessageId)
       .where(sql`${table.replyToMessageId} IS NOT NULL`),

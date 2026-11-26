@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -20,18 +21,14 @@ import {
 } from 'lucide-react';
 
 import { CallActionButtons } from '@/components/calls/call-action-buttons';
-import { ChatInfoDrawer } from '@/components/messages/chat-info-drawer';
+import { useCall } from '@/components/calls/call-context';
 import { ChatComposerWithMedia } from '@/components/messages/chat-media-composer';
 import {
   useChatStore,
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
 import { ConversationActionsMenu } from '@/components/messages/conversation-actions-menu';
-import { ForwardMessageModal } from '@/components/messages/forward-message-modal';
-import {
-  ImageLightboxModal,
-  type ImageLightboxTarget,
-} from '@/components/messages/image-lightbox-modal';
+import type { ImageLightboxTarget } from '@/components/messages/image-lightbox-modal';
 import {
   buildReplyPayloadFromMessage,
   canRecallMessage,
@@ -43,8 +40,7 @@ import {
   formatConversationShortTimeVi,
   isConversationUnread,
 } from '@/components/messages/message-grouping';
-import { NewMessageModal } from '@/components/messages/new-message-modal';
-import { PinBackupModal, type PinBackupModalMode } from '@/components/messages/pin-backup-modal';
+import type { PinBackupModalMode } from '@/components/messages/pin-backup-modal';
 import { PinnedMessagesBar } from '@/components/messages/pinned-messages-bar';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
@@ -54,6 +50,31 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { authFetch } from '@/lib/auth-client';
 import { cn } from '@/lib/utils';
 import type { ConversationSummaryDto } from '@/modules/chat';
+
+const ChatInfoDrawer = dynamic(
+  () => import('@/components/messages/chat-info-drawer').then((m) => m.ChatInfoDrawer),
+  { ssr: false },
+);
+
+const ForwardMessageModal = dynamic(
+  () => import('@/components/messages/forward-message-modal').then((m) => m.ForwardMessageModal),
+  { ssr: false },
+);
+
+const ImageLightboxModal = dynamic(
+  () => import('@/components/messages/image-lightbox-modal').then((m) => m.ImageLightboxModal),
+  { ssr: false },
+);
+
+const NewMessageModal = dynamic(
+  () => import('@/components/messages/new-message-modal').then((m) => m.NewMessageModal),
+  { ssr: false },
+);
+
+const PinBackupModal = dynamic(
+  () => import('@/components/messages/pin-backup-modal').then((m) => m.PinBackupModal),
+  { ssr: false },
+);
 
 const EMPTY_CONVERSATIONS: readonly ConversationSummaryDto[] = [];
 const EMPTY_MESSAGES: readonly DecryptedMessageViewItem[] = [];
@@ -69,13 +90,12 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const searchParams = useSearchParams();
   const realtime = useRealtimePresence();
   const chatStore = useChatStore();
+  const call = useCall();
 
   const tabQueryParam = searchParams.get('tab');
   const targetToPublicIdParam = searchParams.get('to');
   const targetConversationParam = searchParams.get('conversation');
 
-  const [draftText, setDraftText] = React.useState('');
-  const [editDraftText, setEditDraftText] = React.useState('');
   const [chatError, setChatError] = React.useState<string | null>(null);
   const [chatNotice, setChatNotice] = React.useState<string | null>(null);
   const [infoDrawerOpen, setInfoDrawerOpen] = React.useState(false);
@@ -337,10 +357,30 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     if (!hasOwnRecentMessage) {
       return;
     }
-    const timer = setInterval(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const syncVisibilityTimer = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        if (timer !== null) {
+          clearInterval(timer);
+          timer = null;
+        }
+        return;
+      }
       setNowMs(Date.now());
-    }, 10_000);
-    return () => clearInterval(timer);
+      if (timer === null) {
+        timer = setInterval(() => {
+          setNowMs(Date.now());
+        }, 10_000);
+      }
+    };
+    syncVisibilityTimer();
+    document.addEventListener('visibilitychange', syncVisibilityTimer);
+    return () => {
+      document.removeEventListener('visibilitychange', syncVisibilityTimer);
+      if (timer !== null) {
+        clearInterval(timer);
+      }
+    };
   }, [hasOwnRecentMessage]);
 
   // Giữ nguyên vị trí cuộn (Scroll Anchoring) khi nạp tin nhắn cũ lên đầu + Cuộn thông minh khi có tin mới.
@@ -427,7 +467,6 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       messagePublicId: item.dto.public_id,
       clientMsgId: item.dto.clientMsgId,
     });
-    setEditDraftText(item.plaintext);
     setTapSelectedMsg(null);
     setTimeout(() => {
       composerInputRef.current?.focus();
@@ -440,7 +479,6 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     }
     setChatError(null);
     setEditingTarget(null);
-    setEditDraftText('');
     setReplyingTarget({
       conversationPublicId: selectedConversation.public_id,
       messagePublicId: item.dto.public_id,
@@ -615,7 +653,6 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
 
   function handleCancelEditMessage() {
     setEditingTarget(null);
-    setEditDraftText('');
     setChatError(null);
   }
 
@@ -676,8 +713,6 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       if (selectedConversation?.public_id === targetId) {
         setInfoDrawerOpen(false);
         setEditingTarget(null);
-        setEditDraftText('');
-        setDraftText('');
       }
     } catch (error) {
       setDialogError(error instanceof Error ? error.message : 'Không thể xóa đoạn chat lúc này.');
@@ -686,25 +721,23 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     }
   }
 
-  async function handleSendMessage(event?: React.FormEvent) {
-    event?.preventDefault();
+  async function handleSendMessage(rawSubmittedText: string): Promise<boolean> {
     if (!selectedConversation || !chatStore) {
-      return;
+      return false;
     }
 
-    const activeInputText = editingMessage ? editDraftText : draftText;
-    const trimmed = activeInputText.trim();
+    const trimmed = rawSubmittedText.trim();
     if (!trimmed) {
-      return;
+      return false;
     }
 
     if (editingMessage) {
       if (editSaving) {
-        return;
+        return false;
       }
       if (trimmed === editingMessage.plaintext.trim()) {
         handleCancelEditMessage();
-        return;
+        return true;
       }
       setEditSaving(true);
       setChatError(null);
@@ -715,34 +748,33 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
           newPlaintext: trimmed,
         });
         setEditingTarget(null);
-        setEditDraftText('');
+        return true;
       } catch (error) {
         setChatError(
           error instanceof Error ? error.message : 'Không thể chỉnh sửa tin nhắn lúc này.',
         );
+        return false;
       } finally {
         setEditSaving(false);
       }
-      return;
     }
 
     if (!selectedConversation.canSendMoreMessages) {
       setChatError(
         'Bạn chỉ có thể gửi tối đa 3 tin nhắn trước khi người nhận chấp nhận cuộc trò chuyện.',
       );
-      return;
+      return false;
     }
 
     if (peerKeyBundle && peerKeyBundle.devices.length === 0) {
       setChatError(
         `@${selectedConversation.peer.handle} chưa kích hoạt hộp thư trên thiết bị nào. Bạn có thể nhắn tin khi họ trực tuyến.`,
       );
-      return;
+      return false;
     }
 
     setChatError(null);
     const replyPayload = replyingMessage ? buildReplyPayloadFromMessage(replyingMessage) : null;
-    setDraftText('');
     setReplyingTarget(null);
     isNearBottomRef.current = true;
 
@@ -752,8 +784,10 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
         plaintext: trimmed,
         replyTo: replyPayload,
       });
+      return true;
     } catch (error) {
       setChatError(error instanceof Error ? error.message : 'Không thể gửi tin nhắn lúc này.');
+      return true;
     }
   }
 
@@ -816,6 +850,12 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
         { method: 'POST' },
       );
       if (response.ok) {
+        if (
+          call?.activeCall?.peer.public_id === peerPublicId ||
+          call?.incomingCall?.caller.public_id === peerPublicId
+        ) {
+          void call.endActiveCall();
+        }
         setConfirmBlockOpen(false);
         setInfoDrawerOpen(false);
         chatStore.removeBlockedPeerConversationLocally(targetConvId);
@@ -853,6 +893,15 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const clusteredMessages = React.useMemo(
     () => buildClusteredMessageEntries(visibleMessages, effectivePeerLastReadSeq),
     [effectivePeerLastReadSeq, visibleMessages],
+  );
+
+  const ownKeyFingerprints = React.useMemo(
+    () => ownKeyBundle?.devices.map((d) => d.keyFingerprint) ?? [],
+    [ownKeyBundle],
+  );
+  const peerKeyFingerprints = React.useMemo(
+    () => peerKeyBundle?.devices.map((d) => d.keyFingerprint) ?? [],
+    [peerKeyBundle],
   );
 
   return (
@@ -990,10 +1039,20 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
 
           <div className="flex-1 overflow-y-auto">
             {loadingConversations ? (
-              <div className="flex items-center justify-center gap-2 py-14 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin text-primary" aria-hidden="true" />
-                <span>Đang tải hộp thư...</span>
-              </div>
+              <ul role="status" aria-label="Đang tải hộp thư" className="divide-y">
+                {Array.from({ length: 6 }, (_, idx) => (
+                  <li key={idx} className="flex h-[68px] items-center gap-3 px-4 py-3">
+                    <span className="size-10 shrink-0 animate-pulse rounded-full bg-muted" />
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="h-3.5 w-28 animate-pulse rounded bg-muted" />
+                        <span className="h-2.5 w-10 animate-pulse rounded bg-muted/70" />
+                      </div>
+                      <span className="block h-3 w-44 max-w-full animate-pulse rounded bg-muted/70" />
+                    </div>
+                  </li>
+                ))}
+              </ul>
             ) : conversations.length === 0 ? (
               <div className="px-6 py-14 text-center">
                 <div className="mx-auto flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -1488,8 +1547,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                         key={selectedConversation.public_id}
                         canSendMedia={selectedConversation.canSendMedia}
                         canSendMoreMessages={selectedConversation.canSendMoreMessages}
-                        draftText={draftText}
-                        editDraftText={editDraftText}
+                        editingMessageKey={editingMessage?.dto.public_id ?? null}
                         editingOriginalText={editingMessage?.plaintext ?? null}
                         editSaving={editSaving}
                         replyingTo={
@@ -1508,8 +1566,6 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                             : null
                         }
                         composerInputRef={composerInputRef}
-                        onChangeDraftText={setDraftText}
-                        onChangeEditDraftText={setEditDraftText}
                         onCancelEdit={handleCancelEditMessage}
                         onCancelReply={() => setReplyingTarget(null)}
                         onSubmitTextOrEdit={handleSendMessage}
@@ -1553,32 +1609,32 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                 )}
               </div>
 
-              <ChatInfoDrawer
-                open={infoDrawerOpen}
-                currentUserPublicId={currentUserPublicId}
-                currentUserKeyFingerprints={
-                  ownKeyBundle?.devices.map((d) => d.keyFingerprint) ?? []
-                }
-                peer={selectedConversation.peer}
-                peerKeyFingerprints={peerKeyBundle?.devices.map((d) => d.keyFingerprint) ?? []}
-                pinnedCount={activePinnedState?.totalPinnedCount ?? 0}
-                isPinned={Boolean(selectedConversation.myState.isPinned)}
-                isMuted={Boolean(selectedConversation.myState.isMuted)}
-                canPin={selectedConversation.myState.inboxState === 'primary'}
-                onOpenPinnedMessages={
-                  !isViewingPendingRequest && !selectedConversation.isAwaitingPeerAcceptance
-                    ? () => setPinnedListOpen(true)
-                    : undefined
-                }
-                onTogglePin={() => void handleToggleConversationPin(selectedConversation)}
-                onToggleMute={() => void handleToggleConversationMute(selectedConversation)}
-                onClose={() => setInfoDrawerOpen(false)}
-                onRequestDeleteConversation={() => {
-                  setDialogError(null);
-                  setConfirmDeleteConvTarget(selectedConversation);
-                }}
-                onRequestBlockPeer={() => setConfirmBlockOpen(true)}
-              />
+              {infoDrawerOpen ? (
+                <ChatInfoDrawer
+                  open={infoDrawerOpen}
+                  currentUserPublicId={currentUserPublicId}
+                  currentUserKeyFingerprints={ownKeyFingerprints}
+                  peer={selectedConversation.peer}
+                  peerKeyFingerprints={peerKeyFingerprints}
+                  pinnedCount={activePinnedState?.totalPinnedCount ?? 0}
+                  isPinned={Boolean(selectedConversation.myState.isPinned)}
+                  isMuted={Boolean(selectedConversation.myState.isMuted)}
+                  canPin={selectedConversation.myState.inboxState === 'primary'}
+                  onOpenPinnedMessages={
+                    !isViewingPendingRequest && !selectedConversation.isAwaitingPeerAcceptance
+                      ? () => setPinnedListOpen(true)
+                      : undefined
+                  }
+                  onTogglePin={() => void handleToggleConversationPin(selectedConversation)}
+                  onToggleMute={() => void handleToggleConversationMute(selectedConversation)}
+                  onClose={() => setInfoDrawerOpen(false)}
+                  onRequestDeleteConversation={() => {
+                    setDialogError(null);
+                    setConfirmDeleteConvTarget(selectedConversation);
+                  }}
+                  onRequestBlockPeer={() => setConfirmBlockOpen(true)}
+                />
+              ) : null}
             </div>
           )}
         </section>

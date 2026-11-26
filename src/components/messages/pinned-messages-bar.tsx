@@ -221,6 +221,14 @@ export function PinnedMessagesBar({
                               type="button"
                               onClick={() => {
                                 onCloseList();
+                                if (
+                                  needsPinRestore &&
+                                  entry.message.decryptionFailed &&
+                                  onRequestPinRestore
+                                ) {
+                                  onRequestPinRestore();
+                                  return;
+                                }
                                 onJumpToMessage(entry.message.dto.public_id);
                               }}
                               className="min-w-0 flex-1 text-left"

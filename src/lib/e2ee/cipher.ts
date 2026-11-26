@@ -24,6 +24,72 @@ import {
 } from '@/lib/e2ee/utils';
 
 export const MAX_E2EE_TARGET_DEVICES = 20;
+const MAX_CACHED_VERIFY_CRYPTO_KEYS = 64;
+const MAX_CACHED_FINGERPRINTS = 128;
+
+const cachedEcdsaVerifyKeys = new Map<string, Promise<CryptoKey>>();
+const cachedDeviceFingerprints = new Map<string, Promise<string>>();
+
+async function getOrImportEcdsaVerifyKey(
+  subtle: SubtleCrypto,
+  jwk: E2eePublicJwk,
+): Promise<CryptoKey> {
+  const cacheKey = `${jwk.x}|${jwk.y}`;
+  const existing = cachedEcdsaVerifyKeys.get(cacheKey);
+  if (existing) {
+    cachedEcdsaVerifyKeys.delete(cacheKey);
+    cachedEcdsaVerifyKeys.set(cacheKey, existing);
+    return existing;
+  }
+
+  const importPromise = subtle
+    .importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+    .catch((err) => {
+      cachedEcdsaVerifyKeys.delete(cacheKey);
+      throw err;
+    });
+
+  cachedEcdsaVerifyKeys.set(cacheKey, importPromise);
+  while (cachedEcdsaVerifyKeys.size > MAX_CACHED_VERIFY_CRYPTO_KEYS) {
+    const oldest = cachedEcdsaVerifyKeys.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    cachedEcdsaVerifyKeys.delete(oldest);
+  }
+  return importPromise;
+}
+
+async function getCachedDeviceKeyFingerprint(
+  identityJwk: E2eePublicJwk,
+  signingJwk: E2eePublicJwk,
+): Promise<string> {
+  const cacheKey = `${identityJwk.x}|${identityJwk.y}|${signingJwk.x}|${signingJwk.y}`;
+  const existing = cachedDeviceFingerprints.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const fpPromise = computeDeviceKeyFingerprint(identityJwk, signingJwk).catch((err) => {
+    cachedDeviceFingerprints.delete(cacheKey);
+    throw err;
+  });
+
+  cachedDeviceFingerprints.set(cacheKey, fpPromise);
+  while (cachedDeviceFingerprints.size > MAX_CACHED_FINGERPRINTS) {
+    const oldest = cachedDeviceFingerprints.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    cachedDeviceFingerprints.delete(oldest);
+  }
+  return fpPromise;
+}
+
+export function clearCachedE2eeCryptoHelpers(): void {
+  cachedEcdsaVerifyKeys.clear();
+  cachedDeviceFingerprints.clear();
+}
 
 /**
  * Chuỗi AAD chuẩn hóa: `conversationPublicId|senderPublicId|clientMsgId`
@@ -437,7 +503,7 @@ export async function decryptDirectMessage(
         'Không tìm thấy khóa xác thực đã đăng ký của thiết bị gửi.',
       );
     }
-    const expectedFingerprint = await computeDeviceKeyFingerprint(
+    const expectedFingerprint = await getCachedDeviceKeyFingerprint(
       matchedSenderDevice.identityPublicKeyJwk,
       matchedSenderDevice.signingPublicKeyJwk,
     );
@@ -460,14 +526,8 @@ export async function decryptDirectMessage(
     clientMsgId: params.clientMsgId,
   });
 
-  // Bước 1: Xác minh chữ ký ECDSA P-256 trước khi giải mã (chống giả mạo người gửi / tampering).
-  const signingPublicKey = await subtle.importKey(
-    'jwk',
-    verifiedSigningJwk,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['verify'],
-  );
+  // Bước 1: Xác minh chữ ký ECDSA P-256 trước khi giải mã (dùng LRU cache khóa công khai đã importKey).
+  const signingPublicKey = await getOrImportEcdsaVerifyKey(subtle, verifiedSigningJwk);
 
   const transcriptBytes = buildMessageSignatureTranscript({
     aadString,

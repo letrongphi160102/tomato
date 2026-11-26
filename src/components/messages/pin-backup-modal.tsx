@@ -418,8 +418,8 @@ export function PinBackupModal({
 
         await saveDeviceKeyMaterial(created.localMaterial, 'backup');
         setSuccessMessage('Đã tạo mã PIN tin nhắn thành công.');
-        await onCompleted({ mode: 'created', updatedBackup: data?.backup ?? null });
         onClose();
+        void Promise.resolve(onCompleted({ mode: 'created', updatedBackup: data?.backup ?? null }));
         return;
       }
 
@@ -442,8 +442,8 @@ export function PinBackupModal({
         });
 
         setSuccessMessage('Đã đồng bộ tin nhắn thành công.');
-        await onCompleted({ mode: 'restored', updatedBackup: targetBackup });
         onClose();
+        void Promise.resolve(onCompleted({ mode: 'restored', updatedBackup: targetBackup }));
         return;
       }
 
@@ -505,8 +505,8 @@ export function PinBackupModal({
 
         await saveDeviceKeyMaterial(reEncrypted.localMaterial, 'backup');
         setSuccessMessage('Đã đổi mã PIN thành công.');
-        await onCompleted({ mode: 'changed', updatedBackup: data?.backup ?? null });
         onClose();
+        void Promise.resolve(onCompleted({ mode: 'changed', updatedBackup: data?.backup ?? null }));
         return;
       }
 
@@ -560,8 +560,8 @@ export function PinBackupModal({
 
         await saveDeviceKeyMaterial(created.localMaterial, 'backup');
         setSuccessMessage('Đã đặt lại mã PIN thành công.');
-        await onCompleted({ mode: 'reset', updatedBackup: data?.backup ?? null });
         onClose();
+        void Promise.resolve(onCompleted({ mode: 'reset', updatedBackup: data?.backup ?? null }));
       }
     } catch (error) {
       setErrorMessage(

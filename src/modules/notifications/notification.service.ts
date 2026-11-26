@@ -74,6 +74,12 @@ export interface PendingRealtimeDispatch {
   readonly payload: Record<string, unknown>;
 }
 
+export interface DeferredBatchNotificationRecord {
+  readonly recipientId: string;
+  readonly recipientPublicId: string;
+  readonly notification: NotificationItemDto;
+}
+
 export type NotificationUserSummary = Pick<
   UserRow,
   'id' | 'publicId' | 'handle' | 'fullName' | 'avatarUrl' | 'isPrivate' | 'status' | 'deletedAt'
@@ -375,6 +381,138 @@ export class NotificationService {
         unreadCount,
       },
     };
+  }
+
+  /**
+   * Ghi hàng loạt thông báo trong DB transaction bằng 1 câu `INSERT ... ON CONFLICT` duy nhất
+   * (KHÔNG chạy N câu đếm `unreadCount` khi đang giữ khóa `FOR UPDATE` trên nhiều dòng `users`).
+   * Sau khi transaction commit, gọi `buildBatchCreatedDispatches` để đếm `GROUP BY recipient_id` 1 lần.
+   */
+  async recordNotificationsBatchInTx(
+    tx: DatabaseTransaction,
+    params: {
+      readonly recipients: readonly NotificationUserSummary[];
+      readonly actor: NotificationUserSummary;
+      readonly type: NotificationType;
+      readonly entityPublicId?: string | null;
+      readonly now?: Date;
+    },
+  ): Promise<{
+    readonly immediateDispatches: PendingRealtimeDispatch[];
+    readonly deferredRecords: DeferredBatchNotificationRecord[];
+  }> {
+    if (params.actor.status !== 'active' || params.actor.deletedAt !== null) {
+      return { immediateDispatches: [], deferredRecords: [] };
+    }
+
+    const eligibleRecipients = params.recipients.filter(
+      (r) => r.id !== params.actor.id && r.status === 'active' && r.deletedAt === null,
+    );
+    if (eligibleRecipients.length === 0) {
+      return { immediateDispatches: [], deferredRecords: [] };
+    }
+
+    // Tương thích ngược với các unit test truyền partial mock repository chỉ có `upsertUnreadNotification`.
+    if (
+      typeof this.repository.upsertUnreadNotificationsBatch !== 'function' ||
+      typeof this.repository.countUnreadForRecipients !== 'function'
+    ) {
+      const immediateDispatches: PendingRealtimeDispatch[] = [];
+      for (const recipient of eligibleRecipients) {
+        const d = await this.recordNotificationInTx(tx, {
+          recipient,
+          actor: params.actor,
+          type: params.type,
+          entityPublicId: params.entityPublicId,
+          now: params.now,
+        });
+        if (d) {
+          immediateDispatches.push(d);
+        }
+      }
+      return { immediateDispatches, deferredRecords: [] };
+    }
+
+    const currentTime = params.now ?? this.now();
+    const dedupeKey = buildNotificationDedupeKey(
+      params.type,
+      params.actor.id,
+      params.entityPublicId,
+    );
+    const entityPublicId = params.entityPublicId ?? params.actor.publicId;
+
+    const recipientById = new Map<string, NotificationUserSummary>();
+    for (const r of eligibleRecipients) {
+      recipientById.set(r.id, r);
+    }
+
+    const savedRows = await this.repository.upsertUnreadNotificationsBatch(
+      Array.from(recipientById.values()).map((recipient) => ({
+        recipientId: recipient.id,
+        actorId: params.actor.id,
+        type: params.type,
+        entityPublicId,
+        dedupeKey,
+        now: currentTime,
+      })),
+      tx,
+    );
+
+    const actorDto: NotificationActorDto = {
+      public_id: params.actor.publicId,
+      handle: params.actor.handle,
+      fullName: params.actor.fullName,
+      avatarUrl: params.actor.avatarUrl,
+      isPrivate: params.actor.isPrivate,
+    };
+
+    const deferredRecords: DeferredBatchNotificationRecord[] = [];
+    for (const saved of savedRows) {
+      const recipient = recipientById.get(saved.recipientId);
+      if (!recipient) {
+        continue;
+      }
+      deferredRecords.push({
+        recipientId: recipient.id,
+        recipientPublicId: recipient.publicId,
+        notification: {
+          public_id: saved.publicId,
+          type: saved.type,
+          createdAt: saved.createdAt.toISOString(),
+          readAt: saved.readAt ? saved.readAt.toISOString() : null,
+          entityPublicId: saved.entityPublicId,
+          actor: actorDto,
+          followRequestPending: saved.type === 'follow_request',
+        },
+      });
+    }
+
+    return { immediateDispatches: [], deferredRecords };
+  }
+
+  /**
+   * Thực thi ngoài DB transaction `FOR UPDATE` (sau khi commit):
+   * gom đếm `unreadCount` cho toàn bộ người nhận bằng 1 câu `GROUP BY recipient_id` duy nhất.
+   */
+  async buildBatchCreatedDispatches(
+    records: readonly DeferredBatchNotificationRecord[],
+  ): Promise<PendingRealtimeDispatch[]> {
+    if (records.length === 0) {
+      return [];
+    }
+
+    const countsByRecipient = await this.repository.countUnreadForRecipients(
+      records.map((r) => r.recipientId),
+    );
+
+    return records.map((record) => ({
+      recipientPublicId: record.recipientPublicId,
+      eventName: 'notification.created',
+      payload: {
+        notification: record.notification,
+        unreadCount: countsByRecipient.get(record.recipientId) ?? 0,
+      },
+    }));
   }
 
   async removeFollowRequestNotificationsInTx(

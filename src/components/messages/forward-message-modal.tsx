@@ -61,7 +61,7 @@ export function ForwardMessageModal({
     if (!open) {
       return;
     }
-    let cancelled = false;
+    const controller = new AbortController();
     const timer = setTimeout(() => {
       setLoadingTargets(true);
       setLoadError(null);
@@ -71,9 +71,12 @@ export function ForwardMessageModal({
         params.set('q', trimmed);
       }
 
-      void authFetch(`/api/v1/conversations/forward-targets?${params.toString()}`)
+      void authFetch(`/api/v1/conversations/forward-targets?${params.toString()}`, {
+        method: 'GET',
+        signal: controller.signal,
+      })
         .then(async (res) => {
-          if (cancelled) {
+          if (controller.signal.aborted) {
             return;
           }
           if (!res.ok) {
@@ -81,23 +84,25 @@ export function ForwardMessageModal({
             return;
           }
           const data = (await res.json()) as ForwardTargetsListResult;
-          setTargets(Array.isArray(data.items) ? data.items : []);
+          if (!controller.signal.aborted) {
+            setTargets(Array.isArray(data.items) ? data.items : []);
+          }
         })
         .catch(() => {
-          if (!cancelled) {
+          if (!controller.signal.aborted) {
             setLoadError('Không thể kết nối. Vui lòng thử lại.');
           }
         })
         .finally(() => {
-          if (!cancelled) {
+          if (!controller.signal.aborted) {
             setLoadingTargets(false);
           }
         });
     }, 180);
 
     return () => {
-      cancelled = true;
       clearTimeout(timer);
+      controller.abort();
     };
   }, [open, searchQuery]);
 

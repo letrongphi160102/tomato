@@ -6,7 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { Home, Loader2, LogOut, MessageCircle, Settings } from 'lucide-react';
 
 import { useCall } from '@/components/calls/call-context';
-import { useChatStore } from '@/components/messages/chat-store-context';
+import { useChatLogoutActions, useChatUnreadCount } from '@/components/messages/chat-store-context';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { authFetch, clearAccessTokenFreshness } from '@/lib/auth-client';
 import { disconnectAllRealtimeConnections } from '@/lib/realtime-client';
@@ -16,12 +16,13 @@ export function AppLeftSidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const realtime = useRealtimePresence();
-  const chatStore = useChatStore();
+  const unreadConversationsCount = useChatUnreadCount();
+  const chatLogoutActions = useChatLogoutActions();
   const call = useCall();
 
   const [loggingOut, setLoggingOut] = React.useState(false);
 
-  const unreadMessagesCount = Math.max(0, chatStore?.unreadConversationsCount ?? 0);
+  const unreadMessagesCount = Math.max(0, unreadConversationsCount);
   const unreadMessagesBadgeText = unreadMessagesCount > 99 ? '99+' : String(unreadMessagesCount);
 
   const isHomeActive = pathname === '/';
@@ -35,7 +36,7 @@ export function AppLeftSidebar() {
     setLoggingOut(true);
     clearAccessTokenFreshness();
     call?.cleanupOnLogout();
-    chatStore?.clearAllChatCache();
+    chatLogoutActions?.clearAllChatCache();
     realtime?.disconnectAll();
     disconnectAllRealtimeConnections();
     try {

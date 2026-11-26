@@ -239,9 +239,21 @@ export interface ChatStoreContextValue {
 }
 
 export const ChatStoreContext = React.createContext<ChatStoreContextValue | null>(null);
+export const ChatUnreadContext = React.createContext<number>(0);
+export const ChatLogoutActionsContext = React.createContext<{
+  readonly clearAllChatCache: () => void;
+} | null>(null);
 
 export function useChatStore(): ChatStoreContextValue | null {
   return React.useContext(ChatStoreContext);
+}
+
+export function useChatUnreadCount(): number {
+  return React.useContext(ChatUnreadContext);
+}
+
+export function useChatLogoutActions(): { readonly clearAllChatCache: () => void } | null {
+  return React.useContext(ChatLogoutActionsContext);
 }
 
 // ============================================================================
@@ -304,6 +316,22 @@ function safeRevokeObjectUrl(url: string | undefined): void {
 }
 
 let activeUserChatRamCache: UserChatRamCache | null = null;
+let chatRamCacheEpoch = 0;
+
+export function getChatRamCacheEpoch(): number {
+  return chatRamCacheEpoch;
+}
+
+export function revokeThreadLocalPreviewUrls(
+  thread: CachedConversationThreadState | null | undefined,
+): void {
+  if (!thread) {
+    return;
+  }
+  for (const item of thread.items) {
+    safeRevokeObjectUrl(item.localPreviewUrl);
+  }
+}
 
 export function getOrInitUserChatRamCache(userPublicId: string): UserChatRamCache {
   const norm = userPublicId.trim().toLowerCase();
@@ -344,6 +372,7 @@ export function getOrInitUserChatRamCache(userPublicId: string): UserChatRamCach
 }
 
 export function clearChatRamMemorySingleton(): void {
+  chatRamCacheEpoch += 1;
   if (activeUserChatRamCache) {
     for (const entry of activeUserChatRamCache.mediaObjectUrlsByMsgId.values()) {
       safeRevokeObjectUrl(entry.objectUrl);
@@ -543,6 +572,7 @@ export function putLruConversationThreadCache(
   map: Map<string, CachedConversationThreadState>,
   conversationPublicId: string,
   state: CachedConversationThreadState,
+  mediaObjectUrlsByMsgId?: Map<string, DecryptedMediaObjectUrlCacheEntry>,
 ): void {
   if (map.has(conversationPublicId)) {
     map.delete(conversationPublicId);
@@ -559,6 +589,11 @@ export function putLruConversationThreadCache(
     }
     if (!oldestKey) {
       break;
+    }
+    const evictedThread = map.get(oldestKey);
+    revokeThreadLocalPreviewUrls(evictedThread);
+    if (mediaObjectUrlsByMsgId) {
+      revokeMediaObjectUrlsByConversationId(mediaObjectUrlsByMsgId, oldestKey);
     }
     map.delete(oldestKey);
   }

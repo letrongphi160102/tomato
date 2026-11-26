@@ -40,7 +40,7 @@ export interface ChatInfoDrawerProps {
   readonly onRequestBlockPeer: () => void;
 }
 
-export function ChatInfoDrawer({
+export const ChatInfoDrawer = React.memo(function ChatInfoDrawer({
   open,
   currentUserPublicId,
   currentUserKeyFingerprints,
@@ -61,19 +61,24 @@ export function ChatInfoDrawer({
   const [safetyFormatted, setSafetyFormatted] = React.useState<string>('');
   const [copied, setCopied] = React.useState(false);
 
+  const ownFingerprintsKey = currentUserKeyFingerprints.join('|');
+  const peerFingerprintsKey = peerKeyFingerprints.join('|');
+
   React.useEffect(() => {
     if (!open) {
       return;
     }
     let cancelled = false;
+    const ownFpList = ownFingerprintsKey ? ownFingerprintsKey.split('|') : [];
+    const peerFpList = peerFingerprintsKey ? peerFingerprintsKey.split('|') : [];
     void computeConversationSafetyNumber(
       {
         userPublicId: currentUserPublicId,
-        keyFingerprints: currentUserKeyFingerprints,
+        keyFingerprints: ownFpList,
       },
       {
         userPublicId: peer.public_id,
-        keyFingerprints: peerKeyFingerprints,
+        keyFingerprints: peerFpList,
       },
     )
       .then((res) => {
@@ -92,7 +97,7 @@ export function ChatInfoDrawer({
     return () => {
       cancelled = true;
     };
-  }, [currentUserKeyFingerprints, currentUserPublicId, open, peer.public_id, peerKeyFingerprints]);
+  }, [currentUserPublicId, open, ownFingerprintsKey, peer.public_id, peerFingerprintsKey]);
 
   if (!open) {
     return null;
@@ -275,4 +280,4 @@ export function ChatInfoDrawer({
       </div>
     </aside>
   );
-}
+});

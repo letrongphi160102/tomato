@@ -1,6 +1,20 @@
 import 'server-only';
 
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 import { generatePublicId, generateUuidV7 } from '@/core/crypto/id';
 import {
@@ -237,6 +251,73 @@ export class ChatRepository {
       blockedByTarget,
       actorFollowStatus,
       targetFollowStatus,
+    };
+  }
+
+  /**
+   * Đọc đồng thời thông tin `users` của đối phương và snapshot quan hệ xã hội 2 chiều
+   * chỉ trong 1 câu SQL duy nhất (tiết kiệm 2 round-trip mạng bên trong transaction RLS).
+   */
+  async findUserWithRelationshipById(
+    actorUserId: string,
+    targetUserId: string,
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<{
+    readonly user: UserRow;
+    readonly relationship: SocialRelationshipSnapshot;
+  } | null> {
+    if (actorUserId === targetUserId) {
+      const user = await this.findUserById(targetUserId, executor);
+      return user ? { user, relationship: EMPTY_SOCIAL_RELATIONSHIP } : null;
+    }
+
+    const rows = await executor
+      .select({
+        ...getTableColumns(users),
+        relBlockedByActor: sql<boolean>`EXISTS (
+          SELECT 1 FROM ${blocks} b
+          WHERE b.blocker_id = ${actorUserId} AND b.blocked_id = ${targetUserId}
+        )`,
+        relBlockedByTarget: sql<boolean>`EXISTS (
+          SELECT 1 FROM ${blocks} b
+          WHERE b.blocker_id = ${targetUserId} AND b.blocked_id = ${actorUserId}
+        )`,
+        relActorFollowStatus: sql<string | null>`(
+          SELECT f.status::text FROM ${follows} f
+          WHERE f.follower_id = ${actorUserId} AND f.followee_id = ${targetUserId}
+          LIMIT 1
+        )`,
+        relTargetFollowStatus: sql<string | null>`(
+          SELECT f.status::text FROM ${follows} f
+          WHERE f.follower_id = ${targetUserId} AND f.followee_id = ${actorUserId}
+          LIMIT 1
+        )`,
+      })
+      .from(users)
+      .where(eq(users.id, targetUserId))
+      .limit(1);
+
+    const match = rows[0];
+    if (!match) {
+      return null;
+    }
+
+    const {
+      relBlockedByActor,
+      relBlockedByTarget,
+      relActorFollowStatus,
+      relTargetFollowStatus,
+      ...user
+    } = match;
+
+    return {
+      user,
+      relationship: {
+        blockedByActor: Boolean(relBlockedByActor),
+        blockedByTarget: Boolean(relBlockedByTarget),
+        actorFollowStatus: normalizeFollowStatus(relActorFollowStatus),
+        targetFollowStatus: normalizeFollowStatus(relTargetFollowStatus),
+      },
     };
   }
 
@@ -859,6 +940,59 @@ export class ChatRepository {
     return msgRows[0] ?? null;
   }
 
+  /**
+   * Truy vấn gộp (batch `DISTINCT ON (m.conversation_id)`) lấy tin nhắn hiển thị mới nhất
+   * cho danh sách hội thoại chỉ bằng 1 câu SQL duy nhất:
+   * - Bắt buộc giữ `m.seq > cp.cleared_before_seq` riêng của từng hội thoại (chống lộ lại tin trước mốc Xóa đoạn chat).
+   * - Bắt buộc giữ `NOT EXISTS message_user_deletions` (ẩn tin đã xóa 1 phía).
+   */
+  async findLatestVisibleMessagesForConversations(
+    params: {
+      readonly conversationIds: readonly string[];
+      readonly viewerUserId: string;
+    },
+    executor: DbExecutor = this.getDefaultDb(),
+  ): Promise<Map<string, { readonly row: MessageRow; readonly senderPublicId: string }>> {
+    const uniqueConvIds = Array.from(new Set(params.conversationIds));
+    if (uniqueConvIds.length === 0) {
+      return new Map();
+    }
+
+    const msgRows = await executor
+      .selectDistinctOn([messages.conversationId], {
+        row: messages,
+        senderPublicId: users.publicId,
+      })
+      .from(messages)
+      .innerJoin(users, eq(messages.senderId, users.id))
+      .innerJoin(
+        conversationParticipants,
+        and(
+          eq(conversationParticipants.conversationId, messages.conversationId),
+          eq(conversationParticipants.userId, params.viewerUserId),
+        ),
+      )
+      .where(
+        and(
+          inArray(messages.conversationId, uniqueConvIds),
+          gt(messages.seq, conversationParticipants.clearedBeforeSeq),
+          sql`NOT EXISTS (
+            SELECT 1
+            FROM ${messageUserDeletions} mud
+            WHERE mud.message_id = ${messages.id}
+              AND mud.user_id = ${params.viewerUserId}
+          )`,
+        ),
+      )
+      .orderBy(messages.conversationId, desc(messages.seq));
+
+    const map = new Map<string, { readonly row: MessageRow; readonly senderPublicId: string }>();
+    for (const item of msgRows) {
+      map.set(item.row.conversationId, item);
+    }
+    return map;
+  }
+
   async listConversationsForUser(
     params: {
       readonly userId: string;
@@ -954,7 +1088,16 @@ export class ChatRepository {
       }
     }
 
-    const results: ConversationListRowRecord[] = [];
+    const eligibleItems: Array<{
+      readonly conversation: ConversationRow;
+      readonly participant: ConversationParticipantRow;
+      readonly peerInfo: {
+        readonly participant: ConversationParticipantRow;
+        readonly user: ConversationListRowRecord['peerUser'];
+      };
+    }> = [];
+    const convIdsNeedingPreview: string[] = [];
+
     for (const item of myParticipations) {
       const peerInfo = peerByConvId.get(item.conversation.id);
       if (!peerInfo) {
@@ -968,28 +1111,34 @@ export class ChatRepository {
         continue;
       }
 
-      let lastMessage: ConversationListRowRecord['lastMessage'] = null;
-      if (item.conversation.lastSeq > item.participant.clearedBeforeSeq) {
-        lastMessage = await this.findLatestVisibleMessageForConversation(
-          {
-            conversationId: item.conversation.id,
-            viewerUserId: params.userId,
-            clearedBeforeSeq: Number(item.participant.clearedBeforeSeq),
-          },
-          executor,
-        );
-      }
-
-      results.push({
+      eligibleItems.push({
         conversation: item.conversation,
-        actorParticipant: item.participant,
-        peerParticipant: peerInfo.participant,
-        peerUser: peerInfo.user,
-        lastMessage,
+        participant: item.participant,
+        peerInfo,
       });
+      if (item.conversation.lastSeq > item.participant.clearedBeforeSeq) {
+        convIdsNeedingPreview.push(item.conversation.id);
+      }
     }
 
-    return results;
+    const latestMessagesByConvId =
+      convIdsNeedingPreview.length > 0
+        ? await this.findLatestVisibleMessagesForConversations(
+            {
+              conversationIds: convIdsNeedingPreview,
+              viewerUserId: params.userId,
+            },
+            executor,
+          )
+        : new Map<string, { readonly row: MessageRow; readonly senderPublicId: string }>();
+
+    return eligibleItems.map((item) => ({
+      conversation: item.conversation,
+      actorParticipant: item.participant,
+      peerParticipant: item.peerInfo.participant,
+      peerUser: item.peerInfo.user,
+      lastMessage: latestMessagesByConvId.get(item.conversation.id) ?? null,
+    }));
   }
 
   // =========================================================================

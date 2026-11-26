@@ -494,10 +494,12 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
     expect(existsSync(join(process.cwd(), 'public/images/brand/tomato-logo.png'))).toBe(true);
     expect(existsSync(join(process.cwd(), 'public/images/brand/homeland.png'))).toBe(true);
 
-    // Trang chủ "/" khi chưa đăng nhập chuyển hướng thẳng sang "/login" (không còn LandingHero 2 nút).
-    const homeSource = readFileSync(join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+    // Trang chủ "/" dùng chung DashboardLayout (không còn src/app/page.tsx trùng lặp) và khi chưa đăng nhập chuyển hướng thẳng sang "/login" (không còn LandingHero 2 nút).
+    expect(existsSync(join(process.cwd(), 'src/app/page.tsx'))).toBe(false);
+    const homeSource = readFileSync(join(process.cwd(), 'src/app/(dashboard)/page.tsx'), 'utf8');
     expect(homeSource).toContain("redirect('/login')");
     expect(homeSource).not.toContain('LandingHero');
+    expect(homeSource).not.toContain('<AppShell');
 
     // Giao diện đổi mật khẩu không còn thanh 2 tab Bước 1/Bước 2 hay nút "Quay lại Bước 1".
     const changePasswordSource = readFileSync(

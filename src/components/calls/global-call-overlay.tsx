@@ -1,12 +1,21 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
-import { ActiveCallScreen } from '@/components/calls/active-call-screen';
 import { useCall } from '@/components/calls/call-context';
-import { IncomingCallDialog } from '@/components/calls/incoming-call-dialog';
+
+const ActiveCallScreen = dynamic(
+  () => import('@/components/calls/active-call-screen').then((m) => m.ActiveCallScreen),
+  { ssr: false },
+);
+
+const IncomingCallDialog = dynamic(
+  () => import('@/components/calls/incoming-call-dialog').then((m) => m.IncomingCallDialog),
+  { ssr: false },
+);
 
 const EMPTY_SUBSCRIBE = () => () => undefined;
 
@@ -63,7 +72,7 @@ export function GlobalCallOverlay() {
             <div
               role="status"
               aria-live="polite"
-              className="fixed top-16 left-1/2 z-50 flex w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 items-center justify-between gap-3 rounded-2xl border bg-background/95 px-4 py-3 text-sm text-foreground shadow-xl backdrop-blur"
+              className="fixed top-16 left-1/2 z-[70] flex w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 items-center justify-between gap-3 rounded-2xl border bg-background/95 px-4 py-3 text-sm text-foreground shadow-xl backdrop-blur"
             >
               <span className="leading-snug">{call.noticeMessage}</span>
               <button

@@ -21,6 +21,7 @@ import type {
   MessageType,
   UserE2eeDeviceRow,
   UserE2eeKeyBackupRow,
+  UserRow,
 } from '@/core/db/schema';
 import { buildE2eePinResetOtpEmail, getEmailProvider, type EmailProvider } from '@/core/email';
 import { logger } from '@/core/logger';
@@ -642,6 +643,38 @@ export class ChatService {
       return this.repository.getDatabaseNow(tx);
     }
     return this.now();
+  }
+
+  private async resolvePeerUserAndRelationship(
+    actorUserId: string,
+    peerParticipant: ConversationParticipantRow | null,
+    tx: Parameters<Parameters<ChatRepository['runInRlsTx']>[1]>[0],
+  ): Promise<{
+    readonly peerUser: UserRow | null;
+    readonly relationship: SocialRelationshipSnapshot | null;
+  }> {
+    if (!peerParticipant) {
+      return { peerUser: null, relationship: null };
+    }
+    if (typeof this.repository.findUserWithRelationshipById === 'function') {
+      const combined = await this.repository.findUserWithRelationshipById(
+        actorUserId,
+        peerParticipant.userId,
+        tx,
+      );
+      if (!combined) {
+        return { peerUser: null, relationship: null };
+      }
+      return {
+        peerUser: combined.user,
+        relationship: combined.relationship,
+      };
+    }
+    const peerUser = await this.repository.findUserById(peerParticipant.userId, tx);
+    const relationship = peerUser
+      ? await this.repository.getRelationshipSnapshot(actorUserId, peerUser.id, tx)
+      : null;
+    return { peerUser, relationship };
   }
 
   private async consumeRateLimitOrThrow(
@@ -1627,12 +1660,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:conversation:view', {
         conversation,
@@ -1713,12 +1745,11 @@ export class ChatService {
       const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:conversation:read', {
         conversation,
@@ -1856,12 +1887,11 @@ export class ChatService {
       const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:conversation:accept', {
         conversation,
@@ -1950,12 +1980,11 @@ export class ChatService {
       const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:conversation:decline', {
         conversation,
@@ -2049,12 +2078,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:list', {
         conversation,
@@ -2287,12 +2315,11 @@ export class ChatService {
       const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
       let actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       let peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:send', {
         conversation,
@@ -2784,12 +2811,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:read', {
         conversation,
@@ -2885,12 +2911,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       // Lớp 1 BOLA: Không phải thành viên hoặc bị chặn 2 chiều -> 404 đồng nhất.
       assertChatAuthorized(actor, 'chat:message:edit', {
@@ -3088,12 +3113,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:recall', {
         conversation,
@@ -3340,12 +3364,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:delete_for_me', {
         conversation,
@@ -3445,12 +3468,11 @@ export class ChatService {
       const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:conversation:delete', {
         conversation,
@@ -3597,12 +3619,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:attachment:upload', {
         conversation,
@@ -3772,12 +3793,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:attachment:upload', {
         conversation,
@@ -3882,12 +3902,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:attachment:read', {
         conversation,
@@ -4207,12 +4226,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:react', {
         conversation,
@@ -4366,12 +4384,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:react', {
         conversation,
@@ -4492,12 +4509,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:conversation:pins:list', {
         conversation,
@@ -4609,12 +4625,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:pin', {
         conversation,
@@ -4844,12 +4859,11 @@ export class ChatService {
       const participants = await this.repository.listConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:message:pin', {
         conversation,
@@ -4986,12 +5000,11 @@ export class ChatService {
       const participants = await this.repository.lockConversationParticipants(conversation.id, tx);
       const actorParticipant = participants.find((p) => p.userId === actor.user.id) ?? null;
       const peerParticipant = participants.find((p) => p.userId !== actor.user.id) ?? null;
-      const peerUser = peerParticipant
-        ? await this.repository.findUserById(peerParticipant.userId, tx)
-        : null;
-      const relationship = peerUser
-        ? await this.repository.getRelationshipSnapshot(actor.user.id, peerUser.id, tx)
-        : null;
+      const { peerUser, relationship } = await this.resolvePeerUserAndRelationship(
+        actor.user.id,
+        peerParticipant,
+        tx,
+      );
 
       assertChatAuthorized(actor, 'chat:conversation:preferences:update', {
         conversation,

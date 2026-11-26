@@ -1,0 +1,1 @@
+CREATE INDEX "idx_messages_conv_sender_seq_desc" ON "messages" USING btree ("conversation_id","sender_id","seq" DESC NULLS LAST);

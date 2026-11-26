@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
@@ -26,11 +27,7 @@ import {
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
 import { ConversationActionsMenu } from '@/components/messages/conversation-actions-menu';
-import { ForwardMessageModal } from '@/components/messages/forward-message-modal';
-import {
-  ImageLightboxModal,
-  type ImageLightboxTarget,
-} from '@/components/messages/image-lightbox-modal';
+import type { ImageLightboxTarget } from '@/components/messages/image-lightbox-modal';
 import {
   buildReplyPayloadFromMessage,
   canRecallMessage,
@@ -42,10 +39,8 @@ import {
   formatConversationShortTimeVi,
   isConversationUnread,
 } from '@/components/messages/message-grouping';
-import { NewMessageModal } from '@/components/messages/new-message-modal';
 import {
   MandatoryPinSetupPanel,
-  PinBackupModal,
   type PinBackupModalMode,
 } from '@/components/messages/pin-backup-modal';
 import { PinnedMessagesBar } from '@/components/messages/pinned-messages-bar';
@@ -57,10 +52,38 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import type { ConversationSummaryDto } from '@/modules/chat';
 
+const ForwardMessageModal = dynamic(
+  () => import('@/components/messages/forward-message-modal').then((m) => m.ForwardMessageModal),
+  { ssr: false },
+);
+
+const ImageLightboxModal = dynamic(
+  () => import('@/components/messages/image-lightbox-modal').then((m) => m.ImageLightboxModal),
+  { ssr: false },
+);
+
+const NewMessageModal = dynamic(
+  () => import('@/components/messages/new-message-modal').then((m) => m.NewMessageModal),
+  { ssr: false },
+);
+
+const PinBackupModal = dynamic(
+  () => import('@/components/messages/pin-backup-modal').then((m) => m.PinBackupModal),
+  { ssr: false },
+);
+
 const EMPTY_CONVERSATIONS: readonly ConversationSummaryDto[] = [];
 const EMPTY_MESSAGES: readonly DecryptedMessageViewItem[] = [];
 
-export function FloatingMessagesWidget() {
+export interface FloatingMessagesWidgetProps {
+  readonly defaultOpen?: boolean;
+  readonly onCloseWidget?: () => void;
+}
+
+export function FloatingMessagesWidget({
+  defaultOpen = false,
+  onCloseWidget,
+}: FloatingMessagesWidgetProps = {}) {
   const pathname = usePathname();
   const router = useRouter();
   const realtime = useRealtimePresence();
@@ -68,10 +91,8 @@ export function FloatingMessagesWidget() {
 
   const isAllowedOnCurrentRoute = shouldRenderFloatingMessagesWidget(pathname);
 
-  const [isOpen, setIsOpen] = React.useState(false);
+  const [isOpen, setIsOpen] = React.useState(defaultOpen);
   const [activeMiniConvId, setActiveMiniConvId] = React.useState<string | null>(null);
-  const [draftText, setDraftText] = React.useState('');
-  const [editDraftText, setEditDraftText] = React.useState('');
   const [chatError, setChatError] = React.useState<string | null>(null);
   const [chatNotice, setChatNotice] = React.useState<string | null>(null);
   const [pinnedListOpen, setPinnedListOpen] = React.useState(false);
@@ -375,10 +396,30 @@ export function FloatingMessagesWidget() {
     if (!hasOwnRecentMessage) {
       return;
     }
-    const timer = setInterval(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const syncVisibilityTimer = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        if (timer !== null) {
+          clearInterval(timer);
+          timer = null;
+        }
+        return;
+      }
       setNowMs(Date.now());
-    }, 10_000);
-    return () => clearInterval(timer);
+      if (timer === null) {
+        timer = setInterval(() => {
+          setNowMs(Date.now());
+        }, 10_000);
+      }
+    };
+    syncVisibilityTimer();
+    document.addEventListener('visibilitychange', syncVisibilityTimer);
+    return () => {
+      document.removeEventListener('visibilitychange', syncVisibilityTimer);
+      if (timer !== null) {
+        clearInterval(timer);
+      }
+    };
   }, [hasOwnRecentMessage]);
 
   const effectivePeerLastReadSeq =
@@ -399,6 +440,49 @@ export function FloatingMessagesWidget() {
     [effectivePeerLastReadSeq, visibleMessages],
   );
 
+  const hasOpenChildOverlay = Boolean(
+    pinnedListOpen ||
+    newMessageModalOpen ||
+    pinModalMode !== null ||
+    confirmRecallTarget !== null ||
+    confirmReplaceHiddenPinTarget !== null ||
+    forwardSourceMessage !== null ||
+    lightboxTarget !== null,
+  );
+
+  React.useEffect(() => {
+    if (!isOpen || !isAllowedOnCurrentRoute || hasOpenChildOverlay) {
+      return;
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape' || event.defaultPrevented) {
+        return;
+      }
+      if (editingMessage || replyingMessage) {
+        return;
+      }
+      if (activeMiniConvId !== null) {
+        setChatError(null);
+        setActiveMiniConvId(null);
+        return;
+      }
+      setFloatingViewportConversation?.(null);
+      setIsOpen(false);
+      onCloseWidget?.();
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [
+    activeMiniConvId,
+    editingMessage,
+    hasOpenChildOverlay,
+    isAllowedOnCurrentRoute,
+    isOpen,
+    onCloseWidget,
+    replyingMessage,
+    setFloatingViewportConversation,
+  ]);
+
   if (!isAllowedOnCurrentRoute) {
     return null;
   }
@@ -410,6 +494,7 @@ export function FloatingMessagesWidget() {
     setFloatingViewportConversation?.(null);
     setActiveMiniConvId(null);
     setIsOpen(false);
+    onCloseWidget?.();
     router.push('/messages');
   }
 
@@ -420,17 +505,16 @@ export function FloatingMessagesWidget() {
     setChatError(null);
     setChatNotice(null);
     setEditingTarget(null);
-    setEditDraftText('');
     setReplyingTarget(null);
     setPinnedListOpen(false);
     setTapSelectedMsg(null);
+    onCloseWidget?.();
   }
 
   function handleSelectMiniConversation(conv: ConversationSummaryDto) {
     setChatError(null);
     setChatNotice(null);
     setEditingTarget(null);
-    setEditDraftText('');
     setReplyingTarget(null);
     setPinnedListOpen(false);
     setTapSelectedMsg(null);
@@ -449,7 +533,6 @@ export function FloatingMessagesWidget() {
       messagePublicId: item.dto.public_id,
       clientMsgId: item.dto.clientMsgId,
     });
-    setEditDraftText(item.plaintext);
     setTapSelectedMsg(null);
     setTimeout(() => {
       composerInputRef.current?.focus();
@@ -462,7 +545,6 @@ export function FloatingMessagesWidget() {
     }
     setChatError(null);
     setEditingTarget(null);
-    setEditDraftText('');
     setReplyingTarget({
       conversationPublicId: activeMiniConversation.public_id,
       messagePublicId: item.dto.public_id,
@@ -637,7 +719,6 @@ export function FloatingMessagesWidget() {
 
   function handleCancelEditMessage() {
     setEditingTarget(null);
-    setEditDraftText('');
     setChatError(null);
   }
 
@@ -685,24 +766,22 @@ export function FloatingMessagesWidget() {
     }
   }
 
-  async function handleSendMessage(event?: React.FormEvent) {
-    event?.preventDefault();
+  async function handleSendMessage(rawSubmittedText: string): Promise<boolean> {
     if (!activeMiniConversation || !chatStore) {
-      return;
+      return false;
     }
-    const activeInputText = editingMessage ? editDraftText : draftText;
-    const textToSend = activeInputText.trim();
+    const textToSend = rawSubmittedText.trim();
     if (!textToSend) {
-      return;
+      return false;
     }
 
     if (editingMessage) {
       if (editSaving) {
-        return;
+        return false;
       }
       if (textToSend === editingMessage.plaintext.trim()) {
         handleCancelEditMessage();
-        return;
+        return true;
       }
       setEditSaving(true);
       setChatError(null);
@@ -713,19 +792,18 @@ export function FloatingMessagesWidget() {
           newPlaintext: textToSend,
         });
         setEditingTarget(null);
-        setEditDraftText('');
+        return true;
       } catch (error) {
         setChatError(
           error instanceof Error ? error.message : 'Không thể chỉnh sửa tin nhắn lúc này.',
         );
+        return false;
       } finally {
         setEditSaving(false);
       }
-      return;
     }
 
     const replyPayload = replyingMessage ? buildReplyPayloadFromMessage(replyingMessage) : null;
-    setDraftText('');
     setReplyingTarget(null);
     setChatError(null);
     try {
@@ -734,10 +812,12 @@ export function FloatingMessagesWidget() {
         plaintext: textToSend,
         replyTo: replyPayload,
       });
+      return true;
     } catch (error) {
       setChatError(
         error instanceof Error ? error.message : 'Không thể gửi tin nhắn. Vui lòng thử lại.',
       );
+      return true;
     }
   }
 
@@ -980,10 +1060,20 @@ export function FloatingMessagesWidget() {
                 {/* Danh sách hội thoại */}
                 <div className="relative flex-1 overflow-y-auto">
                   {loadingConversations ? (
-                    <div className="flex items-center justify-center gap-2 py-14 text-xs text-muted-foreground">
-                      <Loader2 className="size-4 animate-spin text-primary" aria-hidden="true" />
-                      <span>Đang tải hộp thư...</span>
-                    </div>
+                    <ul role="status" aria-label="Đang tải hộp thư" className="divide-y pb-14">
+                      {Array.from({ length: 5 }, (_, idx) => (
+                        <li key={idx} className="flex h-[58px] items-center gap-3 px-3.5 py-2.5">
+                          <span className="size-8 shrink-0 animate-pulse rounded-full bg-muted" />
+                          <div className="min-w-0 flex-1 space-y-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="h-3 w-24 animate-pulse rounded bg-muted" />
+                              <span className="h-2.5 w-8 animate-pulse rounded bg-muted/70" />
+                            </div>
+                            <span className="block h-2.5 w-36 max-w-full animate-pulse rounded bg-muted/70" />
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   ) : conversations.length === 0 ? (
                     <div className="px-6 py-14 text-center">
                       <div className="mx-auto flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -1450,8 +1540,7 @@ export function FloatingMessagesWidget() {
                         compact
                         canSendMedia={activeMiniConversation.canSendMedia}
                         canSendMoreMessages={activeMiniConversation.canSendMoreMessages}
-                        draftText={draftText}
-                        editDraftText={editDraftText}
+                        editingMessageKey={editingMessage?.dto.public_id ?? null}
                         editingOriginalText={editingMessage?.plaintext ?? null}
                         editSaving={editSaving}
                         replyingTo={
@@ -1470,8 +1559,6 @@ export function FloatingMessagesWidget() {
                             : null
                         }
                         composerInputRef={composerInputRef}
-                        onChangeDraftText={setDraftText}
-                        onChangeEditDraftText={setEditDraftText}
                         onCancelEdit={handleCancelEditMessage}
                         onCancelReply={() => setReplyingTarget(null)}
                         onSubmitTextOrEdit={handleSendMessage}

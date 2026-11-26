@@ -129,7 +129,7 @@ export function MessageReactionPicker({
       aria-label="Chọn biểu tượng cảm xúc"
       style={{ top: `${coords.top}px`, left: `${coords.left}px` }}
       onClick={(event) => event.stopPropagation()}
-      className="fixed z-50 rounded-2xl border bg-background/95 p-1.5 shadow-xl backdrop-blur-sm"
+      className="fixed z-[60] rounded-2xl border bg-background/95 p-1.5 shadow-xl backdrop-blur-sm"
     >
       <div className="flex items-center gap-0.5">
         {QUICK_REACTION_EMOJIS.map((emoji) => {

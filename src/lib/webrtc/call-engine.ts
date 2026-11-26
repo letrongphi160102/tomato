@@ -148,6 +148,7 @@ export class PeerCallEngine {
   private readonly peerConnectionFactory: (config: RTCConfiguration) => RTCPeerConnection;
 
   private pc: RTCPeerConnection | null = null;
+  private videoSender: RTCRtpSender | null = null;
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
   private pendingOffers: string[] = [];
@@ -216,7 +217,10 @@ export class PeerCallEngine {
 
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) {
-        pc.addTrack(track, this.localStream);
+        const sender = pc.addTrack(track, this.localStream);
+        if (track.kind === 'video') {
+          this.videoSender = sender;
+        }
       }
     }
 
@@ -465,11 +469,36 @@ export class PeerCallEngine {
     return muted;
   }
 
+  private findVideoSender(): RTCRtpSender | null {
+    if (!this.pc) {
+      return null;
+    }
+    if (this.videoSender && this.pc.getSenders().includes(this.videoSender)) {
+      return this.videoSender;
+    }
+    const activeVideoSender = this.pc.getSenders().find((sender) => sender.track?.kind === 'video');
+    if (activeVideoSender) {
+      this.videoSender = activeVideoSender;
+      return activeVideoSender;
+    }
+    if (typeof this.pc.getTransceivers === 'function') {
+      const videoTransceiver = this.pc
+        .getTransceivers()
+        .find((t) => t.receiver?.track?.kind === 'video' && Boolean(t.sender));
+      if (videoTransceiver?.sender) {
+        this.videoSender = videoTransceiver.sender;
+        return videoTransceiver.sender;
+      }
+    }
+    return this.videoSender;
+  }
+
   /**
    * Bật/tắt camera trong lúc đang gọi:
-   * - Nếu đã có video track: bật/tắt `track.enabled` tức thì.
-   * - Nếu đang ở cuộc gọi thoại (chưa có video track) và bật camera: xin quyền camera,
-   *   gắn track vào `RTCPeerConnection` và gửi SDP Offer tái đàm phán (renegotiation).
+   * - Khi tắt camera (`enable = false`): gọi `sender.replaceTrack(null)` + `track.stop()` để tắt ngay đèn LED phần cứng,
+   *   tuyệt đối không chạm tới audio track, và gửi tín hiệu cập nhật chiều `recvonly` để máy đối phương chuyển mượt về avatar (0 khung hình đơ/đen).
+   * - Khi bật lại camera (`enable = true`): cấp track video mới, gắn lại qua `replaceTrack` (hoặc `addTrack` nếu nâng cấp từ gọi thoại)
+   *   và khôi phục chiều `sendrecv` mượt mà.
    */
   async setCameraEnabled(enable: boolean): Promise<{
     readonly enabled: boolean;
@@ -481,9 +510,44 @@ export class PeerCallEngine {
 
     const existingVideoTracks = this.localStream?.getVideoTracks() ?? [];
     if (!enable) {
+      const sender = this.findVideoSender();
+      if (sender) {
+        try {
+          await sender.replaceTrack(null);
+        } catch {
+          // Bỏ qua nếu kết nối đang đóng.
+        }
+      }
+
       for (const track of existingVideoTracks) {
         track.enabled = false;
+        try {
+          track.stop();
+        } catch {
+          // Bỏ qua nếu track đã dừng trước đó.
+        }
+        this.localStream?.removeTrack(track);
       }
+
+      if (this.localStream && typeof MediaStream !== 'undefined') {
+        const refreshed = new MediaStream(this.localStream.getTracks());
+        this.localStream = refreshed;
+        this.callbacks.onLocalStreamChanged(refreshed);
+      }
+
+      if (this.pc && sender && typeof this.pc.getTransceivers === 'function') {
+        const transceiver = this.pc.getTransceivers().find((t) => t.sender === sender);
+        if (
+          transceiver &&
+          (transceiver.direction === 'sendrecv' || transceiver.direction === 'sendonly')
+        ) {
+          transceiver.direction = transceiver.direction === 'sendonly' ? 'inactive' : 'recvonly';
+          if (this.pc.signalingState === 'stable') {
+            await this.createAndSendOffer();
+          }
+        }
+      }
+
       return { enabled: false };
     }
 
@@ -502,7 +566,7 @@ export class PeerCallEngine {
       return { enabled: true };
     }
 
-    // Nâng cấp từ gọi thoại -> gọi video bằng cách lấy video track mới và tái đàm phán.
+    // Nâng cấp từ gọi thoại -> gọi video hoặc bật lại camera sau khi đã dừng phần cứng.
     if (
       typeof navigator === 'undefined' ||
       !navigator.mediaDevices ||
@@ -534,7 +598,7 @@ export class PeerCallEngine {
         this.localStream = new MediaStream();
       }
       if (this.localStream) {
-        // Loại bỏ track video cũ đã ended (nếu có) trước khi thêm track mới.
+        // Chỉ loại bỏ các video track cũ đã ended, tuyệt đối giữ nguyên audio track đang nói chuyện.
         for (const oldTrack of this.localStream.getVideoTracks()) {
           oldTrack.stop();
           this.localStream.removeTrack(oldTrack);
@@ -549,13 +613,27 @@ export class PeerCallEngine {
       }
 
       if (this.pc) {
-        const existingVideoSender = this.pc
-          .getSenders()
-          .find((sender) => sender.track?.kind === 'video');
+        const existingVideoSender = this.findVideoSender();
         if (existingVideoSender) {
+          this.videoSender = existingVideoSender;
           await existingVideoSender.replaceTrack(newVideoTrack);
+          if (typeof this.pc.getTransceivers === 'function') {
+            const transceiver = this.pc
+              .getTransceivers()
+              .find((t) => t.sender === existingVideoSender);
+            if (
+              transceiver &&
+              (transceiver.direction === 'recvonly' || transceiver.direction === 'inactive')
+            ) {
+              transceiver.direction =
+                transceiver.direction === 'inactive' ? 'sendonly' : 'sendrecv';
+              if (this.pc.signalingState === 'stable') {
+                await this.createAndSendOffer();
+              }
+            }
+          }
         } else if (this.localStream) {
-          this.pc.addTrack(newVideoTrack, this.localStream);
+          this.videoSender = this.pc.addTrack(newVideoTrack, this.localStream);
           await this.createAndSendOffer();
         }
       }
@@ -574,6 +652,7 @@ export class PeerCallEngine {
       return;
     }
     this.destroyed = true;
+    this.videoSender = null;
     this.pendingOffers = [];
     this.pendingIceCandidates = [];
 
@@ -588,6 +667,7 @@ export class PeerCallEngine {
       }
       this.pc = null;
     }
+    this.videoSender = null;
 
     stopAllMediaStreamTracks(this.localStream);
     stopAllMediaStreamTracks(this.remoteStream);

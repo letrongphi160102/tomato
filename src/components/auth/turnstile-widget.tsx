@@ -171,11 +171,11 @@ export function TurnstileWidget({
       <div
         ref={containerRef}
         className="flex min-h-[65px] items-center justify-center rounded-md border border-dashed border-border/70 bg-muted/20 p-2"
-        aria-label="Xác thực bảo mật Cloudflare Turnstile"
+        aria-label="Xác nhận bảo mật"
       />
       {loadState === 'loading' ? (
         <p className="text-xs text-muted-foreground" aria-live="polite">
-          Đang tải hộp xác thực chống bot Cloudflare Turnstile...
+          Đang tải bước xác nhận bảo mật...
         </p>
       ) : null}
       {loadState === 'error' ? (
@@ -184,7 +184,7 @@ export function TurnstileWidget({
           className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive"
         >
           <span>
-            Không thể tải Cloudflare Turnstile. Kiểm tra kết nối mạng hoặc trình chặn quảng cáo.
+            Không thể tải bước xác nhận bảo mật. Kiểm tra kết nối mạng hoặc trình chặn nội dung.
           </span>
           <Button
             type="button"

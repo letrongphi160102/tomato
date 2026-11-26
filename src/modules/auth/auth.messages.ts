@@ -91,8 +91,8 @@ export const AUTH_MESSAGES = Object.freeze({
   dateOfBirthUnderage: 'Bạn phải đủ từ 13 tuổi trở lên để đăng ký tài khoản TOMATO.',
   dateOfBirthOutOfRange: 'Ngày sinh nằm ngoài phạm vi hợp lệ.',
   termsRequired: 'Bạn cần đồng ý với Điều khoản sử dụng và Chính sách quyền riêng tư để tiếp tục.',
-  captchaRequired: 'Vui lòng hoàn thành bước xác thực bảo mật Cloudflare Turnstile.',
-  captchaInvalid: 'Xác thực chống bot không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.',
+  captchaRequired: 'Vui lòng hoàn thành bước xác nhận bảo mật.',
+  captchaInvalid: 'Bước xác nhận bảo mật không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.',
   otpFormatInvalid: 'Mã xác minh phải gồm đúng 6 chữ số.',
 
   // Lỗi xác minh OTP

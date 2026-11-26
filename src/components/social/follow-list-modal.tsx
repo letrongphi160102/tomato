@@ -48,6 +48,7 @@ function FollowListDialogBody({
   const [confirmRemoveTarget, setConfirmRemoveTarget] =
     React.useState<SocialUserListItemDto | null>(null);
   const [removingFollower, setRemovingFollower] = React.useState(false);
+  const loadMoreControllerRef = React.useRef<AbortController | null>(null);
   const [removeError, setRemoveError] = React.useState<string | null>(null);
 
   const trimmedQuery = query.trim();
@@ -115,6 +116,8 @@ function FollowListDialogBody({
     return () => {
       window.clearTimeout(timer);
       controller.abort();
+      loadMoreControllerRef.current?.abort();
+      loadMoreControllerRef.current = null;
     };
   }, [endpointBase, trimmedQuery]);
 
@@ -122,6 +125,10 @@ function FollowListDialogBody({
     if (!nextCursor || loadingMore) {
       return;
     }
+    loadMoreControllerRef.current?.abort();
+    const controller = new AbortController();
+    loadMoreControllerRef.current = controller;
+
     setLoadingMore(true);
     setErrorMessage(null);
     try {
@@ -129,7 +136,13 @@ function FollowListDialogBody({
       if (trimmedQuery.length > 0) {
         params.set('q', trimmedQuery);
       }
-      const response = await authFetch(`${endpointBase}?${params.toString()}`, { method: 'GET' });
+      const response = await authFetch(`${endpointBase}?${params.toString()}`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) {
+        return;
+      }
       if (!response.ok) {
         setErrorMessage('Không thể tải thêm danh sách. Vui lòng thử lại.');
         return;
@@ -138,6 +151,9 @@ function FollowListDialogBody({
         readonly items?: SocialUserListItemDto[];
         readonly nextCursor?: string | null;
       };
+      if (controller.signal.aborted) {
+        return;
+      }
       const incoming = Array.isArray(data.items) ? data.items : [];
       setItems((prev) => {
         const seen = new Set(prev.map((item) => item.public_id));
@@ -152,9 +168,16 @@ function FollowListDialogBody({
       });
       setNextCursor(typeof data.nextCursor === 'string' ? data.nextCursor : null);
     } catch {
-      setErrorMessage('Không thể kết nối. Vui lòng thử lại.');
+      if (!controller.signal.aborted) {
+        setErrorMessage('Không thể kết nối. Vui lòng thử lại.');
+      }
     } finally {
-      setLoadingMore(false);
+      if (loadMoreControllerRef.current === controller) {
+        loadMoreControllerRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setLoadingMore(false);
+      }
     }
   }
 
