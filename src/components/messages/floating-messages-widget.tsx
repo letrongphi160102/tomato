@@ -44,6 +44,11 @@ import {
   type PinBackupModalMode,
 } from '@/components/messages/pin-backup-modal';
 import { PinnedMessagesBar } from '@/components/messages/pinned-messages-bar';
+import {
+  createConversationScrollTracker,
+  evaluateConversationAutoScroll,
+  hasCompletedInitialConversationScroll,
+} from '@/components/messages/scroll-position';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
@@ -132,9 +137,7 @@ export function FloatingMessagesWidget({
   const composerInputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const noticeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const highlightTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isNearBottomRef = React.useRef(true);
-  const lastScrolledConvIdRef = React.useRef<string | null>(null);
-  const lastBottomItemKeyRef = React.useRef<string | null>(null);
+  const scrollTrackerRef = React.useRef(createConversationScrollTracker<HTMLDivElement>());
   const scrollAnchorRef = React.useRef<{
     readonly convId: string;
     readonly prevScrollHeight: number;
@@ -233,16 +236,25 @@ export function FloatingMessagesWidget({
     refreshOwnE2eeStatus,
   ]);
 
-  // Scroll Anchoring khi tải tin nhắn cũ (`beforeSeq`) + Cuộn thông minh xuống đáy khi mở đoạn chat hoặc gửi/nhận tin mới.
+  // Scroll Anchoring khi tải tin nhắn cũ (`beforeSeq`) + Cuộn thông minh xuống đáy khi mở/mở lại đoạn chat hoặc gửi/nhận tin mới.
   React.useLayoutEffect(() => {
     const container = messagesContainerRef.current;
-    if (!container || !activeMiniConversation || !isOpen) {
+    const convId = activeMiniConversation?.public_id ?? null;
+
+    if (!container || !activeMiniConversation || !convId || !isOpen) {
+      evaluateConversationAutoScroll(scrollTrackerRef.current, {
+        convId: null,
+        container: null,
+        isViewportOpen: false,
+        hasInitialized: false,
+        latestMessageClientId: null,
+        isLatestOwnMessage: false,
+      });
+      scrollAnchorRef.current = null;
       return;
     }
 
-    const convId = activeMiniConversation.public_id;
     const anchor = scrollAnchorRef.current;
-
     if (anchor && anchor.convId === convId && messages.length > anchor.prevCount) {
       const heightDiff = container.scrollHeight - anchor.prevScrollHeight;
       container.scrollTop = anchor.prevScrollTop + heightDiff;
@@ -251,24 +263,17 @@ export function FloatingMessagesWidget({
     }
 
     const latestItem = messages[messages.length - 1];
-    const latestKey = latestItem ? `${convId}:${latestItem.dto.clientMsgId}` : `${convId}:empty`;
+    const decision = evaluateConversationAutoScroll(scrollTrackerRef.current, {
+      convId,
+      container,
+      isViewportOpen: isOpen,
+      hasInitialized: Boolean(activeThread?.hasInitialized),
+      latestMessageClientId: latestItem?.dto.clientMsgId ?? null,
+      isLatestOwnMessage: Boolean(latestItem?.dto.isOwnMessage),
+    });
 
-    if (lastScrolledConvIdRef.current !== convId) {
-      if (activeThread?.hasInitialized) {
-        container.scrollTop = container.scrollHeight;
-        isNearBottomRef.current = true;
-        lastScrolledConvIdRef.current = convId;
-        lastBottomItemKeyRef.current = latestKey;
-      }
-      return;
-    }
-
-    if (lastBottomItemKeyRef.current !== latestKey) {
-      lastBottomItemKeyRef.current = latestKey;
-      if (latestItem?.dto.isOwnMessage || isNearBottomRef.current) {
-        container.scrollTop = container.scrollHeight;
-        isNearBottomRef.current = true;
-      }
+    if (decision === 'scroll_to_bottom') {
+      container.scrollTop = container.scrollHeight;
     }
   }, [activeMiniConversation, activeThread?.hasInitialized, isOpen, messages]);
 
@@ -278,9 +283,14 @@ export function FloatingMessagesWidget({
       return;
     }
 
+    const convId = activeMiniConversation.public_id;
+    if (!hasCompletedInitialConversationScroll(scrollTrackerRef.current, convId, container)) {
+      return;
+    }
+
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    isNearBottomRef.current = distanceFromBottom <= 120;
+    scrollTrackerRef.current.isNearBottom = distanceFromBottom <= 120;
 
     if (
       container.scrollTop <= 56 &&
@@ -289,12 +299,12 @@ export function FloatingMessagesWidget({
       !scrollAnchorRef.current
     ) {
       scrollAnchorRef.current = {
-        convId: activeMiniConversation.public_id,
+        convId,
         prevScrollHeight: container.scrollHeight,
         prevScrollTop: container.scrollTop,
         prevCount: messages.length,
       };
-      void chatStore.loadOlderMessages(activeMiniConversation.public_id).then((added) => {
+      void chatStore.loadOlderMessages(convId).then((added) => {
         if (!added) {
           scrollAnchorRef.current = null;
         }
@@ -913,7 +923,7 @@ export function FloatingMessagesWidget({
           <section
             role="dialog"
             aria-label="Cửa sổ tin nhắn thu gọn"
-            className="flex h-[520px] max-h-[calc(100vh-5.5rem)] w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl sm:w-[368px]"
+            className="flex h-[520px] max-h-[calc(100dvh-5.5rem)] w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl sm:w-[368px]"
           >
             {needsMandatoryPinCreate && currentUserPublicId ? (
               <>
@@ -1570,7 +1580,7 @@ export function FloatingMessagesWidget({
                             ? buildReplyPayloadFromMessage(replyingMessage)
                             : null;
                           setReplyingTarget(null);
-                          isNearBottomRef.current = true;
+                          scrollTrackerRef.current.isNearBottom = true;
                           await chatStore.sendOptimisticImageMessage({
                             conversation: activeMiniConversation,
                             file,
@@ -1585,7 +1595,7 @@ export function FloatingMessagesWidget({
                             ? buildReplyPayloadFromMessage(replyingMessage)
                             : null;
                           setReplyingTarget(null);
-                          isNearBottomRef.current = true;
+                          scrollTrackerRef.current.isNearBottom = true;
                           await chatStore.sendOptimisticVoiceMessage({
                             conversation: activeMiniConversation,
                             audioBlob: recorded.audioBlob,

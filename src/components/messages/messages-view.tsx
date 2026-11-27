@@ -42,6 +42,11 @@ import {
 } from '@/components/messages/message-grouping';
 import type { PinBackupModalMode } from '@/components/messages/pin-backup-modal';
 import { PinnedMessagesBar } from '@/components/messages/pinned-messages-bar';
+import {
+  createConversationScrollTracker,
+  evaluateConversationAutoScroll,
+  hasCompletedInitialConversationScroll,
+} from '@/components/messages/scroll-position';
 import { UserAvatar } from '@/components/profile/user-avatar';
 import { useRealtimePresence } from '@/components/realtime/realtime-presence-context';
 import { ConfirmDialog } from '@/components/social/confirm-dialog';
@@ -141,9 +146,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
   const highlightTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const handledToParamRef = React.useRef<string | null>(null);
   const handledConvParamRef = React.useRef<string | null>(null);
-  const isNearBottomRef = React.useRef(true);
-  const lastScrolledConvIdRef = React.useRef<string | null>(null);
-  const lastBottomItemKeyRef = React.useRef<string | null>(null);
+  const scrollTrackerRef = React.useRef(createConversationScrollTracker<HTMLDivElement>());
   const scrollAnchorRef = React.useRef<{
     readonly convId: string;
     readonly prevScrollHeight: number;
@@ -383,14 +386,24 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     };
   }, [hasOwnRecentMessage]);
 
-  // Giữ nguyên vị trí cuộn (Scroll Anchoring) khi nạp tin nhắn cũ lên đầu + Cuộn thông minh khi có tin mới.
+  // Giữ nguyên vị trí cuộn (Scroll Anchoring) khi nạp tin nhắn cũ lên đầu + Cuộn thông minh khi mở/mở lại đoạn chat hoặc có tin mới.
   React.useLayoutEffect(() => {
     const container = messagesContainerRef.current;
-    if (!container || !selectedConversation) {
+    const convId = selectedConversation?.public_id ?? null;
+
+    if (!container || !selectedConversation || !convId) {
+      evaluateConversationAutoScroll(scrollTrackerRef.current, {
+        convId: null,
+        container: null,
+        isViewportOpen: false,
+        hasInitialized: false,
+        latestMessageClientId: null,
+        isLatestOwnMessage: false,
+      });
+      scrollAnchorRef.current = null;
       return;
     }
 
-    const convId = selectedConversation.public_id;
     const anchor = scrollAnchorRef.current;
 
     // 1. Scroll Anchoring khi chèn thêm trang tin nhắn cũ hơn (`beforeSeq`) lên đầu danh sách.
@@ -402,27 +415,17 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     }
 
     const latestItem = messages[messages.length - 1];
-    const latestKey = latestItem ? `${convId}:${latestItem.dto.clientMsgId}` : `${convId}:empty`;
+    const decision = evaluateConversationAutoScroll(scrollTrackerRef.current, {
+      convId,
+      container,
+      isViewportOpen: true,
+      hasInitialized: Boolean(activeThread?.hasInitialized),
+      latestMessageClientId: latestItem?.dto.clientMsgId ?? null,
+      isLatestOwnMessage: Boolean(latestItem?.dto.isOwnMessage),
+    });
 
-    // 2. Khi vừa mở cuộc trò chuyện: đặt ngay ở vị trí cuối cùng của cuộc trò chuyện.
-    if (lastScrolledConvIdRef.current !== convId) {
-      if (activeThread?.hasInitialized) {
-        container.scrollTop = container.scrollHeight;
-        isNearBottomRef.current = true;
-        lastScrolledConvIdRef.current = convId;
-        lastBottomItemKeyRef.current = latestKey;
-      }
-      return;
-    }
-
-    // 3. Khi có tin nhắn mới thêm vào đáy: chỉ tự cuộn xuống đáy nếu người dùng tự gửi tin
-    //    HOẶC người dùng đang đứng ở gần đáy (`<= 120px`). Tuyệt đối không kéo xuống đáy khi đang đọc tin cũ ở trên.
-    if (lastBottomItemKeyRef.current !== latestKey) {
-      lastBottomItemKeyRef.current = latestKey;
-      if (latestItem?.dto.isOwnMessage || isNearBottomRef.current) {
-        container.scrollTop = container.scrollHeight;
-        isNearBottomRef.current = true;
-      }
+    if (decision === 'scroll_to_bottom') {
+      container.scrollTop = container.scrollHeight;
     }
   }, [activeThread?.hasInitialized, messages, selectedConversation]);
 
@@ -432,9 +435,14 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       return;
     }
 
+    const convId = selectedConversation.public_id;
+    if (!hasCompletedInitialConversationScroll(scrollTrackerRef.current, convId, container)) {
+      return;
+    }
+
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    isNearBottomRef.current = distanceFromBottom <= 120;
+    scrollTrackerRef.current.isNearBottom = distanceFromBottom <= 120;
 
     if (
       container.scrollTop <= 64 &&
@@ -443,12 +451,12 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
       !scrollAnchorRef.current
     ) {
       scrollAnchorRef.current = {
-        convId: selectedConversation.public_id,
+        convId,
         prevScrollHeight: container.scrollHeight,
         prevScrollTop: container.scrollTop,
         prevCount: messages.length,
       };
-      void chatStore.loadOlderMessages(selectedConversation.public_id).then((added) => {
+      void chatStore.loadOlderMessages(convId).then((added) => {
         if (!added) {
           scrollAnchorRef.current = null;
         }
@@ -776,7 +784,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
     setChatError(null);
     const replyPayload = replyingMessage ? buildReplyPayloadFromMessage(replyingMessage) : null;
     setReplyingTarget(null);
-    isNearBottomRef.current = true;
+    scrollTrackerRef.current.isNearBottom = true;
 
     try {
       await chatStore.sendOptimisticTextMessage({
@@ -906,7 +914,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
 
   return (
     <TooltipProvider delayDuration={180}>
-      <div className="flex h-[calc(100vh-7.5rem)] min-h-[540px] overflow-hidden rounded-2xl border bg-background shadow-sm">
+      <div className="flex h-[calc(100dvh-10rem-2px)] min-h-0 overflow-hidden rounded-2xl border bg-background shadow-sm md:h-[calc(100dvh-7.5rem-2px)]">
         {/* Cột trái: Danh sách hội thoại & 2 Tab Chính / Tin nhắn đang chờ */}
         <section
           aria-label="Danh sách tin nhắn"
@@ -1577,7 +1585,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                             ? buildReplyPayloadFromMessage(replyingMessage)
                             : null;
                           setReplyingTarget(null);
-                          isNearBottomRef.current = true;
+                          scrollTrackerRef.current.isNearBottom = true;
                           await chatStore.sendOptimisticImageMessage({
                             conversation: selectedConversation,
                             file,
@@ -1592,7 +1600,7 @@ export function MessagesView({ currentUserPublicId, currentUserHandle }: Message
                             ? buildReplyPayloadFromMessage(replyingMessage)
                             : null;
                           setReplyingTarget(null);
-                          isNearBottomRef.current = true;
+                          scrollTrackerRef.current.isNearBottom = true;
                           await chatStore.sendOptimisticVoiceMessage({
                             conversation: selectedConversation,
                             audioBlob: recorded.audioBlob,

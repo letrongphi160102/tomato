@@ -35,13 +35,13 @@ export function AppShell({
     >
       <ChatStoreProvider currentUserPublicId={user.public_id}>
         <CallProvider currentUserPublicId={user.public_id}>
-          <div className="min-h-screen bg-muted/30">
+          <div className="flex min-h-dvh flex-col bg-muted/30">
             <AppTopBar
               user={user}
               avatarUrl={profile?.avatarUrl ?? null}
               handle={profile?.handle ?? user.username}
             />
-            <div className="flex min-h-[calc(100vh-3.5rem)]">
+            <div className="flex flex-1">
               <AppLeftSidebar />
               {/* Cột giữ chỗ cố định 72px trên Desktop để chống giật bố cục (Zero Layout Shift) khi Sidebar trượt mở rộng */}
               <div className="hidden w-[72px] shrink-0 md:block" aria-hidden="true" />

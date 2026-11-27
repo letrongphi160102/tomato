@@ -14,6 +14,11 @@ import {
   type DecryptedMessageViewItem,
 } from '@/components/messages/chat-store-context';
 import {
+  createConversationScrollTracker,
+  evaluateConversationAutoScroll,
+  hasCompletedInitialConversationScroll,
+} from '@/components/messages/scroll-position';
+import {
   clearE2eeClientBootstrapState,
   clearMemoryKeystoreForTesting,
   decryptDirectMessage,
@@ -514,5 +519,100 @@ describe('Phase 2 System & UI Audit Optimizations — Unit Guards', () => {
       const content = readFileSync(join(process.cwd(), relPath), 'utf8');
       expect(content, `${relPath} phải dùng z-[70]`).toContain('z-[70]');
     }
+  });
+
+  it('cuộn xuống đáy tin nhắn mới nhất khi vào đoạn chat -> bấm Quay lại (<-) -> vào lại chính đoạn chat đó, và khóa tràn chiều cao /messages', () => {
+    const tracker = createConversationScrollTracker<{ readonly id: string }>();
+    const domMount1 = { id: 'div-mount-1' };
+    const domMount2 = { id: 'div-mount-2' };
+    const domMount3 = { id: 'div-mount-3' };
+
+    // 1. Lần đầu mở đoạn chat A -> cuộn xuống đáy.
+    expect(hasCompletedInitialConversationScroll(tracker, 'conv_a', domMount1)).toBe(false);
+    expect(
+      evaluateConversationAutoScroll(tracker, {
+        convId: 'conv_a',
+        container: domMount1,
+        isViewportOpen: true,
+        hasInitialized: true,
+        latestMessageClientId: 'msg_25',
+        isLatestOwnMessage: false,
+      }),
+    ).toBe('scroll_to_bottom');
+    expect(hasCompletedInitialConversationScroll(tracker, 'conv_a', domMount1)).toBe(true);
+
+    // Render lại trên cùng đoạn chat A và không có tin mới -> giữ nguyên vị trí người dùng đang xem.
+    expect(
+      evaluateConversationAutoScroll(tracker, {
+        convId: 'conv_a',
+        container: domMount1,
+        isViewportOpen: true,
+        hasInitialized: true,
+        latestMessageClientId: 'msg_25',
+        isLatestOwnMessage: false,
+      }),
+    ).toBe('none');
+
+    // 2. Chuyển sang đoạn chat B -> cuộn xuống đáy.
+    expect(
+      evaluateConversationAutoScroll(tracker, {
+        convId: 'conv_b',
+        container: domMount1,
+        isViewportOpen: true,
+        hasInitialized: true,
+        latestMessageClientId: 'msg_10',
+        isLatestOwnMessage: false,
+      }),
+    ).toBe('scroll_to_bottom');
+
+    // 3. Bấm Quay lại (<-) về danh sách (`convId = null`, `container = null`) -> rồi bấm lại vào chính đoạn chat B!
+    expect(
+      evaluateConversationAutoScroll(tracker, {
+        convId: null,
+        container: null,
+        isViewportOpen: true,
+        hasInitialized: false,
+        latestMessageClientId: null,
+        isLatestOwnMessage: false,
+      }),
+    ).toBe('none');
+    expect(hasCompletedInitialConversationScroll(tracker, 'conv_b', domMount2)).toBe(false);
+
+    expect(
+      evaluateConversationAutoScroll(tracker, {
+        convId: 'conv_b',
+        container: domMount2,
+        isViewportOpen: true,
+        hasInitialized: true,
+        latestMessageClientId: 'msg_10',
+        isLatestOwnMessage: false,
+      }),
+    ).toBe('scroll_to_bottom');
+
+    // 4. Ngay cả khi React gộp batch không qua bước null nhưng thẻ DOM container remount (`domMount3 !== domMount2`) -> vẫn cuộn xuống đáy!
+    expect(
+      evaluateConversationAutoScroll(tracker, {
+        convId: 'conv_b',
+        container: domMount3,
+        isViewportOpen: true,
+        hasInitialized: true,
+        latestMessageClientId: 'msg_10',
+        isLatestOwnMessage: false,
+      }),
+    ).toBe('scroll_to_bottom');
+
+    // 5. Đảm bảo AppShell dùng flex-col min-h-dvh và MessagesView không còn ép cứng min-h-[540px] gây thanh cuộn ngoài trên laptop.
+    const appShellSource = readFileSync(
+      join(process.cwd(), 'src/components/layout/app-shell.tsx'),
+      'utf8',
+    );
+    const messagesViewSource = readFileSync(
+      join(process.cwd(), 'src/components/messages/messages-view.tsx'),
+      'utf8',
+    );
+    expect(appShellSource).toContain('min-h-dvh');
+    expect(appShellSource).not.toContain('min-h-[calc(100vh-3.5rem)]');
+    expect(messagesViewSource).not.toContain('min-h-[540px]');
+    expect(messagesViewSource).toContain('100dvh');
   });
 });
