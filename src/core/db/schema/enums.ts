@@ -100,3 +100,22 @@ export const CALL_STATUSES = [
 export type CallStatus = (typeof CALL_STATUSES)[number];
 
 export const callStatusEnum = pgEnum('call_status', CALL_STATUSES);
+
+export const SUDOKU_DIFFICULTY_VALUES = [
+  'easy',
+  'medium',
+  'hard',
+  'expert',
+  'master',
+  'extreme',
+] as const;
+
+export type SudokuDifficultyValue = (typeof SUDOKU_DIFFICULTY_VALUES)[number];
+
+export const sudokuDifficultyEnum = pgEnum('sudoku_difficulty', SUDOKU_DIFFICULTY_VALUES);
+
+export const SUDOKU_GAME_STATUSES = ['in_progress', 'completed', 'failed', 'abandoned'] as const;
+
+export type SudokuGameStatus = (typeof SUDOKU_GAME_STATUSES)[number];
+
+export const sudokuGameStatusEnum = pgEnum('sudoku_game_status', SUDOKU_GAME_STATUSES);

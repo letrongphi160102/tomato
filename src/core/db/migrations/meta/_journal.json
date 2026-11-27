@@ -92,6 +92,13 @@
       "when": 1795711407003,
       "tag": "0012_add_messages_conv_sender_seq_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1795746869606,
+      "tag": "0013_add_sudoku_games_and_records_rls",
+      "breakpoints": true
     }
   ]
 }

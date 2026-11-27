@@ -449,16 +449,17 @@ export function revokeMediaObjectUrlsByConversationId(
 }
 
 /**
- * Nút nổi & Cửa sổ Tin nhắn Thu gọn góc dưới bên phải CHỈ hiển thị tại:
+ * Nút nổi & Cửa sổ Tin nhắn Thu gọn góc dưới bên phải hiển thị tại:
  * - Trang chủ (`/`)
  * - Trang cá nhân (`/u/[handle]`)
+ * - Khu vực Trò chơi (`/games` và `/games/sudoku`) để vừa chơi vừa trả lời tin nhắn
  * Tự động ẩn hoàn toàn tại `/messages`, `/settings/*` và các trang khác.
  */
 export function shouldRenderFloatingMessagesWidget(pathname: string | null | undefined): boolean {
   if (!pathname) {
     return false;
   }
-  return pathname === '/' || pathname.startsWith('/u/');
+  return pathname === '/' || pathname.startsWith('/u/') || pathname.startsWith('/games');
 }
 
 export interface AutoMarkConversationReadCheckParams {
@@ -477,7 +478,7 @@ export interface AutoMarkConversationReadCheckParams {
  * Khóa chặt 4 điều kiện bắt buộc trước khi tự động gửi `POST /api/v1/conversations/[id]/read`:
  * (a) Người dùng đang thực sự mở đoạn chat đó ở một trong hai nơi:
  *     - (a1) Trang `/messages` đang mount (`pathname.startsWith('/messages') && isMessagesViewportActive`), HOẶC
- *     - (a2) Cửa sổ Tin nhắn nổi trên `/` hoặc `/u/[handle]` đang mở ở màn hình trò chuyện của đúng đoạn chat đó
+ *     - (a2) Cửa sổ Tin nhắn nổi trên `/`, `/u/[handle]` hoặc `/games/*` đang mở ở màn hình trò chuyện của đúng đoạn chat đó
  *            (`floatingActiveConversationPublicId === targetConversationPublicId`).
  * (b) Đoạn chat đó thuộc hộp thư `Chính` (`primary`).
  * (c) Tab trình duyệt đang hiển thị (`visible`) và cửa sổ đang có tiêu điểm (`windowHasFocus !== false`).

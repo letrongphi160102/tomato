@@ -8,31 +8,32 @@ description: 'Quy chuẩn UI/UX thương mại 0% thuật ngữ kỹ thuật, Ap
 
 ## 1. Luật Bất Biến Giao Diện Thương Mại (0% Thuật Ngữ Kỹ Thuật)
 
-- Bố cục tinh gọn, khoảng trắng thoáng, phản hồi tức thì (Optimistic UI) lấy cảm hứng từ Instagram & Messenger.
-- **TUYỆT ĐỐI KHÔNG hiển thị thuật ngữ kỹ thuật, mật mã hay nhãn nội bộ** lên giao diện (_E2EE, AES-256-GCM, ECDH, ECDSA, PBKDF2, ciphertext, WebRTC, DTLS-SRTP, STUN/TURN, BOLA, IDOR, RLS, Drizzle, Redis TTL, Giai đoạn 1/2, Cột mốc M0–M13..._). Chỉ dùng tiếng Việt phổ thông tự nhiên (_"Tin nhắn được bảo vệ riêng tư"_, _"Mã PIN đồng bộ tin nhắn"_, _"Mã an toàn"_).
-- Không đặt nút dev trên Production; không thêm banner cookie/GDPR hay trang pháp lý ngoài phạm vi.
+- Bố cục tinh gọn, thoáng, phản hồi tức thì (Optimistic UI) chuẩn Instagram & Messenger; không đặt nút dev hay banner GDPR.
+- **CẤM hiển thị thuật ngữ kỹ thuật, mật mã, tên nhà cung cấp hạ tầng hay nhãn nội bộ** trên UI và `aria-label` (_E2EE, AES-256-GCM, ECDH, ECDSA, PBKDF2, ciphertext, WebRTC, DTLS-SRTP, STUN/TURN, Cloudflare Turnstile, chống bot, Ably, Upstash, Vercel Blob, BOLA, IDOR, RLS, Drizzle, Giai đoạn 1/2, M0–M13..._). Dùng tiếng Việt tự nhiên (_"Xác nhận bảo mật"_, _"Tin nhắn được bảo vệ riêng tư"_, _"Mã PIN đồng bộ tin nhắn"_, _"Mã an toàn"_).
 
-## 2. Kiến Trúc `AppShell`, `ChatStoreProvider` & Phiên Client
+## 2. `AppShell`, Khung Nhìn `100dvh`, Cuộn Chat & `ChatStoreProvider`
 
-- `src/app/(dashboard)/layout.tsx` kiểm tra phiên SSR qua `resolveServerAuthState()` (`src/modules/auth/server-session.ts`), dùng `SilentSessionGate` khi `needs_refresh` và bọc trang trong `AppShell` (`src/components/layout/app-shell.tsx`).
-- Giữ đúng thứ tự Provider trong `AppShell`: `RealtimePresenceProvider` → `ChatStoreProvider` (`src/components/messages/chat-store-provider.tsx`) → `CallProvider` (`src/components/calls/call-provider.tsx`), kèm `AppTopBar`, `AppLeftSidebar` (giữ cột đệm `w-[72px]` trên desktop chống Layout Shift) và `FloatingMessagesWidget` (`src/components/messages/floating-messages-widget.tsx` — kiểm tra qua `shouldRenderFloatingMessagesWidget(pathname)`).
-- Trang `/messages` và `FloatingMessagesWidget` dùng chung `useChatStore()` (LRU RAM cache). Khi đăng xuất/đổi tài khoản, bắt buộc gọi `clearChatRamMemorySingleton()` và `clearE2eeClientBootstrapState()`.
-- Mọi lời gọi API cần phiên hoặc thay đổi dữ liệu phải qua `authFetch` (`src/lib/auth-client.ts`) để tự đính `X-CSRF-Token` và chạy single-flight proactive refresh. **Cấm lưu token/PII vào `localStorage` hay `sessionStorage`** (chỉ lưu mốc `tomato_auth_at_freshness_v1`).
+- Mọi trang sau đăng nhập (gồm Trang chủ `src/app/(dashboard)/page.tsx`, không tạo lại `src/app/page.tsx`) đặt chung dưới `src/app/(dashboard)/layout.tsx` (`resolveServerAuthState()` bọc `React.cache`, `SilentSessionGate`, `/` chưa đăng nhập chuyển thẳng `/login` không kèm `?next=%2F`) để chuyển trang không làm ngắt Realtime hay rớt cuộc gọi.
+- Thứ tự Provider trong `AppShell` (`flex min-h-dvh flex-col` + thân `flex-1`): `RealtimePresenceProvider` → `ChatStoreProvider` → `CallProvider`, kèm `AppTopBar`, `AppLeftSidebar` (đệm `w-[72px]` desktop) và `FloatingMessagesLauncher` (tách `next/dynamic` cho `FloatingMessagesWidget`).
+- **Khung `100dvh`, Thang `z-index` & Cuộn tự động**:
+  - Khung toàn trang `/messages` (`MessagesView`) dùng `min-h-0` + `100dvh` trừ đúng chiều cao `AppTopBar` (kể cả `border-b`) và padding `<main>` ở từng breakpoint — **cấm ép cứng `min-h-[540px]`** gây thanh cuộn dọc ngoài trên màn hình Laptop scale `125%–150%`.
+  - Thang `z-index` 5 tầng: `z-30` (sidebar/floating widget) → `z-40` (`AppTopBar`) → `z-50` (modal chuẩn) → `z-[60]` (dropdown/tooltip/confirm/lightbox/`EmojiPickerPopover` qua `createPortal` kèm kẹp biên `360px`) → `z-[70]` (overlay cuộc gọi). Tách `next/dynamic(..., { ssr: false })` cho modal/editor nặng; giữ state gõ phím cục bộ trong `ChatComposerWithMedia`.
+  - Cuộn khung tin nhắn bắt buộc qua `evaluateConversationAutoScroll` (`src/components/messages/scroll-position.ts`): reset khi `convId = null` và so sánh **cả `convId` lẫn DOM `container`** để bấm Quay lại (`<-`) rồi mở lại cùng đoạn chat luôn về đáy; khóa `loadOlderMessages` trước khi cuộn đáy lần đầu hoàn tất.
+- Dùng chung `useChatStore()` (`ChatUnreadContext` riêng cho badge chưa đọc) và `authFetch` (`src/lib/auth-client.ts`, cấm lưu token/PII vào `localStorage`/`sessionStorage` ngoài mốc `tomato_auth_at_freshness_v1`). Kiểm tra `getChatRamCacheEpoch()` sau mọi `await` nạp dữ liệu/media; khi đăng xuất hoặc thu hồi phiên hiện tại (`SecuritySessionsPanel`), gọi đủ `call.cleanupOnLogout()`, `chatStore.clearAllChatCache()`, `realtime.disconnectAll()`, `clearE2eeClientBootstrapState()`.
 
-## 3. Biểu Mẫu, A11y, Chống XSS & Quản Lý Bộ Nhớ
+## 3. Biểu Mẫu, A11y, Chống XSS & Giải Phóng Bộ Nhớ
 
-- Biểu mẫu có đủ 4 trạng thái (`Idle`, `Loading` khóa nút chống bấm đúp, `Success`, `Error` kèm đếm ngược khi `429`), gắn `<label>`, hỗ trợ bàn phím (`Tab`/`Enter`), lỗi dùng `role="alert"` / `aria-live="polite"`; `PasswordInput` cho phép paste và đúng `autocomplete`.
-- **Cấm `dangerouslySetInnerHTML`** và inline script vi phạm CSP Nonce. Lọc ký tự điều khiển & BiDi override qua `sanitizeChatPlaintext`, `sanitizeReplyTextExcerpt`, và kiểm tra emoji bằng `normalizeAndValidateSingleEmoji` (`Intl.Segmenter` tại `src/lib/chat/emoji.ts`).
-- Thu hồi ngay `blob:` URL (`URL.revokeObjectURL`, `revokeMediaObjectUrlByMessageId`, `revokeMediaObjectUrlsByConversationId`) khi đóng `ImageLightboxModal`, thu hồi tin hoặc rời hội thoại để chống rò RAM.
+- Biểu mẫu đủ 4 trạng thái (`Idle`, `Loading` khóa nút, `Success`, `Error` đếm ngược `429`), gắn `<label>`, hỗ trợ `Tab`/`Enter`/`Escape`, `role="alert"`; `PasswordInput` cho phép paste.
+- **Cấm `dangerouslySetInnerHTML`** và inline script. Lọc BiDi/control qua `sanitizeChatPlaintext`, `sanitizeReplyTextExcerpt`; kiểm emoji qua `normalizeAndValidateSingleEmoji` (`src/lib/chat/emoji.ts`).
+- Thu hồi cả `mediaObjectUrlsByMsgId` lẫn `localPreviewUrl` (`URL.revokeObjectURL`, `revokeThreadLocalPreviewUrls`, `revokeMediaObjectUrlsByConversationId`) khi đuổi LRU (`putLruConversationThreadCache`), gửi lỗi, xóa tin, từ chối hoặc chặn; gắn `AbortController` khi đổi chat/tìm kiếm và giải phóng `<canvas>` / `AudioContext`.
 
-## 4. Mã Hóa Đầu Cuối E2EE Phía Trình Duyệt (`src/lib/e2ee/`)
+## 4. Mã Hóa Đầu Cuối E2EE (`src/lib/e2ee/`)
 
-- Chỉ dùng **Web Crypto API gốc** (`window.crypto.subtle`), lưu khóa riêng `ECDH P-256` & `ECDSA P-256` trong IndexedDB (`src/lib/e2ee/keystore.ts`) với `extractable: false`.
-- Tin nhắn (`src/lib/e2ee/cipher.ts`): dùng `encryptDirectMessage`, `decryptDirectMessage`, `reEncryptEditedDirectMessage` (`AES-256-GCM`) kèm AAD bắt buộc từ `buildMessageAadString` (`conversationPublicId|senderPublicId|clientMsgId`) và chữ ký `buildMessageSignatureTranscript`; bọc khóa cho mọi thiết bị hoạt động cùng Khóa Đồng bộ (`is_sync_key`).
-- Mã PIN 6 số (`src/lib/e2ee/pin-backup.ts`): `createPinProtectedKeyBackup` dùng `PBKDF2-SHA256` (`MIN_PIN_PBKDF2_ITERATIONS = 600_000`) + `AES-256-GCM`, xóa JWK khóa riêng tạm trong RAM ngay sau khi import lại `extractable: false`.
-- Ảnh HD & Voice (`src/lib/e2ee/media-cipher.ts`): dùng `prepareHdImageForEncryption`, `validateVoiceBinaryInput`, `encryptMediaBinary` / `decryptMediaBinary` (kiểm tra `SHA-256` bản mã trước khi giải mã), upload thẳng bằng client upload token (`@vercel/blob/client` hoặc route local).
+- Dùng **Web Crypto API gốc**, lưu khóa riêng `ECDH`/`ECDSA P-256` với `extractable: false` trong `src/lib/e2ee/keystore.ts` (tái sử dụng 1 `IDBDatabase` + read-through `memoryKeystore` và LRU khóa ECDSA, xóa qua `clearInMemoryKeystore()` / `clearCachedE2eeCryptoHelpers()` khi đăng xuất).
+- Tin nhắn (`cipher.ts`): `encryptDirectMessage`, `decryptDirectMessage`, `reEncryptEditedDirectMessage` (`AES-256-GCM`) kèm AAD `buildMessageAadString` + chữ ký `buildMessageSignatureTranscript`, bọc đủ thiết bị và `is_sync_key`.
+- Mã PIN (`pin-backup.ts`): `createPinProtectedKeyBackup` (`PBKDF2-SHA256` `MIN_PIN_PBKDF2_ITERATIONS = 600_000`), xóa JWK tạm trong RAM sau import. Media (`media-cipher.ts`): `prepareHdImageForEncryption`, `validateVoiceBinaryInput`, `encryptMediaBinary`/`decryptMediaBinary` (kiểm `SHA-256`).
 
 ## 5. Gọi Thoại & Video 1-1 WebRTC (`src/lib/webrtc/`, `src/components/calls/`)
 
-- Điều phối P2P `DTLS-SRTP` qua `PeerCallEngine` (`src/lib/webrtc/call-engine.ts`), `IncomingCallDialog`, `ActiveCallScreen`, `GlobalCallOverlay`: lấy `iceServers` từ `POST /api/v1/calls/ice-servers`, đệm ICE candidate trước khi có `remoteDescription`, gửi heartbeat mỗi 30s và kết thúc `keepalive` khi `pagehide`.
-- Dừng mọi track bằng `stopAllMediaStreamTracks` khi kết thúc/hủy cuộc gọi và chuyển lỗi quyền thiết bị sang tiếng Việt thân thiện bằng `mapMediaDeviceErrorToFriendlyVi`.
+- Điều phối `DTLS-SRTP` qua `PeerCallEngine` (`call-engine.ts`), `IncomingCallDialog`, `ActiveCallScreen`, `GlobalCallOverlay`: lấy `iceServers`, đệm ICE trước `remoteDescription`, heartbeat 30s, `keepalive` khi `pagehide`, dịch lỗi qua `mapMediaDeviceErrorToFriendlyVi`.
+- Khi tắt cam (`setCameraEnabled(false)`), gọi `sender.replaceTrack(null)` + `track.stop()` chỉ trên video track (giữ nguyên audio) kèm `recvonly` để tắt đèn LED phần cứng và chuyển đối phương về avatar. Sau mọi `await` trong `CallProvider`, kiểm `mountedRef` + `callAttemptSeqRef` để `stopAllMediaStreamTracks` nếu cuộc gọi đã hủy; đặt bộ đếm giây cục bộ trong `ActiveCallScreen` (dừng khi ẩn tab).

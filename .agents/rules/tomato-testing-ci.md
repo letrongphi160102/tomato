@@ -9,11 +9,12 @@ description: 'Quy chuẩn kiểm thử Vitest (Unit, Security BOLA 5 nhân vật
 ## 1. Kiến Trúc 3 Tầng Kiểm Thử Vitest (`vitest.config.mts`, `package.json`)
 
 - **Unit & Security Tests (`npm test` → `tests/unit` + `tests/security`)**:
+  - Chạy với `pool: 'threads'` trong `vitest.config.mts` để tối ưu thời gian khởi tạo worker (luôn giữ `clearMocks: true`, `restoreMocks: true`).
   - Bắt buộc chạy xanh **100% độc lập, không cần Docker, không gọi mạng ngoài và không phụ thuộc `.env.local`**.
   - Luôn thay thế dịch vụ ngoài bằng các adapter bộ nhớ (`InMemoryRealtimeAdapter`, `InMemoryMediaStorageAdapter`, `StunFallbackTurnProvider`, `InMemoryCallDeclineCooldownStore`) thông qua các helper `set*ForTesting` và khôi phục sạch trong `afterEach` bằng `reset*ForTesting` kèm `clearMemoryKeystoreForTesting()`.
 - **Integration Tests (`npm run test:integration` → `tests/integration`)**:
   - Kiểm thử vòng đời đầu-cuối trên PostgreSQL 16 + Redis 7 + Mailpit thật (Docker local hoặc service containers trên CI).
-  - Nạp `.env.local` an toàn không ghi đè biến môi trường sẵn có qua `tests/setup/load-local-env.ts`, ánh xạ `server-only` qua `tests/setup/server-only-stub.ts`, và luôn đóng kết nối trong `afterAll` bằng `closeDatabasePool()` / `closeRedisClient()`.
+  - Nạp `.env.local` an toàn không ghi đè biến môi trường sẵn có qua `tests/setup/load-local-env.ts`, ánh xạ `server-only` qua `tests/setup/server-only-stub.ts`, khởi tạo tài khoản mẫu (`seedAndLoginUser`) tuần tự để tránh nghẽn kết nối pool ban đầu khi chạy song song nhiều file, và luôn đóng kết nối trong `afterAll` bằng `closeDatabasePool()` / `closeRedisClient()`.
 
 ## 2. Ma Trận Bảo Mật BOLA 5 Nhân Vật, RLS `NOBYPASSRLS` & Guard CSP
 
@@ -27,6 +28,7 @@ description: 'Quy chuẩn kiểm thử Vitest (Unit, Security BOLA 5 nhân vật
   - Chống CSRF 3 lớp (`CSRF_HEADER_NAME` + `Origin`), chống dò email/timing, phát hiện reuse Refresh Token thu hồi toàn bộ `family_id`.
   - Cưỡng chế giới hạn Server-side: từ chối sửa/thu hồi ở giây thứ `301`, chặn tin thứ `4` và chặn gửi media/call trong hội thoại `pending`, cưỡng chế đối xứng Active Status & Read Receipts.
   - Bài gác `tests/security/zod-jitless-csp-guard.test.ts`: mọi file dùng `z` trong `src/` phải nạp `import '@/core/validation/zod-config';` trước `import { z } from 'zod';`.
+  - Bài gác chống React `#441` (`tests/security/m6-product-upgrade-security.test.ts`): **cấm export hàm tiện ích viết thường** (`export function foo...`) trực tiếp từ file có `'use client'` — luôn tách các hàm thuần sang module `.ts` riêng không gắn `'use client'`.
 - **Kiểm chứng PostgreSQL RLS thực chiến**: Mọi bảng bật RLS phải có integration test thực thi dưới role PostgreSQL không có quyền `BYPASSRLS` (`NOBYPASSRLS`, theo mẫu `tests/integration/chat-rls.integration.test.ts` và `tests/integration/phase2-m10..m13-*-rls.integration.test.ts`) chứng minh chính PostgreSQL chặn đọc/ghi chéo user.
 
 ## 3. An Toàn Gitleaks, Phụ Thuộc & GitHub Actions CI (`.github/workflows/ci.yml`)

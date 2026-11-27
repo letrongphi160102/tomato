@@ -406,6 +406,27 @@ export const CALL_RATE_LIMITS = Object.freeze({
   }),
 } satisfies Record<string, RateLimitRule>);
 
+/**
+ * Các ngưỡng Rate Limit chuẩn hóa cho phân hệ Trò chơi & Bảng xếp hạng Sudoku.
+ */
+export const GAME_RATE_LIMITS = Object.freeze({
+  startSudokuByUser: Object.freeze({
+    limit: 30,
+    windowSeconds: 5 * 60,
+    strategy: 'sliding_window',
+  }),
+  completeSudokuByUser: Object.freeze({
+    limit: 20,
+    windowSeconds: 5 * 60,
+    strategy: 'sliding_window',
+  }),
+  readSudokuRecordsByUser: Object.freeze({
+    limit: 60,
+    windowSeconds: 60,
+    strategy: 'sliding_window',
+  }),
+} satisfies Record<string, RateLimitRule>);
+
 // Lua script nguyên tử cho Fixed Window: kiểm tra giới hạn, chỉ tăng bộ đếm khi còn hạn mức
 // và gán PEXPIRE ngay trong cùng 1 thao tác để tránh race condition hoặc key không có TTL.
 const FIXED_WINDOW_LUA = `

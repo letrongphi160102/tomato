@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, Loader2, LogOut, MessageCircle, Settings } from 'lucide-react';
+import { Gamepad2, Home, Loader2, LogOut, MessageCircle, Settings } from 'lucide-react';
 
 import { useCall } from '@/components/calls/call-context';
 import { useChatLogoutActions, useChatUnreadCount } from '@/components/messages/chat-store-context';
@@ -27,6 +27,7 @@ export function AppLeftSidebar() {
 
   const isHomeActive = pathname === '/';
   const isMessagesActive = pathname.startsWith('/messages');
+  const isGamesActive = pathname.startsWith('/games');
   const isSettingsActive = pathname.startsWith('/settings');
 
   async function handleLogout() {
@@ -117,6 +118,25 @@ export function AppLeftSidebar() {
           </Link>
 
           <Link
+            href="/games"
+            aria-current={isGamesActive ? 'page' : undefined}
+            onClick={(event) => event.currentTarget.blur()}
+            className={cn(
+              'flex h-11 items-center rounded-xl transition-colors',
+              isGamesActive
+                ? 'bg-primary/10 font-semibold text-primary'
+                : 'font-medium text-foreground/85 hover:bg-muted hover:text-foreground',
+            )}
+          >
+            <span className="flex size-12 shrink-0 items-center justify-center">
+              <Gamepad2 className="size-5" aria-hidden="true" />
+            </span>
+            <span className="truncate pr-3 text-sm whitespace-nowrap opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+              Trò chơi
+            </span>
+          </Link>
+
+          <Link
             href="/settings/privacy"
             aria-current={isSettingsActive ? 'page' : undefined}
             onClick={(event) => event.currentTarget.blur()}
@@ -203,6 +223,18 @@ export function AppLeftSidebar() {
             ) : null}
           </span>
           <span>Tin nhắn</span>
+        </Link>
+
+        <Link
+          href="/games"
+          aria-current={isGamesActive ? 'page' : undefined}
+          className={cn(
+            'flex flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[11px] font-medium transition-colors',
+            isGamesActive ? 'text-primary' : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          <Gamepad2 className="size-5" aria-hidden="true" />
+          <span>Trò chơi</span>
         </Link>
 
         <Link

@@ -546,9 +546,11 @@ describe('Unit: Singleton E2EE Bootstrap (Chống spam 429), Gom cụm bong bón
     ).toBe(true);
 
     // 6. Kiểm tra phạm vi hiển thị của Floating Mini-Chat theo pathname:
-    //    CHỈ hiện ở `/` và `/u/[handle]`, ẩn hoàn toàn ở `/messages` và `/settings/*`.
+    //    Hiện ở `/`, `/u/[handle]`, `/games` và `/games/sudoku`; ẩn hoàn toàn ở `/messages` và `/settings/*`.
     expect(shouldRenderFloatingMessagesWidget('/')).toBe(true);
     expect(shouldRenderFloatingMessagesWidget('/u/letrongphi02')).toBe(true);
+    expect(shouldRenderFloatingMessagesWidget('/games')).toBe(true);
+    expect(shouldRenderFloatingMessagesWidget('/games/sudoku')).toBe(true);
     expect(shouldRenderFloatingMessagesWidget('/messages')).toBe(false);
     expect(shouldRenderFloatingMessagesWidget('/settings')).toBe(false);
     expect(shouldRenderFloatingMessagesWidget('/settings/privacy')).toBe(false);

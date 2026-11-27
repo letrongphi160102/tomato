@@ -8,34 +8,35 @@ description: 'Quy chuẩn bảo mật Backend OWASP 2025, Proxy/CSP Headers, Aut
 
 ## 1. Runtime, Next.js 16 Proxy & Security Headers
 
-- Route Handlers dùng gói native/socket (`@node-rs/argon2`, `sharp`, `nodemailer`, `pg`) bắt buộc khai báo `export const runtime = 'nodejs'` (cấm Edge Runtime) và giữ `serverExternalPackages` trong `next.config.ts`.
-- Cổng HTTP đặt tại `src/proxy.ts` (`export function proxy`) kết hợp `src/core/security/headers.ts` (`generateCspNonce`, `buildSecurityHeaders`, `buildContentSecurityPolicy`):
+- Route Handlers dùng gói native/socket (`@node-rs/argon2`, `sharp`, `nodemailer`, `pg`) bắt buộc khai báo `export const runtime = 'nodejs'` (cấm Edge) và giữ `serverExternalPackages` trong `next.config.ts`.
+- Cổng HTTP tại `src/proxy.ts` (`export function proxy`) + `src/core/security/headers.ts` (`generateCspNonce`, `buildSecurityHeaders`, `buildContentSecurityPolicy`):
   - Production dùng CSP `'nonce-...'` + `'strict-dynamic'`, **cấm `'unsafe-eval'`**, tách `style-src-elem`/`style-src-attr`, gắn `Permissions-Policy: camera=(self), microphone=(self), geolocation=()` và `API_CSP_VALUE` cho `/api/*`.
-  - Trang `/reset-password` bắt buộc ép `Referrer-Policy: no-referrer` + `Cache-Control: no-store, max-age=0`; tham số `?next=` phải lọc qua `sanitizeRedirectPath()` (`src/lib/auth-client.ts`).
+  - `/reset-password` ép `Referrer-Policy: no-referrer` + `Cache-Control: no-store, max-age=0`; `?next=` phải lọc qua `sanitizeRedirectPath()` (`src/lib/auth-client.ts`).
 
 ## 2. Cookie `__Host-`, CSRF 3 Lớp & Hợp Đồng HTTP
 
-- Quản lý cookie qua `src/core/security/cookies.ts` (`getCookieNames`, `setAuthCookies`, `clearAuthCookies`, `setPasswordChangeTicketCookie`): Production HTTPS dùng `__Host-tomato_at`, `__Host-tomato_rt`, `__Host-tomato_csrf`, `__Host-tomato_pwd_ticket` (`Secure; Path=/; SameSite=Lax`, **cấm đặt `domain`**); `development`/`test` tự bỏ tiền tố `__Host-`.
-- Mọi request `POST`/`PUT`/`PATCH`/`DELETE` bắt buộc gọi `enforceCsrfAndOrigin(request)` (`src/core/security/csrf.ts`): kiểm tra `Sec-Fetch-Site`, `Origin` khớp `ALLOWED_ORIGINS`, và Double-Submit `x-csrf-token` bằng `timingSafeEqualUtf8` (`403 CSRF_VALIDATION_FAILED` khi sai).
-- Trả response qua `createAuthJsonResponse`, `createErrorResponse`, `formatZodErrorDetails` (`src/core/security/http-response.ts`) kèm `Cache-Control: no-store, max-age=0`, không echo lại mật khẩu/OTP lỗi; đọc JSON body giới hạn byte theo stream (`parseAuthJsonBody` tại `src/app/api/v1/auth/_utils.ts`).
+- Quản lý cookie qua `src/core/security/cookies.ts` (`getCookieNames`, `setAuthCookies`, `clearAuthCookies`, `setPasswordChangeTicketCookie`): Production dùng `__Host-tomato_at`, `__Host-tomato_rt`, `__Host-tomato_csrf`, `__Host-tomato_pwd_ticket` (`Secure; Path=/; SameSite=Lax`, **cấm đặt `domain`**); `development`/`test` bỏ tiền tố `__Host-`.
+- Mọi `POST`/`PUT`/`PATCH`/`DELETE` bắt buộc gọi `enforceCsrfAndOrigin(request)` (`src/core/security/csrf.ts`): kiểm tra `Sec-Fetch-Site`, `Origin` khớp `ALLOWED_ORIGINS`, và `x-csrf-token` qua `timingSafeEqualUtf8` (`403 CSRF_VALIDATION_FAILED`).
+- Trả response qua `createAuthJsonResponse`, `createErrorResponse`, `formatZodErrorDetails` (`src/core/security/http-response.ts`) kèm `Cache-Control: no-store, max-age=0`, không echo mật khẩu/OTP lỗi; đọc body giới hạn byte qua `parseAuthJsonBody` (`src/app/api/v1/auth/_utils.ts`).
 
 ## 3. Validation, Chống Mass Assignment & Bảo Vệ `UUIDv7` (BOPLA)
 
-- Đặt `import '@/core/validation/zod-config';` trước `import { z } from 'zod';`; schema đầu vào API bắt buộc dùng `.strict()`; biến môi trường đọc qua `getEnv()` (`src/core/config/env.ts`).
-- Định danh trên URL/body chỉ nhận UUIDv4 (`PUBLIC_ID_UUID_V4_REGEX`, `chatPublicIdParamSchema`) hoặc `@handle` (`src/modules/profile/handle.ts`), từ chối UUIDv7 nội bộ. Chỉ trả DTO allowlist (`toPublicUserProfile`, `toUserProfileDto`...) — cấm trả trực tiếp `UserRow`, `SessionRow` hay `AuthenticatedPrincipal`.
+- Đặt `import '@/core/validation/zod-config';` trước `import { z } from 'zod';`; schema đầu vào dùng `.strict()`; biến môi trường qua `getEnv()` (`src/core/config/env.ts`).
+- URL/body chỉ nhận UUIDv4 (`PUBLIC_ID_UUID_V4_REGEX`, `chatPublicIdParamSchema`) hoặc `@handle` (`src/modules/profile/handle.ts`), từ chối UUIDv7 nội bộ. Chỉ trả DTO allowlist (`toPublicUserProfile`, `toUserProfileDto`...) — cấm trả thẳng `UserRow`, `SessionRow`, `AuthenticatedPrincipal`.
 
-## 4. ReBAC Policy Tập Trung & Cưỡng Chế Nghiệp Vụ Server-Side (BOLA)
+## 4. ReBAC Policy, Nghiệp Vụ Server-Side & Tối Ưu Truy Vấn
 
-- Lấy `AuthenticatedPrincipal` từ Access Token đã xác minh (không tin `user_id` từ client). Chạy `getRateLimiter()`, `LoginBruteForceGuard`, `PinResetOtpStore` (`src/core/redis/`) **trước** truy vấn DB nặng hoặc Argon2id.
-- Mọi truy cập phải qua Policy tập trung (`auth`, `profile`, `social`, `notification`, `presence`, `chat`, `call` `.policy.ts` và `src/core/realtime/policy.ts`) theo nguyên tắc **Deny-by-default, fail-closed**: kiểm tra user `active`, thành viên tài nguyên và `isBidirectionallyBlocked`; trả **`404 NOT_FOUND` đồng nhất** (`assertSocialAuthorized`, `assertChatAuthorized`, `assertCallAuthorized`, `assertCanReadProfile`, `assertCanRevokeSession`).
-- **Luật nghiệp vụ cưỡng chế 100% ở Server**:
-  - Sửa (`text`, tối đa 5 lần) & Thu hồi tin nhắn chỉ trong **5 phút đầu (`300_000ms`)** theo giờ Server/PostgreSQL; thu hồi xóa `ciphertext = NULL`, `crypto_header = NULL`.
-  - Hội thoại `pending`: chỉ `text`, tối đa 3 tin, tối đa 5 người lạ/ngày, cấm media/gọi điện/ghim/thả cảm xúc/chuyển tiếp.
-  - Quyền riêng tư **Đối xứng**: `canViewTargetPresence` và `canExposeSymmetricReadReceipt`. Chặn user tự cắt follow/request 2 chiều, ẩn thông báo và ngắt ngay cuộc gọi đang diễn ra.
+- Lấy `AuthenticatedPrincipal` từ Access Token; chạy `getRateLimiter()`, `LoginBruteForceGuard`, `PinResetOtpStore` (`src/core/redis/`) **trước** DB nặng hoặc Argon2id.
+- Mọi truy cập qua `.policy.ts` tập trung (`auth`, `profile`, `social`, `notification`, `presence`, `chat`, `call`, `realtime`) theo **Deny-by-default**: kiểm tra user `active`, thành viên và `isBidirectionallyBlocked`; trả **`404 NOT_FOUND` đồng nhất** (`assertSocialAuthorized`, `assertChatAuthorized`, `assertCallAuthorized`, `assertCanReadProfile`, `assertCanRevokeSession`).
+- **Luật nghiệp vụ Server-side**: Sửa (`text`, ≤5 lần) & Thu hồi chỉ trong **5 phút (`300_000ms`)** giờ Server/PG (thu hồi xóa `ciphertext = NULL`, `crypto_header = NULL`); `pending` chỉ `text`, ≤3 tin, ≤5 người lạ/ngày, cấm media/gọi/ghim/cảm xúc/chuyển tiếp; cưỡng chế đối xứng `canViewTargetPresence`, `canExposeSymmetricReadReceipt`; Block cắt ngay follow/request 2 chiều, thông báo và cuộc gọi đang diễn ra.
+- **Chống N+1, Khóa `FOR UPDATE` & An toàn Subquery Drizzle**:
+  - Cấm lặp N+1 trong `runInRlsTx`; preview danh sách chat (`listConversationsForUser`) gộp bằng `DISTINCT ON (m.conversation_id)` giữ đủ `m.seq > cp.cleared_before_seq` và `NOT EXISTS message_user_deletions`.
+  - Trong transaction `FOR UPDATE` theo lô (`updateOwnPrivacySettings`), chỉ batch `INSERT ... ON CONFLICT`; đẩy việc đếm `GROUP BY recipient_id` (`countUnreadForRecipients`) và bắn Realtime ra **sau commit**.
+  - Trong câu `.select().from(users)` **không có `.innerJoin()`**, cấm dùng `${users.id}` bên trong subquery trên `blocks`/`follows` (Drizzle lược thành `"id"` trần bị cột `"id"` bảng con che khuất) — luôn truyền thẳng tham số `${targetUserId}` hoặc tên bảng tường minh.
 
 ## 5. Kênh Phụ (Realtime, Media, TURN) & Redaction Đa Tầng
 
-- **Realtime (`src/core/realtime/channel.ts`)**: `/api/v1/realtime/token` chỉ cấp quyền `subscribe` trên `buildUserRealtimeChannel(actor.user.publicId)` (`buildSubscribeOnlyCapability`, cấm `publish`); mọi sự kiện phát đi phải qua `assertRealtimePayloadSafe` (chặn `id`, `user_id`, `email`, `token`, `ciphertext`, `crypto_header`, `wrapped_keys`).
-- **Media (`src/core/media/avatar-pipeline.ts`, `src/core/storage/`)**: `processAvatarImage` kiểm magic bytes `file-type` (JPEG/PNG/WebP, cấm SVG), `AVATAR_MAX_INPUT_PIXELS = 25_000_000`, `sharp` nén WebP 512×512 xóa sạch EXIF/GPS. Đính kèm chat lưu bản mã trên `MediaStorageProvider`, kiểm tra thành viên + chưa thu hồi khi tải, xóa blob khi thu hồi.
-- **TURN (`src/core/webrtc/turn-credential-provider.ts`)**: `MeteredTurnCredentialProvider` giữ kín `METERED_DOMAIN`, `METERED_SECRET_KEY`, `METERED_TURN_API_KEY` ở Server (TTL ≤ 900s, fallback `StunFallbackTurnProvider`), lọc qua `sanitizeIceServers`, cấm log `error.message` chứa URL mang key.
-- **Redaction**: Khi thêm trường nhạy cảm mới, cập nhật đồng bộ `SENSITIVE_KEYS` (`src/core/logger/index.ts`), `SENSITIVE_KEY_PATTERN` / `scrubSentryEvent` (`src/core/monitoring/sentry-scrub.ts`) và `AuditLogService` (`src/core/security/audit-log.service.ts`). Chỉ gửi lỗi `5xx` lên Sentry.
+- **Realtime (`src/core/realtime/channel.ts`)**: `/api/v1/realtime/token` chỉ cấp `subscribe` trên `buildUserRealtimeChannel(actor.user.publicId)` (`buildSubscribeOnlyCapability`); mọi sự kiện phát qua `assertRealtimePayloadSafe` (chặn `id`, `user_id`, `email`, `token`, `ciphertext`, `crypto_header`, `wrapped_keys`).
+- **Media (`src/core/media/avatar-pipeline.ts`, `src/core/storage/`)**: `processAvatarImage` kiểm magic bytes `file-type` (JPEG/PNG/WebP, cấm SVG), `AVATAR_MAX_INPUT_PIXELS = 25_000_000`, `sharp` nén WebP 512×512 xóa EXIF/GPS; đính kèm chat lưu bản mã, xóa blob khi thu hồi.
+- **TURN (`src/core/webrtc/turn-credential-provider.ts`)**: `MeteredTurnCredentialProvider` giữ kín secret ở Server (TTL ≤900s, fallback `StunFallbackTurnProvider`), lọc `sanitizeIceServers`, cấm log URL chứa key.
+- **Redaction**: Đồng bộ trường nhạy cảm ở `SENSITIVE_KEYS` (`src/core/logger/index.ts`), `SENSITIVE_KEY_PATTERN` / `scrubSentryEvent` (`src/core/monitoring/sentry-scrub.ts`) và `AuditLogService`. Chỉ gửi lỗi `5xx` lên Sentry.

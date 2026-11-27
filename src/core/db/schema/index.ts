@@ -13,6 +13,8 @@ export * from './message-user-deletions';
 export * from './messages';
 export * from './notifications';
 export * from './sessions';
+export * from './sudoku-games';
+export * from './sudoku-records';
 export * from './user-e2ee-devices';
 export * from './user-e2ee-key-backups';
 export * from './user-handle-history';
