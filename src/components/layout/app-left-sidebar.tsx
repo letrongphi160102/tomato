@@ -63,7 +63,7 @@ export function AppLeftSidebar() {
             document.activeElement.blur();
           }
         }}
-        className="group fixed left-0 top-14 z-30 hidden h-[calc(100vh-3.5rem)] w-[72px] flex-col justify-between overflow-hidden border-r bg-background/95 px-3 py-4 backdrop-blur transition-[width,box-shadow] duration-200 ease-out hover:w-[232px] hover:shadow-xl md:flex"
+        className="group fixed left-0 top-14 z-30 hidden h-[calc(100vh-3.5rem)] w-[72px] flex-col justify-between overflow-hidden border-r bg-background/92 px-3 py-4 backdrop-blur-md transition-[width,box-shadow] duration-200 ease-out hover:w-[232px] hover:shadow-xl md:flex"
       >
         <nav aria-label="Menu điều hướng" className="flex flex-col gap-1.5">
           <Link
@@ -184,7 +184,7 @@ export function AppLeftSidebar() {
       {/* Mobile Bottom Navigation Bar (Thân thiện cảm ứng cho màn hình < md) */}
       <nav
         aria-label="Điều hướng di động"
-        className="fixed inset-x-0 bottom-0 z-30 flex h-14 items-center justify-around border-t bg-background/95 px-2 backdrop-blur md:hidden"
+        className="fixed inset-x-0 bottom-0 z-30 flex h-14 items-center justify-around border-t bg-background/92 px-2 backdrop-blur-md md:hidden"
       >
         <Link
           href="/"

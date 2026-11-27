@@ -66,7 +66,7 @@ export function AccountOverviewCard({ user, avatarUrl = null }: AccountOverviewC
               </div>
             </div>
 
-            <span className="inline-flex w-fit items-center gap-1.5 rounded-full border border-emerald-600/30 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800">
+            <span className="inline-flex w-fit items-center gap-1.5 rounded-full border border-emerald-600/30 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 dark:border-emerald-500/35 dark:bg-emerald-950/50 dark:text-emerald-300">
               <CheckCircle2 className="size-3.5" aria-hidden="true" />
               {formatVietnameseAccountStatus(user.status)}
             </span>
@@ -89,7 +89,7 @@ export function AccountOverviewCard({ user, avatarUrl = null }: AccountOverviewC
             </div>
             <div className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <dt className="text-sm text-muted-foreground">Trạng thái tài khoản</dt>
-              <dd className="text-sm font-medium text-emerald-700">
+              <dd className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
                 {formatVietnameseAccountStatus(user.status)}
               </dd>
             </div>

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { KeyRound, Lock } from 'lucide-react';
+import { KeyRound, Lock, Monitor } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 
@@ -18,6 +18,12 @@ const SETTINGS_NAV_ITEMS = [
     label: 'Mật khẩu & Bảo mật',
     description: 'Đổi mật khẩu và quản lý thiết bị đăng nhập',
     icon: KeyRound,
+  },
+  {
+    href: '/settings/display',
+    label: 'Giao diện',
+    description: 'Chế độ hiển thị Sáng, Tối hoặc Tự động theo thiết bị',
+    icon: Monitor,
   },
 ] as const;
 

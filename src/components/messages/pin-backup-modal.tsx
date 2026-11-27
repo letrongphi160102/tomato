@@ -838,7 +838,7 @@ export function PinBackupModal({
             ) : null}
 
             {successMessage ? (
-              <p className="flex items-center gap-1.5 text-xs font-medium text-emerald-600">
+              <p className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
                 <CheckCircle2 className="size-4" aria-hidden="true" />
                 <span>{successMessage}</span>
               </p>

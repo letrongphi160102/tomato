@@ -350,9 +350,12 @@ export function LoginForm({ nextPath, turnstileSiteKey, cspNonce }: LoginFormPro
         </div>
 
         {requireCaptcha ? (
-          <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/60 p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
-              <ShieldAlert className="size-4 shrink-0 text-amber-700" aria-hidden="true" />
+          <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-500/35 dark:bg-amber-950/40">
+            <div className="flex items-center gap-2 text-xs font-medium text-amber-900 dark:text-amber-200">
+              <ShieldAlert
+                className="size-4 shrink-0 text-amber-700 dark:text-amber-400"
+                aria-hidden="true"
+              />
               <span>Vui lòng hoàn tất xác nhận bảo mật để tiếp tục đăng nhập.</span>
             </div>
             <TurnstileWidget

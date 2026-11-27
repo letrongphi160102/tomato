@@ -520,12 +520,17 @@ describe('Security M6: Server-Enforced 2-Step Password Change, Ticket Family Bin
       status: 'active' as const,
     };
 
-    const homeHtml = renderToStaticMarkup(
+    const homeHtmlDefault = renderToStaticMarkup(
       React.createElement(AuthenticatedHome, { user: sampleUser }),
     );
-    expect(homeHtml).toContain('Tính năng này sắp có!');
-    expect(homeHtml).not.toContain('Chào mừng trở lại');
-    expect(homeHtml).not.toContain('Lối tắt tài khoản');
+    expect(homeHtmlDefault).not.toContain('Chào mừng trở lại');
+    expect(homeHtmlDefault).not.toContain('Lối tắt tài khoản');
+    expect(homeHtmlDefault).not.toContain('(active)');
+
+    const homeHtmlNone = renderToStaticMarkup(
+      React.createElement(AuthenticatedHome, { user: sampleUser, homeThemeOverride: 'none' }),
+    );
+    expect(homeHtmlNone).toContain('Tính năng này sắp có!');
 
     const accountHtml = renderToStaticMarkup(
       React.createElement(AccountOverviewCard, { user: sampleUser }),

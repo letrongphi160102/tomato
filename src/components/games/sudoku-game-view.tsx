@@ -755,9 +755,9 @@ export function SudokuGameView() {
         </div>
 
         <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,468px)_minmax(0,1fr)]">
-          {/* Lưới 9x9 chuẩn cổ điển (tham chiếu Ảnh 2) */}
+          {/* Lưới 9x9 chuẩn cổ điển (tham chiếu Ảnh 2, hỗ trợ đầy đủ cả Sáng & Tối) */}
           <div className="mx-auto w-full max-w-[468px]">
-            <div className="relative aspect-square w-full select-none overflow-hidden border-2 border-[#344861] bg-white shadow-xs">
+            <div className="relative aspect-square w-full select-none overflow-hidden border-2 border-[#344861] bg-white shadow-xs dark:border-slate-500 dark:bg-slate-900">
               <div
                 role="grid"
                 aria-label="Lưới Sudoku 9 nhân 9"
@@ -800,28 +800,28 @@ export function SudokuGameView() {
                       disabled={boardStatus === 'loading' || isPaused}
                       onClick={() => setSelectedCell(idx)}
                       className={cn(
-                        'relative flex h-full w-full items-center justify-center p-0 transition-colors focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0072e3]',
+                        'relative flex h-full w-full items-center justify-center p-0 transition-colors focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#0072e3] dark:focus-visible:ring-sky-400',
                         col === 2 || col === 5
-                          ? 'border-r-2 border-r-[#344861]'
+                          ? 'border-r-2 border-r-[#344861] dark:border-r-slate-500'
                           : col < 8
-                            ? 'border-r border-r-[#cbd5e1]'
+                            ? 'border-r border-r-[#cbd5e1] dark:border-r-slate-700/80'
                             : '',
                         row === 2 || row === 5
-                          ? 'border-b-2 border-b-[#344861]'
+                          ? 'border-b-2 border-b-[#344861] dark:border-b-slate-500'
                           : row < 8
-                            ? 'border-b border-b-[#cbd5e1]'
+                            ? 'border-b border-b-[#cbd5e1] dark:border-b-slate-700/80'
                             : '',
                         isWrong
                           ? isSelected
-                            ? 'bg-[#fecaca]'
-                            : 'bg-[#fee2e2]'
+                            ? 'bg-[#fecaca] dark:bg-red-900/75'
+                            : 'bg-[#fee2e2] dark:bg-red-950/65'
                           : isSelected
-                            ? 'bg-[#bbdefb]'
+                            ? 'bg-[#bbdefb] dark:bg-sky-900/75'
                             : isSameNumber
-                              ? 'bg-[#c3d7ea]'
+                              ? 'bg-[#c3d7ea] dark:bg-sky-950/85'
                               : isPeer
-                                ? 'bg-[#e2ebf3]'
-                                : 'bg-white hover:bg-slate-50',
+                                ? 'bg-[#e2ebf3] dark:bg-slate-800/90'
+                                : 'bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800/60',
                       )}
                     >
                       {cellVal !== 0 ? (
@@ -829,10 +829,10 @@ export function SudokuGameView() {
                           className={cn(
                             'text-xl leading-none sm:text-[26px]',
                             isGiven
-                              ? 'font-medium text-[#344861]'
+                              ? 'font-medium text-[#344861] dark:text-slate-100'
                               : isWrong
-                                ? 'font-semibold text-[#dc2626]'
-                                : 'font-medium text-[#0072e3]',
+                                ? 'font-semibold text-[#dc2626] dark:text-red-400'
+                                : 'font-medium text-[#0072e3] dark:text-sky-400',
                           )}
                         >
                           {cellVal}
@@ -852,8 +852,8 @@ export function SudokuGameView() {
                                 className={cn(
                                   'flex items-center justify-center text-[9px] leading-none sm:text-[10px]',
                                   isHighlightedNote
-                                    ? 'font-bold text-[#0072e3]'
-                                    : 'font-medium text-[#64748b]',
+                                    ? 'font-bold text-[#0072e3] dark:text-sky-300'
+                                    : 'font-medium text-[#64748b] dark:text-slate-400',
                                 )}
                               >
                                 {shown ? noteDigit : ''}
@@ -871,10 +871,10 @@ export function SudokuGameView() {
               {boardStatus === 'loading' ? (
                 <div
                   role="status"
-                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2.5 bg-white/90 backdrop-blur-[1px]"
+                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2.5 bg-white/90 backdrop-blur-[1px] dark:bg-slate-950/90"
                 >
                   <Loader2 className="size-7 animate-spin text-primary" aria-hidden="true" />
-                  <p className="text-sm font-medium text-slate-700">
+                  <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
                     Đang tạo bảng Sudoku ({activeDifficultyMeta.labelVi})...
                   </p>
                 </div>
@@ -884,10 +884,10 @@ export function SudokuGameView() {
               {boardStatus === 'error' ? (
                 <div
                   role="alert"
-                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center"
+                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center dark:bg-slate-950/95"
                 >
                   <XCircle className="size-9 text-destructive" aria-hidden="true" />
-                  <p className="text-sm font-medium text-slate-800">
+                  <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
                     {boardErrorMessage ?? 'Không thể khởi tạo bảng Sudoku.'}
                   </p>
                   <Button
@@ -902,11 +902,13 @@ export function SudokuGameView() {
 
               {/* Lớp phủ Tạm dừng (ẩn toàn bộ chữ số chống gian lận thời gian) */}
               {boardStatus === 'playing' && isPaused ? (
-                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center backdrop-blur-xs">
-                  <Pause className="size-9 text-[#344861]" aria-hidden="true" />
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center backdrop-blur-xs dark:bg-slate-950/95">
+                  <Pause className="size-9 text-[#344861] dark:text-slate-300" aria-hidden="true" />
                   <div className="space-y-1">
-                    <p className="text-base font-bold text-slate-900">Đang tạm dừng</p>
-                    <p className="text-xs text-slate-600">
+                    <p className="text-base font-bold text-slate-900 dark:text-slate-100">
+                      Đang tạm dừng
+                    </p>
+                    <p className="text-xs text-slate-600 dark:text-slate-400">
                       Bảng số tạm ẩn khi dừng đồng hồ để giữ công bằng cho kỉ lục.
                     </p>
                   </div>
@@ -921,12 +923,14 @@ export function SudokuGameView() {
               {boardStatus === 'lost' ? (
                 <div
                   role="alert"
-                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center backdrop-blur-xs"
+                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center backdrop-blur-xs dark:bg-slate-950/95"
                 >
                   <XCircle className="size-10 text-destructive" aria-hidden="true" />
                   <div className="space-y-1">
-                    <p className="text-lg font-bold text-slate-900">Đã quá 3 lỗi cho phép</p>
-                    <p className="text-sm text-slate-600">
+                    <p className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                      Đã quá 3 lỗi cho phép
+                    </p>
+                    <p className="text-sm text-slate-600 dark:text-slate-400">
                       Ván chơi ở mức {activeDifficultyMeta.labelVi} đã kết thúc. Hãy thử sức lại
                       nhé!
                     </p>
@@ -946,27 +950,32 @@ export function SudokuGameView() {
               {boardStatus === 'submitting' || boardStatus === 'won' ? (
                 <div
                   role="status"
-                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center backdrop-blur-xs"
+                  className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/95 p-6 text-center backdrop-blur-xs dark:bg-slate-950/95"
                 >
                   {boardStatus === 'submitting' ? (
                     <>
                       <Loader2 className="size-9 animate-spin text-primary" aria-hidden="true" />
-                      <p className="text-base font-semibold text-slate-900">
+                      <p className="text-base font-semibold text-slate-900 dark:text-slate-100">
                         Đang ghi nhận thành tích...
                       </p>
                     </>
                   ) : (
                     <>
-                      <CheckCircle2 className="size-11 text-emerald-600" aria-hidden="true" />
+                      <CheckCircle2
+                        className="size-11 text-emerald-600 dark:text-emerald-400"
+                        aria-hidden="true"
+                      />
                       <div className="space-y-1">
-                        <p className="text-lg font-bold text-slate-900">Hoàn thành xuất sắc!</p>
-                        <p className="text-sm text-slate-600">
+                        <p className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                          Hoàn thành xuất sắc!
+                        </p>
+                        <p className="text-sm text-slate-600 dark:text-slate-400">
                           Độ khó{' '}
-                          <span className="font-semibold text-slate-900">
+                          <span className="font-semibold text-slate-900 dark:text-slate-100">
                             {activeDifficultyMeta.labelVi}
                           </span>{' '}
                           · Thời gian{' '}
-                          <span className="font-mono font-semibold text-slate-900">
+                          <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
                             {formatSudokuDurationClock(
                               victorySummary?.elapsedSeconds ?? elapsedSeconds,
                             )}
@@ -976,16 +985,18 @@ export function SudokuGameView() {
                       </div>
 
                       {victorySummary?.isNewPersonalBest ? (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800 dark:bg-amber-950/70 dark:text-amber-300">
                           <Flame className="size-3.5" aria-hidden="true" />
                           <span>Kỉ lục cá nhân mới!</span>
                         </span>
                       ) : null}
 
                       {victorySummary?.rank ? (
-                        <p className="text-xs font-medium text-slate-600">
+                        <p className="text-xs font-medium text-slate-600 dark:text-slate-400">
                           Hạng hiện tại ở bảng {activeDifficultyMeta.labelVi}:{' '}
-                          <span className="font-bold text-slate-900">#{victorySummary.rank}</span>
+                          <span className="font-bold text-slate-900 dark:text-slate-100">
+                            #{victorySummary.rank}
+                          </span>
                         </p>
                       ) : null}
 
@@ -1258,11 +1269,11 @@ export function SudokuGameView() {
               {activeLeaderboard.items.map((entry) => {
                 const rankBadgeClass =
                   entry.rank === 1
-                    ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-300'
+                    ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-300 dark:bg-amber-950/70 dark:text-amber-300 dark:ring-amber-500/40'
                     : entry.rank === 2
-                      ? 'bg-slate-200 text-slate-800 ring-1 ring-slate-300'
+                      ? 'bg-slate-200 text-slate-800 ring-1 ring-slate-300 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-600'
                       : entry.rank === 3
-                        ? 'bg-orange-100 text-orange-800 ring-1 ring-orange-300'
+                        ? 'bg-orange-100 text-orange-800 ring-1 ring-orange-300 dark:bg-orange-950/70 dark:text-orange-300 dark:ring-orange-500/40'
                         : 'bg-muted text-muted-foreground';
 
                 return (

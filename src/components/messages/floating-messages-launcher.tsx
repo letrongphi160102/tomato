@@ -61,7 +61,7 @@ export function FloatingMessagesLauncher() {
             ? `Mở cửa sổ tin nhắn (${unreadMessagesCount} cuộc trò chuyện chưa đọc)`
             : 'Mở cửa sổ tin nhắn'
         }
-        className="flex items-center gap-2.5 rounded-full border bg-background px-4 py-2.5 text-sm font-semibold text-foreground shadow-lg transition-all hover:bg-muted/60 hover:shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex items-center gap-2.5 rounded-full border bg-background/95 px-4 py-2.5 text-sm font-semibold text-foreground shadow-lg backdrop-blur-md transition-all hover:bg-muted/80 hover:shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="relative inline-flex items-center justify-center">
           <MessageCircle className="size-5 text-foreground" aria-hidden="true" />

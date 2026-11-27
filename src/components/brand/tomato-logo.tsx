@@ -28,7 +28,11 @@ export function TomatoLogo({ size = 'sm', priority = false, className }: TomatoL
       priority={priority}
       unoptimized
       draggable={false}
-      className={cn('select-none object-contain', SIZE_CLASSES[size], className)}
+      className={cn(
+        'select-none object-contain dark:brightness-110',
+        SIZE_CLASSES[size],
+        className,
+      )}
     />
   );
 }

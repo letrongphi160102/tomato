@@ -243,7 +243,7 @@ export function ResetPasswordForm() {
     return (
       <Card className="w-full shadow-md">
         <CardHeader className="items-center text-center">
-          <div className="mb-2 flex size-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+          <div className="mb-2 flex size-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
             <CheckCircle2 className="size-6" aria-hidden="true" />
           </div>
           <CardTitle>Đặt lại mật khẩu thành công</CardTitle>
@@ -275,7 +275,7 @@ export function ResetPasswordForm() {
     return (
       <Card className="w-full shadow-md">
         <CardHeader className="items-center text-center">
-          <div className="mb-2 flex size-12 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+          <div className="mb-2 flex size-12 items-center justify-center rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300">
             <ShieldAlert className="size-6" aria-hidden="true" />
           </div>
           <CardTitle>Liên kết đặt lại mật khẩu không hợp lệ</CardTitle>

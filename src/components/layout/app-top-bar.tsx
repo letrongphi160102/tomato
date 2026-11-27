@@ -28,7 +28,7 @@ export function AppTopBar({ user, avatarUrl = null, handle }: AppTopBarProps) {
   const isOwnProfileActive = pathname === profilePath;
 
   return (
-    <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur">
+    <header className="sticky top-0 z-40 border-b bg-background/92 backdrop-blur-md">
       <div className="flex h-14 w-full items-center justify-between gap-3 px-4 sm:px-6">
         <div className="flex shrink-0 items-center">
           <Link

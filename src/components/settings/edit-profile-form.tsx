@@ -360,7 +360,7 @@ export function EditProfileForm({ initialProfile }: EditProfileFormProps) {
           {avatarSuccess ? (
             <div
               role="status"
-              className="flex items-center gap-2 rounded-lg border border-emerald-600/30 bg-emerald-50 px-3.5 py-2.5 text-sm text-emerald-800"
+              className="flex items-center gap-2 rounded-lg border border-emerald-600/30 bg-emerald-50 px-3.5 py-2.5 text-sm text-emerald-800 dark:border-emerald-500/35 dark:bg-emerald-950/45 dark:text-emerald-200"
             >
               <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
               <span>{avatarSuccess}</span>

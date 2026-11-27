@@ -545,10 +545,10 @@ export function SecuritySessionsPanel() {
                             </span>
                           ) : null}
                           {isOnline ? (
-                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-950/55 dark:text-emerald-300">
                               <span
                                 aria-hidden="true"
-                                className="size-1.5 rounded-full bg-emerald-600"
+                                className="size-1.5 rounded-full bg-emerald-600 dark:bg-emerald-400"
                               />
                               Đang hoạt động
                             </span>

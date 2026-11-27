@@ -257,7 +257,7 @@ export function VerifyEmailForm() {
     return (
       <Card className="w-full shadow-md">
         <CardHeader className="items-center text-center">
-          <div className="mb-2 flex size-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+          <div className="mb-2 flex size-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
             <MailCheck className="size-6" aria-hidden="true" />
           </div>
           <CardTitle>Xác minh email thành công</CardTitle>

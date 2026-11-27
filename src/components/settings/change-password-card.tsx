@@ -577,8 +577,11 @@ export function ChangePasswordCard({ onPasswordChanged }: ChangePasswordCardProp
           </div>
         ) : (
           <div className="space-y-5">
-            <div className="flex items-center gap-2 rounded-xl border border-emerald-600/30 bg-emerald-50/80 p-3.5 text-sm text-emerald-900">
-              <CheckCircle2 className="size-4 shrink-0 text-emerald-700" aria-hidden="true" />
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-600/30 bg-emerald-50/80 p-3.5 text-sm text-emerald-900 dark:border-emerald-500/35 dark:bg-emerald-950/45 dark:text-emerald-200">
+              <CheckCircle2
+                className="size-4 shrink-0 text-emerald-700 dark:text-emerald-400"
+                aria-hidden="true"
+              />
               <span>
                 Đã xác nhận email. Thời gian còn lại để cập nhật mật khẩu:{' '}
                 <strong className="font-mono">{formatCountdown(ticketRemainingSeconds)}</strong>

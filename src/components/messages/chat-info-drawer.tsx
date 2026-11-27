@@ -151,7 +151,10 @@ export const ChatInfoDrawer = React.memo(function ChatInfoDrawer({
 
         <div className="rounded-xl border bg-muted/30 p-3.5">
           <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-            <ShieldCheck className="size-4 text-emerald-600" aria-hidden="true" />
+            <ShieldCheck
+              className="size-4 text-emerald-600 dark:text-emerald-400"
+              aria-hidden="true"
+            />
             <span>Mã an toàn</span>
           </div>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
@@ -178,7 +181,10 @@ export const ChatInfoDrawer = React.memo(function ChatInfoDrawer({
               >
                 {copied ? (
                   <>
-                    <Check className="size-3.5 text-emerald-600" aria-hidden="true" />
+                    <Check
+                      className="size-3.5 text-emerald-600 dark:text-emerald-400"
+                      aria-hidden="true"
+                    />
                     <span>Đã sao chép mã an toàn</span>
                   </>
                 ) : (

@@ -168,6 +168,6 @@ export const config = {
     /*
      * Áp dụng cho toàn bộ trang web và API routes, bỏ qua tài nguyên tĩnh không cần chạy proxy.
      */
-    '/((?!_next/static|_next/image|favicon.ico|icon.png|apple-icon.png|images/|sitemap.xml|robots.txt).*)',
+    '/((?!_next/static|_next/image|favicon.ico|icon.png|apple-icon.png|images/|themes/|sitemap.xml|robots.txt).*)',
   ],
 };
